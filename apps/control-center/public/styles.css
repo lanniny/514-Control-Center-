@@ -4055,25 +4055,68 @@ input::placeholder {
 .context-menu {
   position: fixed;
   z-index: 320;
-  min-width: 180px;
+  min-width: 196px;
   padding: 5px;
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius-small, 10px);
+  border-radius: 12px;
   background: var(--surface);
   box-shadow: var(--shadow-menu);
+  transform-origin: top left;
+  animation: menu-in 120ms ease;
+}
+
+@keyframes menu-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96) translateY(-3px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .context-menu {
+    animation: none;
+  }
 }
 
 .context-menu button {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 9px;
   width: 100%;
-  padding: 6px 12px;
+  padding: 6px 12px 6px 9px;
   border: 0;
-  border-radius: 7px;
+  border-radius: 8px;
   background: transparent;
   color: var(--text);
   font-size: 12.5px;
   text-align: left;
   cursor: pointer;
+}
+
+.context-menu .menu-icon {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+  color: var(--text-soft);
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.9;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.context-menu button:hover:not(:disabled) .menu-icon,
+.context-menu button:focus-visible .menu-icon {
+  color: var(--rose);
+}
+
+.context-menu button:focus-visible {
+  outline: none;
+  background: var(--surface-strong);
 }
 
 .context-menu button:hover:not(:disabled) {
@@ -4117,21 +4160,78 @@ input::placeholder {
 }
 
 .pin-mark {
-  margin-right: 4px;
-  font-size: 10px;
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  margin-right: 5px;
+  color: var(--rose);
+  vertical-align: -1px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 /* 正在工作 / 置顶分区：与会话区同语言，块间以既有 rail-block 边界区隔 */
 .rail-block-working .pane-heading h2::before {
   content: "●";
+  display: inline-block;
   margin-right: 6px;
   color: var(--aqua);
   font-size: 8px;
   vertical-align: 2px;
+  animation: working-pulse 2.2s ease-in-out infinite;
+}
+
+@keyframes working-pulse {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rail-block-working .pane-heading h2::before {
+    animation: none;
+  }
 }
 
 .rail-block-pinned .pane-heading h2::before {
-  content: "📌";
-  margin-right: 5px;
-  font-size: 10px;
+  content: "";
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 6px;
+  background: var(--rose);
+  -webkit-mask: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5M7 4h10l-1.5 6L19 13v3H5v-3l3.5-3z"/></svg>') center / contain no-repeat;
+  mask: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="black" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17v5M7 4h10l-1.5 6L19 13v3H5v-3l3.5-3z"/></svg>') center / contain no-repeat;
+}
+
+/* 输入对话框：紧凑单字段形态 */
+.input-dialog {
+  width: min(400px, calc(100vw - 48px));
+}
+
+.input-dialog .dialog-body {
+  padding-top: 4px;
+}
+
+.input-dialog input {
+  width: 100%;
+  padding: 9px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--surface-muted);
+  color: var(--text);
+  font-size: 13px;
+}
+
+.input-dialog input:focus {
+  border-color: var(--rose);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--rose-soft);
 }

@@ -208,6 +208,12 @@ function cacheElements() {
     "pinned-run-list",
     "pinned-count",
     "context-menu",
+    "input-dialog",
+    "input-dialog-eyebrow",
+    "input-dialog-title",
+    "input-dialog-value",
+    "input-dialog-confirm",
+    "input-dialog-cancel",
     "task-model",
     "task-model-pick",
     "task-effort-pick",
@@ -1169,10 +1175,14 @@ function runRowMarkup(run, clickable = false) {
     </div>`;
 }
 
+function pinMarkup() {
+  return `<svg class="pin-mark" viewBox="0 0 24 24" aria-label="已置顶"><path d="${MENU_ICONS.pin}" /></svg>`;
+}
+
 function railRunMarkup(run) {
   return `
     <button class="rail-run-button${run.id === state.selectedRunId ? " is-selected" : ""}${run.unread ? " is-unread" : ""}" type="button" data-run-select="${escapeHtml(run.id)}">
-      <strong>${run.unread ? `<span class="unread-dot" aria-label="未读"></span>` : ""}${run.pinned ? `<span class="pin-mark" aria-label="已置顶">📌</span>` : ""}${escapeHtml(run.title)}</strong>
+      <strong>${run.unread ? `<span class="unread-dot" aria-label="未读"></span>` : ""}${run.pinned ? pinMarkup() : ""}${escapeHtml(run.title)}</strong>
       <span>${escapeHtml(runStatusText(run.status))}${run.teamName ? ` · ${escapeHtml(run.teamName)}` : ""} · ${escapeHtml(formatDate(run.updatedAt ?? run.createdAt))}</span>
     </button>`;
 }
@@ -1198,7 +1208,62 @@ function renderRuns() {
   renderSelectedRun();
 }
 
+// ===== 体系内输入对话框（替代原生 prompt，语言与 action-dialog 一致）=====
+function promptDialog({ eyebrow = "重命名", title, value = "", confirmLabel = "保存", placeholder = "" }) {
+  return new Promise((resolveDialog) => {
+    const dialog = elements["input-dialog"];
+    elements["input-dialog-eyebrow"].textContent = eyebrow;
+    elements["input-dialog-title"].textContent = title;
+    elements["input-dialog-confirm"].textContent = confirmLabel;
+    const input = elements["input-dialog-value"];
+    const form = byId("input-dialog-form");
+    const cancel = elements["input-dialog-cancel"];
+    input.value = value;
+    input.placeholder = placeholder;
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      form.removeEventListener("submit", onSubmit);
+      cancel.removeEventListener("click", onCancel);
+      dialog.removeEventListener("cancel", onEscape);
+      dialog.close();
+      resolveDialog(result);
+    };
+    const onSubmit = (event) => {
+      event.preventDefault();
+      finish(input.value.trim());
+    };
+    const onCancel = () => finish(null);
+    const onEscape = (event) => {
+      event.preventDefault(); // 关闭统一走 finish，避免 dialog 默认关闭与清理竞争
+      finish(null);
+    };
+    form.addEventListener("submit", onSubmit);
+    cancel.addEventListener("click", onCancel);
+    dialog.addEventListener("cancel", onEscape);
+    dialog.showModal();
+    input.select();
+  });
+}
+
 // ===== 右键菜单（项目 / 会话）=====
+// 菜单图标：24 viewBox 线性 path，与体系 icon 语言一致（12px 展示尺寸下保持简练）
+const MENU_ICONS = {
+  pin: "M12 17v5M7 4h10l-1.5 6L19 13v3H5v-3l3.5-3z",
+  rename: "M17 3l4 4L8 20l-5 1 1-5z",
+  archive: "M4 7h16M6 7l1 13h10l1-13M10 11h4",
+  eye: "M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12zM12 9.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5z",
+  folder: "M3 6h6l2 2h10v11H3z",
+  copy: "M9 9h11v11H9zM15 9V4H4v11h5",
+  id: "M4 7h16v10H4zM8 11h.01M12 11h4M8 14h8",
+  link: "M10 14a4 4 0 0 0 5.6.4l3-3a4 4 0 0 0-5.6-5.6l-1.2 1.2M14 10a4 4 0 0 0-5.6-.4l-3 3a4 4 0 0 0 5.6 5.6l1.2-1.2",
+  plus: "M12 5v14M5 12h14",
+  branch: "M7 5a2 2 0 1 0 0 .01M7 7v6m0 0a2.5 2.5 0 1 0 .01 0M17 5a2 2 0 1 0 .01 0M17 7c0 5-6 4-9 6",
+  window: "M4 5h16v14H4zM4 9h16M8 5v4",
+  remove: "M6 6l12 12M18 6L6 18",
+};
+
 let contextMenuCleanup = null;
 
 function hideContextMenu() {
@@ -1212,13 +1277,18 @@ function showContextMenu(items, x, y) {
     .map((item, index) =>
       item === "---"
         ? `<div class="menu-separator" role="separator"></div>`
-        : `<button type="button" role="menuitem" data-menu-index="${index}"${item.danger ? ' class="is-danger"' : ""}${item.disabled ? " disabled" : ""}>${escapeHtml(item.label)}</button>`,
+        : `<button type="button" role="menuitem" data-menu-index="${index}"${item.danger ? ' class="is-danger"' : ""}${item.disabled ? " disabled" : ""}>
+            <svg class="menu-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="${MENU_ICONS[item.icon] ?? MENU_ICONS.plus}" /></svg>
+            <span>${escapeHtml(item.label)}</span>
+          </button>`,
     )
     .join("");
   menu.hidden = false;
   const rect = menu.getBoundingClientRect();
   menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - rect.width - 8))}px`;
   menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - rect.height - 8))}px`;
+  const focusables = () => [...menu.querySelectorAll("[data-menu-index]:not(:disabled)")];
+  focusables()[0]?.focus();
   const onPick = (event) => {
     const button = event.target.closest("[data-menu-index]");
     if (!button || button.disabled) return;
@@ -1230,7 +1300,14 @@ function showContextMenu(items, x, y) {
     if (!menu.contains(event.target)) hideContextMenu();
   };
   const onKey = (event) => {
-    if (event.key === "Escape") hideContextMenu();
+    if (event.key === "Escape") return hideContextMenu();
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    const list = focusables();
+    if (!list.length) return;
+    event.preventDefault();
+    const current = list.indexOf(document.activeElement);
+    const next = event.key === "ArrowDown" ? (current + 1) % list.length : (current - 1 + list.length) % list.length;
+    list[next].focus();
   };
   menu.addEventListener("click", onPick);
   document.addEventListener("pointerdown", onDismiss, true);
@@ -1310,27 +1387,27 @@ async function continueRunInWorktree(run) {
   }
 }
 
-function renameRun(run) {
-  const next = window.prompt("重命名任务", run.title);
-  if (next === null) return;
+async function renameRun(run) {
+  const next = await promptDialog({ eyebrow: "会话", title: "重命名任务", value: run.title });
+  if (next === null || !next) return;
   void patchRunMeta(run.id, { title: next }, "已重命名");
 }
 
 function runContextItems(run) {
   return [
-    { label: run.pinned ? "取消置顶" : "置顶任务", action: () => void patchRunMeta(run.id, { pinned: !run.pinned }) },
-    { label: "重命名任务", action: () => renameRun(run) },
-    { label: "归档任务", action: () => void patchRunMeta(run.id, { archived: true }, "已归档（数据保留，仅从列表隐藏）") },
-    { label: run.unread ? "标记为已读" : "标记为未读", action: () => void patchRunMeta(run.id, { unread: !run.unread }) },
+    { icon: "pin", label: run.pinned ? "取消置顶" : "置顶任务", action: () => void patchRunMeta(run.id, { pinned: !run.pinned }) },
+    { icon: "rename", label: "重命名任务", action: () => void renameRun(run) },
+    { icon: "archive", label: "归档任务", action: () => void patchRunMeta(run.id, { archived: true }, "已归档（数据保留，仅从列表隐藏）") },
+    { icon: "eye", label: run.unread ? "标记为已读" : "标记为未读", action: () => void patchRunMeta(run.id, { unread: !run.unread }) },
     "---",
-    { label: "在资源管理器中打开", disabled: !run.cwd, action: () => void revealPath(run.cwd) },
-    { label: "复制工作目录", disabled: !run.cwd, action: () => void copyText(run.cwd, "工作目录") },
-    { label: "复制会话ID", action: () => void copyText(nativeSessionIdOf(run), "会话ID") },
-    { label: "复制深度链接", action: () => void copyText(runDeepLink(run), "深度链接") },
+    { icon: "folder", label: "在资源管理器中打开", disabled: !run.cwd, action: () => void revealPath(run.cwd) },
+    { icon: "copy", label: "复制工作目录", disabled: !run.cwd, action: () => void copyText(run.cwd, "工作目录") },
+    { icon: "id", label: "复制会话ID", action: () => void copyText(nativeSessionIdOf(run), "会话ID") },
+    { icon: "link", label: "复制深度链接", action: () => void copyText(runDeepLink(run), "深度链接") },
     "---",
-    { label: "在新任务中继续", action: () => continueRunInNewTask(run) },
-    { label: "在新工作树中继续", disabled: !run.cwd, action: () => void continueRunInWorktree(run) },
-    { label: "在新窗口中打开", action: () => window.open(runDeepLink(run), "_blank", "noopener") },
+    { icon: "plus", label: "在新任务中继续", action: () => continueRunInNewTask(run) },
+    { icon: "branch", label: "在新工作树中继续", disabled: !run.cwd, action: () => void continueRunInWorktree(run) },
+    { icon: "window", label: "在新窗口中打开", action: () => window.open(runDeepLink(run), "_blank", "noopener") },
   ];
 }
 
@@ -1366,17 +1443,19 @@ async function updateProjectPref(project, patch) {
 function projectContextItems(project) {
   const pref = projectPrefOf(project);
   return [
-    { label: pref.pinned ? "取消置顶" : "置顶项目", action: () => void updateProjectPref(project, { pinned: !pref.pinned }) },
-    { label: "在资源管理器中打开", disabled: !project.path, action: () => void revealPath(project.path) },
+    { icon: "pin", label: pref.pinned ? "取消置顶" : "置顶项目", action: () => void updateProjectPref(project, { pinned: !pref.pinned }) },
+    { icon: "folder", label: "在资源管理器中打开", disabled: !project.path, action: () => void revealPath(project.path) },
     {
+      icon: "rename",
       label: "重命名项目",
-      action: () => {
-        const next = window.prompt("重命名项目（仅影响侧栏显示）", pref.name || project.label);
+      action: async () => {
+        const next = await promptDialog({ eyebrow: "项目侧栏", title: "重命名项目（仅影响侧栏显示）", value: pref.name || project.label });
         if (next === null) return;
-        void updateProjectPref(project, { name: next.trim() });
+        void updateProjectPref(project, { name: next });
       },
     },
     {
+      icon: "archive",
       label: "归档任务",
       disabled: !project.path,
       action: async () => {
@@ -1391,6 +1470,7 @@ function projectContextItems(project) {
     },
     "---",
     {
+      icon: "remove",
       label: "移除",
       danger: true,
       action: async () => {
@@ -1749,7 +1829,7 @@ function renderProjects() {
           aria-expanded="${expanded}" aria-controls="project-sessions-${index}"
           title="${escapeHtml(project.path ?? project.id)}">
           <svg class="icon chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
-          <span class="project-name">${pref.pinned ? `<span class="pin-mark" aria-label="已置顶">📌</span>` : ""}${escapeHtml(pref.name || project.label)}</span>
+          <span class="project-name">${pref.pinned ? pinMarkup() : ""}${escapeHtml(pref.name || project.label)}</span>
           <span class="project-badge">${Number(project.sessionCount) || 0}</span>
         </button>
         <ul class="project-sessions" id="project-sessions-${index}"${expanded ? "" : " hidden"}>

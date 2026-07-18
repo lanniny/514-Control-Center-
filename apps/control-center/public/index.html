@@ -908,6 +908,26 @@
       </form>
     </dialog>
 
+    <dialog class="action-dialog input-dialog" id="input-dialog" aria-labelledby="input-dialog-title">
+      <form id="input-dialog-form">
+        <div class="dialog-heading">
+          <div>
+            <span class="eyebrow" id="input-dialog-eyebrow">重命名</span>
+            <h2 id="input-dialog-title">重命名</h2>
+          </div>
+        </div>
+        <div class="dialog-body">
+          <label class="field">
+            <input id="input-dialog-value" autocomplete="off" maxlength="120" required />
+          </label>
+        </div>
+        <div class="dialog-actions">
+          <button class="button secondary" id="input-dialog-cancel" type="button">取消</button>
+          <button class="button primary" type="submit" id="input-dialog-confirm">保存</button>
+        </div>
+      </form>
+    </dialog>
+
     <dialog class="action-dialog" id="session-dialog" aria-labelledby="session-dialog-title">
       <form id="session-form">
         <div class="dialog-heading">
