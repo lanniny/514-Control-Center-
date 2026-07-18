@@ -32,3 +32,17 @@
 3. **514cc 不在任何 git 仓库内**——今日全部改动无版本控制保护，建议 git init + 首 commit（等 LO 指令）
 
 __DELTA__: 烛(R1-R3 对话桥) | 2 | P0 推翻主驾"exitCode!==0 一律失败"的修复判断（observability.mjs:213 vs sync-runtime.ps1 exit-1 契约，真漂移场景明细不可达）+ P1 save 竞态为烛独有发现
+
+---
+
+## 追加（2026-07-18 深夜）：P1 竞态修复七轮闭环 + git 上仓
+
+LO 授权"继续完善 + git 上传"后：
+
+- **P1 save 竞态及全部衍生生命周期洞修复**（细目见 decisions D-2026-07-18-006）：同 tick 快照回写 / per-run 写盘链 / 墓碑体系 / 活跃协程清理门闩 / close 循环收敛 / init 落盘先行 / 取消回执优先 / 收尾窗口插话补收
+- **烛 R3→R8 六轮增量评审**（同 threadId 续聊不冷启动），每轮均有真发现、逐轮闭合，终验 **SECURE**
+- 测试 98 → **111/111**（+13 并发/生命周期护栏，含门闩式竞态测试）
+- **git**：e340279（首提 359 文件）+ 6eff70b（生命周期修复）→ `github.com/lanniny/514-Control-Center-` main；SSH 走 ssh.github.com:443 绕代理 fake-ip；暂存密钥扫描零真凭据
+- Roadmap：drainSteer user.message 窗口清理专测、cancel×adapter 失败并发状态优先级、建议5 旧事件回放合并策略
+
+__DELTA__: 烛(R3-R8 对话桥) | 2 | R4-R7 连续四轮推翻主驾"已修复完毕"判断（生命周期洞 11 个全部烛独立发现或双确认，file:line 见 codex handoff 与 decisions D-006）；R8 SECURE 收敛
