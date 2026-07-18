@@ -1773,3 +1773,26 @@ R3 核心竞态方案 → R4 生命周期三洞 → R5 真实失败路径三洞 
 - 保留既有完整 README（LO 的 echo 模板行未执行——会往完好 README 追加错位标题）
 - SSH 22 被代理 fake-ip 拦 → remote 换 ssh://git@ssh.github.com:443 通道
 - **e340279 "first commit"（359 文件）+ 6eff70b 生命周期修复 → github.com/lanniny/514-Control-Center- main 分支**
+
+---
+
+### D-2026-07-19-001 · Kimi Code CLI 收编为前端工程师（内置团队第 6 席）
+
+- **date**: 2026-07-19
+- **topic**: kimi-frontend-onboarding
+- **triggered_by**: LO "整个体系中加入 kimi code cli，指定为前端工程师成员，加入 514cc 默认团队"
+- **decision_maker**: 主驾直达（接口逐项 headless 实测）
+- **adopted**: true
+- **source_handoff**: synthesis__composer-v2-cli-alignment__20260719-0030.md（同日连续工作流）+ 本条自评
+
+#### 决策
+①新适配器 `kimi-cli.mjs`（kimi-headless-resume）：`kimi -p --output-format stream-json` + `-S` 续轮；事件两型（assistant 文本→assistant.message / meta.resume_hint→sessionId），未知 role 宽容降级 tool.event
+②models.json 注册 `kimi-frontend`（frontend/ui/coding/execution，costTier 2）；teams.mjs 内置 514cc 团队成员 5→6；前端 AGENT_LABELS "Kimi 前端" + 发送给下拉
+③**实测边界如实固化**：`-p` 与 `--plan/--auto/--yolo` 三旗标全互斥（0.27.0 逐一实测）→ workspace-write 轮适配器 fail-closed 抛 UNSUPPORTED_PERMISSION（422），绝不静默降级；session 绑定创建目录——run.cwd 固化天然满足；prompt >24k 拒绝（命令行上限）
+④主脑候选（COORDINATOR_ELIGIBLE）暂不纳入——定位是前端工程师成员，非会话入口
+
+#### 验证（端到端）
+- headless 冒烟 + `-S` 续接记忆实测（跨轮记得内容）
+- Console 全链路：continue 派 kimi-frontend → succeeded + 原生 session 捕获 → **第二轮同 sessionId 复用且记得上轮推荐（答"Flexbox."）**
+- 权限互斥三连实测（--plan/--auto/-y 均 "Cannot combine"）→ fail-closed 路径由首次 E2E 500 真实触发后修正
+- node --test 112/112；rules.md §四 + CLAUDE.md 落账

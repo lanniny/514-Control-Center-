@@ -4,6 +4,7 @@ import { CodexCliAdapter } from "./codex-cli.mjs";
 import { GeminiCliAdapter } from "./gemini-cli.mjs";
 import { GrokBuildAdapter } from "./grok-build.mjs";
 import { GrokMcpAdapter } from "./grok-mcp.mjs";
+import { KimiCliAdapter } from "./kimi-cli.mjs";
 import { PiRpcAdapter } from "./pi-rpc.mjs";
 import { resolve } from "node:path";
 import { assertWithin } from "../paths.mjs";
@@ -35,6 +36,7 @@ export function createAdapters({ profiles, eventStore, cwd, approvalResolver }) 
       requiredEnv: ["GROK_SEARCH_RS_COMPAT_API_URL", "GROK_SEARCH_RS_COMPAT_API_KEY", "GROK_SEARCH_RS_COMPAT_MODEL"],
     })],
     ["grok-build", new GrokBuildAdapter({ command: profile("grok-build").command, model: profile("grok-build").model, eventStore, cwd })],
+    ["kimi-frontend", new KimiCliAdapter({ command: profile("kimi-frontend").command, model: profile("kimi-frontend").model, eventStore, cwd })],
     ["pi-resident", new PiRpcAdapter({ command: profile("pi-resident").command, model: profile("pi-resident").model, eventStore, cwd })],
   ]);
 }

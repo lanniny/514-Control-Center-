@@ -72,6 +72,8 @@
 **grok（织驱动）**：grok-4.5 via 514claude.xyz OpenAI 端点，key 走 $GROK_API_KEY，单次 < 10KB，5xx retry。**反代无 server-side 实时搜索**（xAI Live Search 已 410 Gone，Agent Tools API 不过反代）→ WR 必须 grok 推理 + web MCP 取数联合，不假装有原生搜索。
 **Grok Build CLI（第三本地 CLI，2026-07-17 装）**：`grok` 0.2.102（`~/.grok/bin`）——headless `grok -p "<prompt>" -m grok45-514`（自定义模型走反代 + $GROK_API_KEY，免订阅登录；`grok43-long` = 1M ctx 档）；ACP `grok agent stdio`。定位=快执行/快综合小任务（fast-executor），深评审仍归 Codex、情报仍归织；路由细则待实战 DELTA 喂养后固化。
 
+**Kimi Code CLI（第四本地 CLI，2026-07-19 收编）**：`kimi` 0.27.0（`~/.kimi-code/bin`，设备码登录态）——headless `kimi -p "<prompt>" --output-format stream-json`，续轮 `-S <sessionId>`（session 绑定创建目录，Console run.cwd 固化天然满足）。定位=**前端工程师**（514cc Console 内置团队第 6 席，provider id `kimi-frontend`，能力 frontend/ui/coding）。已知边界：`-p` 与 `--plan/--auto/--yolo` 互斥——headless 无法机械授予受控写权限，workspace-write 轮适配器 fail-closed 拒绝（写盘轮派 Codex/Claude）。
+
 ## 五、定制化（三层 Override）
 
 ```

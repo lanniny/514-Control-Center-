@@ -47,6 +47,7 @@
 | **Codex CLI**（烛·降级路） | MCP 不可用时的单发/续接 | `'' \| codex exec --json -p review --skip-git-repo-check "prompt"`；续轮 `codex exec resume <sessionId>` |
 | **Codex Ultracode** | LO 显式 `ultracode/utralcode/最强大脑深度完善` 授权时，走 xhigh + 受控动态 workflow/fan-out/对抗验证 | Codex 项目配置已 `xhigh`，运行时 skill: `$ultracode` |
 | **grok-4.5**（织） | 实时搜索/Web 调研/长文档摘读/多模态 | via 514claude.xyz，$GROK_API_KEY，单次 <10KB |
+| **Kimi Code CLI**（前端工程师，2026-07-19 收编） | 前端/UI 实现与走查——Console 内置团队第 6 席 `kimi-frontend` | headless `kimi -p --output-format stream-json` + `-S` 续轮；`-p` 与权限旗标互斥，写盘轮 fail-closed 派 Codex/Claude |
 | **5 命名 Agent** | 需要专业领域独立推理时 | 原生 Agent 工具召唤（烛/织/匠/策/鉴） |
 
 ### 第四层：最小治理（rules.md, v3.4）

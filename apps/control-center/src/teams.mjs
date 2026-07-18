@@ -21,11 +21,11 @@ export const BUILTIN_TEAM = Object.freeze({
   id: "team-514cc",
   name: "514cc",
   builtin: true,
-  description: "514cc 默认协作团队：Claude 主脑统一规划，Codex 技术执行，Grok 情报与快执行，Pi 扩展。",
+  description: "514cc 默认协作团队：Claude 主脑统一规划，Codex 技术执行，Grok 情报与快执行，Kimi 前端工程，Pi 扩展。",
   systemPrompt:
     "遵循 514cc 宪法：主脑规划-专家执行-独立验证三角；先读后写；危险操作二次确认；严禁 silent fallback；完成结论必须踩在验证证据上。",
   coordinator: DEFAULT_COORDINATOR,
-  members: Object.freeze(["claude-fable", "codex-technical", "grok-search", "grok-build", "pi-resident"]),
+  members: Object.freeze(["claude-fable", "codex-technical", "grok-search", "grok-build", "kimi-frontend", "pi-resident"]),
   skills: Object.freeze(["co-review", "co-research", "co-status", "co-enhance", "vibe", "ssh", "docx"]),
   mcp: Object.freeze(["codex-agent", "serena", "playwright", "exa", "grok-search-rs", "context7", "sequential-thinking"]),
 });

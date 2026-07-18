@@ -1947,7 +1947,7 @@ function setComposerMode(run, { waitingApproval = false } = {}) {
     // 发送给下拉按团队成员过滤（服务端已强制隔离）+ 预选主脑；仅切 run 时重建
     const members = Array.isArray(run.teamMembers) && run.teamMembers.length
       ? run.teamMembers
-      : ["claude-fable", "codex-technical", "grok-search", "grok-build", "gemini-research", "pi-resident"];
+      : ["claude-fable", "codex-technical", "grok-search", "grok-build", "kimi-frontend", "gemini-research", "pi-resident"];
     elements["followup-agent"].innerHTML = members
       .map((id) => `<option value="${escapeHtml(id)}">${escapeHtml(agentLabel(id))}${id === run.coordinatorId ? "（主脑）" : ""}</option>`)
       .join("");
@@ -2015,6 +2015,7 @@ const AGENT_LABELS = {
   "grok-search": "Grok 搜索",
   "grok-build": "Grok Build",
   "gemini-research": "Gemini",
+  "kimi-frontend": "Kimi 前端",
   "pi-resident": "Pi",
 };
 function agentLabel(id) {
