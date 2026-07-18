@@ -4050,3 +4050,88 @@ input::placeholder {
 .candidate-table tr.is-excluded td {
   opacity: 0.55;
 }
+
+/* ===== 侧栏右键菜单 + 会话分区标记 ===== */
+.context-menu {
+  position: fixed;
+  z-index: 320;
+  min-width: 180px;
+  padding: 5px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-small, 10px);
+  background: var(--surface);
+  box-shadow: var(--shadow-menu);
+}
+
+.context-menu button {
+  display: block;
+  width: 100%;
+  padding: 6px 12px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.context-menu button:hover:not(:disabled) {
+  background: var(--surface-strong);
+}
+
+.context-menu button:disabled {
+  color: var(--text-soft);
+  cursor: default;
+  opacity: 0.55;
+}
+
+.context-menu button.is-danger {
+  color: var(--red);
+}
+
+.context-menu button.is-danger:hover:not(:disabled) {
+  background: var(--red-soft);
+}
+
+.context-menu .menu-separator {
+  height: 1px;
+  margin: 5px 8px;
+  background: var(--border);
+}
+
+/* 未读圆点 + 置顶图钉：会话行标题前缀 */
+.unread-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--rose-bright);
+  vertical-align: 1px;
+}
+
+.rail-run-button.is-unread strong {
+  color: var(--text-strong);
+  font-weight: 700;
+}
+
+.pin-mark {
+  margin-right: 4px;
+  font-size: 10px;
+}
+
+/* 正在工作 / 置顶分区：与会话区同语言，块间以既有 rail-block 边界区隔 */
+.rail-block-working .pane-heading h2::before {
+  content: "●";
+  margin-right: 6px;
+  color: var(--aqua);
+  font-size: 8px;
+  vertical-align: 2px;
+}
+
+.rail-block-pinned .pane-heading h2::before {
+  content: "📌";
+  margin-right: 5px;
+  font-size: 10px;
+}

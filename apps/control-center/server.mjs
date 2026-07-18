@@ -3,8 +3,8 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { readFile } from "node:fs/promises";
-import { extname, join } from "node:path";
+import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { basename, dirname, extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createControlCenter } from "./src/app.mjs";
 import { childProcessEnv, runProcess } from "./src/process-runner.mjs";
@@ -234,6 +234,75 @@ async function api(request, response, url) {
       state.pickingDirectory = false;
     }
   }
+  if (request.method === "POST" && pathname === "/api/system/reveal") {
+    // 在资源管理器中打开（本地特权面）：目录直接开，文件定位选中；路径必须真实存在
+    const { path } = await body(request);
+    const target = String(path || "").trim();
+    if (!target) throw Object.assign(new Error("path is required"), { code: "VALIDATION_FAILED" });
+    let info;
+    try {
+      info = await stat(target);
+    } catch {
+      throw Object.assign(new Error(`path does not exist: ${target}`), { code: "SOURCE_NOT_FOUND" });
+    }
+    // explorer.exe 常以非 0 退出码返回（历史行为），fire-and-forget 不据此报错
+    const args = info.isDirectory() ? [target] : [`/select,${target}`];
+    spawn("explorer.exe", args, { detached: true, stdio: "ignore", windowsHide: false }).unref();
+    return json(response, 200, { revealed: target });
+  }
+  if (request.method === "POST" && pathname === "/api/system/worktree") {
+    // 在新工作树中继续：基于该目录 HEAD 建 detached worktree（同级 <name>-wt-<stamp>），返回新路径
+    const { path } = await body(request);
+    const target = String(path || "").trim();
+    if (!target) throw Object.assign(new Error("path is required"), { code: "VALIDATION_FAILED" });
+    const probe = await runProcess("git", ["-C", target, "rev-parse", "--show-toplevel"], { timeoutMs: 15_000, maxOutputBytes: 16 * 1024 });
+    if (probe.code !== 0) {
+      throw Object.assign(new Error(`${target} 不在 git 仓库内，无法创建工作树：${probe.stderr.trim().slice(0, 160)}`), { code: "VALIDATION_FAILED" });
+    }
+    const repoTop = probe.stdout.trim().split(/\r?\n/).pop();
+    const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
+    const worktreePath = join(dirname(repoTop), `${basename(repoTop)}-wt-${stamp}`);
+    const created = await runProcess("git", ["-C", repoTop, "worktree", "add", "--detach", worktreePath], { timeoutMs: 60_000, maxOutputBytes: 64 * 1024 });
+    if (created.code !== 0) {
+      throw Object.assign(new Error(`git worktree add 失败：${created.stderr.trim().slice(0, 200)}`), { code: "VALIDATION_FAILED" });
+    }
+    return json(response, 200, { worktree: worktreePath, base: repoTop });
+  }
+  if (pathname === "/api/projects/prefs") {
+    // 项目侧栏偏好（置顶/重命名/隐藏）：dataRoot 下单文件，键=归一化项目路径
+    const prefsPath = join(state.dataRoot, "project-prefs.json");
+    if (request.method === "GET") {
+      try {
+        return json(response, 200, JSON.parse(await readFile(prefsPath, "utf8")));
+      } catch {
+        return json(response, 200, { projects: {} });
+      }
+    }
+    if (request.method === "PUT") {
+      const payload = await body(request);
+      const projects = payload?.projects;
+      if (!projects || typeof projects !== "object" || Array.isArray(projects)) {
+        throw Object.assign(new Error("projects object is required"), { code: "VALIDATION_FAILED" });
+      }
+      const clean = {};
+      for (const [key, value] of Object.entries(projects)) {
+        if (typeof key !== "string" || key.length > 500 || !value || typeof value !== "object") continue;
+        const entry = {};
+        if (value.pinned !== undefined) entry.pinned = Boolean(value.pinned);
+        if (value.hidden !== undefined) entry.hidden = Boolean(value.hidden);
+        if (typeof value.name === "string" && value.name.trim()) entry.name = value.name.trim().slice(0, 120);
+        if (Object.keys(entry).length) clean[key] = entry;
+      }
+      await mkdir(state.dataRoot, { recursive: true });
+      await writeFile(prefsPath, `${JSON.stringify({ projects: clean }, null, 2)}\n`, "utf8");
+      return json(response, 200, { projects: clean });
+    }
+  }
+  if (request.method === "POST" && pathname === "/api/projects/archive-finished") {
+    const { cwd } = await body(request);
+    if (!String(cwd || "").trim()) throw Object.assign(new Error("cwd is required"), { code: "VALIDATION_FAILED" });
+    return json(response, 200, await state.orchestrator.archiveFinishedByCwd(cwd));
+  }
 
   const runEventsMatch = pathname.match(/^\/api\/runs\/([^/]+)\/events$/);
   if (request.method === "GET" && runEventsMatch) {
@@ -258,6 +327,10 @@ async function api(request, response, url) {
   if (request.method === "POST" && match) {
     const id = decodeURIComponent(match[1]);
     return json(response, 200, match[2] === "cancel" ? await state.orchestrator.cancel(id) : await state.orchestrator.continue(id, await body(request)));
+  }
+  match = pathname.match(/^\/api\/runs\/([^/]+)\/meta$/);
+  if (request.method === "PATCH" && match) {
+    return json(response, 200, await state.orchestrator.updateMeta(decodeURIComponent(match[1]), await body(request)));
   }
 
   match = pathname.match(/^\/api\/config\/(.+?)\/versions\/([^/]+)\/content$/);

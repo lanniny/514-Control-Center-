@@ -117,6 +117,8 @@ const state = {
   projectSummaries: false,
   sessionPreview: null,
   attachments: [], // ➕ 附加的资料文件路径（随任务/续聊提交并入 prompt，Claude 自行读取）
+  projectPrefs: { projects: {} }, // 项目侧栏偏好：置顶/重命名/隐藏（服务端 project-prefs.json）
+  deepLinkRunId: null, // #run=<id> 深度链接：runs 首载后选中一次性消费
   previewSeq: 0,
   projectsSeq: 0,
   teams: [],
@@ -199,6 +201,13 @@ function cacheElements() {
     "task-permission-pick",
     "attach-button",
     "attach-chips",
+    "rail-working",
+    "working-run-list",
+    "working-count",
+    "rail-pinned",
+    "pinned-run-list",
+    "pinned-count",
+    "context-menu",
     "task-model",
     "task-model-pick",
     "task-effort-pick",
@@ -472,6 +481,8 @@ function initializeAccessToken() {
   const url = new URL(window.location.href);
   const fragment = new URLSearchParams(url.hash.startsWith("#") ? url.hash.slice(1) : url.hash);
   const fragmentToken = fragment.get("token")?.trim() ?? "";
+  const deepLinkRun = fragment.get("run")?.trim() ?? ""; // 深度链接：#token=...&run=<id>
+  if (deepLinkRun) state.deepLinkRunId = deepLinkRun;
   if (fragmentToken) {
     sessionStorage.setItem(TOKEN_KEY, fragmentToken);
     accessToken = fragmentToken;
@@ -792,6 +803,12 @@ async function loadSources({ preserveSelection = true } = {}) {
 async function loadRuns() {
   const payload = await request(API.runs);
   state.runs = unwrapList(payload, ["runs"]).map(normalizeRun);
+  // 深度链接一次性消费：#run=<id> 指定的任务优先选中
+  if (state.deepLinkRunId) {
+    if (state.runs.some((run) => run.id === state.deepLinkRunId)) state.selectedRunId = state.deepLinkRunId;
+    else toast("深度链接指向的任务不存在（可能已被清除）", "warning");
+    state.deepLinkRunId = null;
+  }
   if (state.selectedRunId && !state.runs.some((run) => run.id === state.selectedRunId)) state.selectedRunId = null;
   if (!state.selectedRunId) {
     state.selectedRunId = state.runs.find((run) => ACTIVE_RUN_STATES.has(run.status))?.id ?? state.runs[0]?.id ?? null;
@@ -1152,20 +1169,243 @@ function runRowMarkup(run, clickable = false) {
     </div>`;
 }
 
+function railRunMarkup(run) {
+  return `
+    <button class="rail-run-button${run.id === state.selectedRunId ? " is-selected" : ""}${run.unread ? " is-unread" : ""}" type="button" data-run-select="${escapeHtml(run.id)}">
+      <strong>${run.unread ? `<span class="unread-dot" aria-label="未读"></span>` : ""}${run.pinned ? `<span class="pin-mark" aria-label="已置顶">📌</span>` : ""}${escapeHtml(run.title)}</strong>
+      <span>${escapeHtml(runStatusText(run.status))}${run.teamName ? ` · ${escapeHtml(run.teamName)}` : ""} · ${escapeHtml(formatDate(run.updatedAt ?? run.createdAt))}</span>
+    </button>`;
+}
+
 function renderRuns() {
-  elements["run-count"].textContent = String(state.runs.length);
-  elements["workbench-run-list"].innerHTML = state.runs.length
-    ? state.runs
-        .map(
-          (run) => `
-          <button class="rail-run-button${run.id === state.selectedRunId ? " is-selected" : ""}" type="button" data-run-select="${escapeHtml(run.id)}">
-            <strong>${escapeHtml(run.title)}</strong>
-            <span>${escapeHtml(runStatusText(run.status))}${run.teamName ? ` · ${escapeHtml(run.teamName)}` : ""} · ${escapeHtml(formatDate(run.updatedAt ?? run.createdAt))}</span>
-          </button>`,
-        )
-        .join("")
+  // 左栏分区（互斥）：会话=普通任务；正在工作=活跃 run；置顶=手动置顶的非活跃 run；归档不显示
+  const visible = state.runs.filter((run) => !run.archived);
+  const working = visible.filter((run) => ACTIVE_RUN_STATES.has(run.status));
+  const workingIds = new Set(working.map((run) => run.id));
+  const pinned = visible.filter((run) => run.pinned && !workingIds.has(run.id));
+  const pinnedIds = new Set(pinned.map((run) => run.id));
+  const regular = visible.filter((run) => !workingIds.has(run.id) && !pinnedIds.has(run.id));
+  elements["run-count"].textContent = String(regular.length);
+  elements["workbench-run-list"].innerHTML = regular.length
+    ? regular.map(railRunMarkup).join("")
     : `<div class="empty-state"><span>暂无任务</span></div>`;
+  elements["rail-working"].hidden = !working.length;
+  elements["working-count"].textContent = String(working.length);
+  elements["working-run-list"].innerHTML = working.map(railRunMarkup).join("");
+  elements["rail-pinned"].hidden = !pinned.length;
+  elements["pinned-count"].textContent = String(pinned.length);
+  elements["pinned-run-list"].innerHTML = pinned.map(railRunMarkup).join("");
   renderSelectedRun();
+}
+
+// ===== 右键菜单（项目 / 会话）=====
+let contextMenuCleanup = null;
+
+function hideContextMenu() {
+  contextMenuCleanup?.();
+}
+
+function showContextMenu(items, x, y) {
+  hideContextMenu();
+  const menu = elements["context-menu"];
+  menu.innerHTML = items
+    .map((item, index) =>
+      item === "---"
+        ? `<div class="menu-separator" role="separator"></div>`
+        : `<button type="button" role="menuitem" data-menu-index="${index}"${item.danger ? ' class="is-danger"' : ""}${item.disabled ? " disabled" : ""}>${escapeHtml(item.label)}</button>`,
+    )
+    .join("");
+  menu.hidden = false;
+  const rect = menu.getBoundingClientRect();
+  menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - rect.width - 8))}px`;
+  menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - rect.height - 8))}px`;
+  const onPick = (event) => {
+    const button = event.target.closest("[data-menu-index]");
+    if (!button || button.disabled) return;
+    const item = items[Number(button.dataset.menuIndex)];
+    hideContextMenu();
+    item?.action?.();
+  };
+  const onDismiss = (event) => {
+    if (!menu.contains(event.target)) hideContextMenu();
+  };
+  const onKey = (event) => {
+    if (event.key === "Escape") hideContextMenu();
+  };
+  menu.addEventListener("click", onPick);
+  document.addEventListener("pointerdown", onDismiss, true);
+  document.addEventListener("keydown", onKey);
+  window.addEventListener("blur", hideContextMenu, { once: true });
+  contextMenuCleanup = () => {
+    menu.hidden = true;
+    menu.removeEventListener("click", onPick);
+    document.removeEventListener("pointerdown", onDismiss, true);
+    document.removeEventListener("keydown", onKey);
+    contextMenuCleanup = null;
+  };
+}
+
+async function patchRunMeta(id, patch, message) {
+  try {
+    const updated = normalizeRun(await request(`/api/runs/${encodeURIComponent(id)}/meta`, { method: "PATCH", body: patch }), 0);
+    state.runs = state.runs.map((run) => (run.id === updated.id ? updated : run));
+    renderRuns();
+    if (message) toast(message, "success");
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+async function copyText(text, label) {
+  try {
+    await navigator.clipboard.writeText(String(text ?? ""));
+    toast(`${label}已复制`, "success");
+  } catch (error) {
+    toast(`复制失败：${error.message}`, "error");
+  }
+}
+
+async function revealPath(path) {
+  if (!path) return toast("该会话没有记录工作目录", "warning");
+  try {
+    await request("/api/system/reveal", { method: "POST", body: { path } });
+  } catch (error) {
+    toast(`打开失败：${error.message}`, "error");
+  }
+}
+
+function nativeSessionIdOf(run) {
+  // "会话ID"取原生 CLI sessionId（可用于 claude --resume 等），优先主脑；无原生会话退回 run id
+  const sessions = Array.isArray(run.sessions) ? run.sessions : [];
+  const coordinator = sessions.find((session) => (session.agentId ?? session.name) === (run.coordinatorId || "claude-fable"));
+  return coordinator?.sessionId ?? sessions[0]?.sessionId ?? run.id;
+}
+
+function runDeepLink(run) {
+  return `${location.origin}/#token=${encodeURIComponent(accessToken)}&run=${encodeURIComponent(run.id)}`;
+}
+
+function continueRunInNewTask(run) {
+  state.selectedRunId = null;
+  state.sessionPreview = null;
+  if (run.cwd) state.pendingCwd = run.cwd;
+  renderRuns();
+  elements["task-input"].focus();
+  toast(`已切到新任务模式${run.cwd ? `（项目地址 ${run.cwd}）` : ""}`, "success");
+}
+
+async function continueRunInWorktree(run) {
+  if (!run.cwd) return toast("该会话没有记录工作目录，无法建工作树", "warning");
+  toast("正在创建工作树…", "info");
+  try {
+    const result = await request("/api/system/worktree", { method: "POST", body: { path: run.cwd } });
+    state.selectedRunId = null;
+    state.sessionPreview = null;
+    state.pendingCwd = result.worktree;
+    renderRuns();
+    elements["task-input"].focus();
+    toast(`工作树已创建，新任务将在 ${result.worktree} 运行`, "success", 6000);
+  } catch (error) {
+    toast(error.message, "error", 6000);
+  }
+}
+
+function renameRun(run) {
+  const next = window.prompt("重命名任务", run.title);
+  if (next === null) return;
+  void patchRunMeta(run.id, { title: next }, "已重命名");
+}
+
+function runContextItems(run) {
+  return [
+    { label: run.pinned ? "取消置顶" : "置顶任务", action: () => void patchRunMeta(run.id, { pinned: !run.pinned }) },
+    { label: "重命名任务", action: () => renameRun(run) },
+    { label: "归档任务", action: () => void patchRunMeta(run.id, { archived: true }, "已归档（数据保留，仅从列表隐藏）") },
+    { label: run.unread ? "标记为已读" : "标记为未读", action: () => void patchRunMeta(run.id, { unread: !run.unread }) },
+    "---",
+    { label: "在资源管理器中打开", disabled: !run.cwd, action: () => void revealPath(run.cwd) },
+    { label: "复制工作目录", disabled: !run.cwd, action: () => void copyText(run.cwd, "工作目录") },
+    { label: "复制会话ID", action: () => void copyText(nativeSessionIdOf(run), "会话ID") },
+    { label: "复制深度链接", action: () => void copyText(runDeepLink(run), "深度链接") },
+    "---",
+    { label: "在新任务中继续", action: () => continueRunInNewTask(run) },
+    { label: "在新工作树中继续", disabled: !run.cwd, action: () => void continueRunInWorktree(run) },
+    { label: "在新窗口中打开", action: () => window.open(runDeepLink(run), "_blank", "noopener") },
+  ];
+}
+
+// ===== 项目侧栏偏好（置顶/重命名/隐藏）=====
+async function loadProjectPrefs() {
+  try {
+    const payload = await request("/api/projects/prefs");
+    state.projectPrefs = payload?.projects ? payload : { projects: {} };
+  } catch {
+    state.projectPrefs = { projects: {} };
+  }
+}
+
+async function saveProjectPrefs() {
+  try {
+    await request("/api/projects/prefs", { method: "PUT", body: state.projectPrefs });
+  } catch (error) {
+    toast(`项目偏好保存失败：${error.message}`, "error");
+  }
+}
+
+function projectPrefOf(project) {
+  return state.projectPrefs.projects[normalizePathKey(project.path ?? project.id)] ?? {};
+}
+
+async function updateProjectPref(project, patch) {
+  const key = normalizePathKey(project.path ?? project.id);
+  state.projectPrefs.projects[key] = { ...(state.projectPrefs.projects[key] ?? {}), ...patch };
+  renderProjects();
+  await saveProjectPrefs();
+}
+
+function projectContextItems(project) {
+  const pref = projectPrefOf(project);
+  return [
+    { label: pref.pinned ? "取消置顶" : "置顶项目", action: () => void updateProjectPref(project, { pinned: !pref.pinned }) },
+    { label: "在资源管理器中打开", disabled: !project.path, action: () => void revealPath(project.path) },
+    {
+      label: "重命名项目",
+      action: () => {
+        const next = window.prompt("重命名项目（仅影响侧栏显示）", pref.name || project.label);
+        if (next === null) return;
+        void updateProjectPref(project, { name: next.trim() });
+      },
+    },
+    {
+      label: "归档任务",
+      disabled: !project.path,
+      action: async () => {
+        try {
+          const result = await request("/api/projects/archive-finished", { method: "POST", body: { cwd: project.path } });
+          await loadRuns();
+          toast(result.archived ? `已归档 ${result.archived} 个已结束任务` : "该项目没有可归档的已结束任务", "success");
+        } catch (error) {
+          toast(error.message, "error");
+        }
+      },
+    },
+    "---",
+    {
+      label: "移除",
+      danger: true,
+      action: async () => {
+        const confirmed = await confirmAction({
+          eyebrow: "项目侧栏",
+          title: `从侧栏移除「${pref.name || project.label}」？`,
+          rows: [["路径", project.path ?? project.id]],
+          warning: "仅从侧栏隐藏，不删除磁盘上的任何文件或历史会话。",
+          confirmLabel: "移除",
+          danger: true,
+        });
+        if (confirmed) void updateProjectPref(project, { hidden: true });
+      },
+    },
+  ];
 }
 
 const PROJECT_SUMMARIES_KEY = "514cc-project-summaries";
@@ -1411,6 +1651,10 @@ async function clearFinishedRuns() {
 
 async function loadProjects() {
   // 请求序号防乱序倒灌（烛 R6 致命2）：快速开→关摘要时，慢的 summaries=1 响应不得覆盖已关闭状态
+  if (!state.projectPrefsLoaded) {
+    state.projectPrefsLoaded = true;
+    await loadProjectPrefs(); // 侧栏偏好先于首次渲染（置顶/改名/隐藏立即生效）
+  }
   const seq = ++state.projectsSeq;
   let data;
   try {
@@ -1470,7 +1714,10 @@ function renderProjects() {
     container.innerHTML = `<div class="empty-state compact-empty"><span>正在扫描本地项目…</span></div>`;
     return;
   }
-  const projects = data.projects ?? [];
+  // 侧栏偏好：隐藏被移除的、置顶排前（稳定排序保原序）、显示自定义名
+  const projects = (data.projects ?? [])
+    .filter((project) => !projectPrefOf(project).hidden)
+    .sort((a, b) => (projectPrefOf(b).pinned ? 1 : 0) - (projectPrefOf(a).pinned ? 1 : 0));
   elements["project-count"].textContent = String(projects.length);
   if (!data.available) {
     container.innerHTML = emptyMarkup("项目扫描不可用", data.error ?? "未知原因");
@@ -1482,6 +1729,7 @@ function renderProjects() {
   }
   container.innerHTML = projects
     .map((project, index) => {
+      const pref = projectPrefOf(project);
       const expanded = state.expandedProjects.has(project.id);
       const sessionItems = (project.sessions ?? [])
         .map((session) => {
@@ -1501,7 +1749,7 @@ function renderProjects() {
           aria-expanded="${expanded}" aria-controls="project-sessions-${index}"
           title="${escapeHtml(project.path ?? project.id)}">
           <svg class="icon chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
-          <span class="project-name">${escapeHtml(project.label)}</span>
+          <span class="project-name">${pref.pinned ? `<span class="pin-mark" aria-label="已置顶">📌</span>` : ""}${escapeHtml(pref.name || project.label)}</span>
           <span class="project-badge">${Number(project.sessionCount) || 0}</span>
         </button>
         <ul class="project-sessions" id="project-sessions-${index}"${expanded ? "" : " hidden"}>
@@ -3329,6 +3577,8 @@ function selectRun(id) {
   state.sessionPreview = null; // 选任务即离开历史预览
   markSelectedSessionLink(null, null);
   state.selectedRunId = id;
+  const run = state.runs.find((item) => item.id === id);
+  if (run?.unread) void patchRunMeta(id, { unread: false }); // 打开即已读
   renderRuns();
   if (state.view !== "workbench") setView("workbench");
   void fetchRunEvents(id); // 拉 per-run 完整历史事件（不受全局最近窗口限制）
@@ -3420,10 +3670,31 @@ function bindEvents() {
   });
 
   document.addEventListener("keydown", (event) => {
-    const row = event.target.closest("[data-run-select][role='button']");
+    const row = event.target.closest?.("[data-run-select][role='button']"); // 合成事件 target 可为 document
     if (row && (event.key === "Enter" || event.key === " ")) {
       event.preventDefault();
       selectRun(row.dataset.runSelect);
+    }
+  });
+
+  // 侧栏右键菜单：会话（三分区共用）与项目树（document 级委托一次覆盖）
+  document.addEventListener("contextmenu", (event) => {
+    const runButton = event.target.closest(".run-rail-list [data-run-select]");
+    if (runButton) {
+      const run = state.runs.find((item) => item.id === runButton.dataset.runSelect);
+      if (run) {
+        event.preventDefault();
+        showContextMenu(runContextItems(run), event.clientX, event.clientY);
+      }
+      return;
+    }
+    const projectToggle = event.target.closest("[data-project-toggle]");
+    if (projectToggle) {
+      const project = (state.projectsData?.projects ?? []).find((item) => item.id === projectToggle.dataset.projectToggle);
+      if (project) {
+        event.preventDefault();
+        showContextMenu(projectContextItems(project), event.clientX, event.clientY);
+      }
     }
   });
 

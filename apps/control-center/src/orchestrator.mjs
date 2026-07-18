@@ -791,6 +791,36 @@ export class Orchestrator {
     return tracked;
   }
 
+  // 会话元数据（侧栏右键菜单）：白名单字段浅更新——置顶/归档/未读/重命名，全部走 save 持久化
+  async updateMeta(id, patch = {}) {
+    const run = this.get(id);
+    if (patch.pinned !== undefined) run.pinned = Boolean(patch.pinned);
+    if (patch.archived !== undefined) run.archived = Boolean(patch.archived);
+    if (patch.unread !== undefined) run.unread = Boolean(patch.unread);
+    if (patch.title !== undefined) {
+      const title = String(patch.title).trim().slice(0, 120);
+      if (!title) throw Object.assign(new Error("title cannot be empty"), { code: "VALIDATION_FAILED" });
+      run.title = title;
+    }
+    await this.save(run);
+    return this.get(id);
+  }
+
+  // 项目级批量归档：cwd 归一匹配的全部终态任务标记 archived（侧栏项目右键"归档任务"）
+  async archiveFinishedByCwd(cwd) {
+    const target = String(cwd || "").replace(/[\\/]+$/, "").toLowerCase();
+    const archived = [];
+    for (const run of this.runs.values()) {
+      if (!TERMINAL.has(run.status) || run.archived) continue;
+      const runCwd = String(run.cwd || "").replace(/[\\/]+$/, "").toLowerCase();
+      if (runCwd !== target) continue;
+      run.archived = true;
+      await this.save(run);
+      archived.push(run.id);
+    }
+    return { archived: archived.length, runIds: archived };
+  }
+
   async cancel(id) {
     const run = this.get(id);
     run.status = "cancelled";

@@ -722,3 +722,20 @@ test("session effort override validates the CLI whitelist and reaches the coordi
   const ultra = await fx.orchestrator.create({ prompt: "z", execute: false, permissionMode: "plan", effort: "ultracode" });
   assert.equal(ultra.effortOverride, "ultracode", "ultracode 档在白名单内（CLI 实测接受）");
 });
+
+test("run meta updates are whitelisted and project-level archive matches by cwd", async (t) => {
+  const fx = await fixture();
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const created = await fx.orchestrator.create({ prompt: "meta target", execute: false, permissionMode: "plan", cwd: fx.root });
+  const pinned = await fx.orchestrator.updateMeta(created.id, { pinned: true, unread: true, title: "改名后的任务", ignored: "x" });
+  assert.equal(pinned.pinned, true);
+  assert.equal(pinned.unread, true);
+  assert.equal(pinned.title, "改名后的任务");
+  assert.equal(pinned.ignored, undefined, "白名单外字段不落盘");
+  await assert.rejects(() => fx.orchestrator.updateMeta(created.id, { title: "   " }), { code: "VALIDATION_FAILED" });
+  const other = await fx.orchestrator.create({ prompt: "other cwd", execute: false, permissionMode: "plan" });
+  const archived = await fx.orchestrator.archiveFinishedByCwd(fx.root);
+  assert.deepEqual(archived.runIds, [created.id], "仅归档 cwd 匹配的终态任务");
+  assert.equal(fx.orchestrator.get(created.id).archived, true);
+  assert.equal(fx.orchestrator.get(other.id).archived, undefined, "其他 cwd 不受影响");
+});

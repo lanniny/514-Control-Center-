@@ -338,6 +338,20 @@
                 </div>
                 <div class="run-rail-list" id="workbench-run-list"></div>
               </section>
+              <section class="rail-block rail-block-working" id="rail-working" aria-labelledby="working-rail-title" hidden>
+                <div class="pane-heading">
+                  <h2 id="working-rail-title">正在工作</h2>
+                  <span id="working-count">0</span>
+                </div>
+                <div class="run-rail-list" id="working-run-list"></div>
+              </section>
+              <section class="rail-block rail-block-pinned" id="rail-pinned" aria-labelledby="pinned-rail-title" hidden>
+                <div class="pane-heading">
+                  <h2 id="pinned-rail-title">置顶会话</h2>
+                  <span id="pinned-count">0</span>
+                </div>
+                <div class="run-rail-list" id="pinned-run-list"></div>
+              </section>
               <section class="rail-block rail-block-projects" aria-labelledby="project-rail-title">
                 <div class="pane-heading">
                   <h2 id="project-rail-title">项目</h2>
@@ -977,6 +991,7 @@
     </dialog>
 
     <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
+    <div class="context-menu" id="context-menu" role="menu" hidden></div>
 
     <script type="module" src="./app.js"></script>
   </body>
