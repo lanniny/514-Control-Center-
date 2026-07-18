@@ -1411,6 +1411,40 @@ function runContextItems(run) {
   ];
 }
 
+// 项目树下的原生 CLI 历史会话菜单（数据来自 ~/.claude/projects 扫描，与 Console run 是两类实体）
+function sessionContextItems(project, sessionId) {
+  return [
+    { icon: "eye", label: "查看会话", action: () => void openSessionPreview(project.id, sessionId) },
+    {
+      icon: "folder",
+      label: "在资源管理器中打开",
+      action: async () => {
+        try {
+          await request("/api/sessions/reveal", { method: "POST", body: { project: project.id, id: sessionId } });
+        } catch (error) {
+          toast(`定位失败：${error.message}`, "error");
+        }
+      },
+    },
+    { icon: "id", label: "复制会话ID", action: () => void copyText(sessionId, "会话ID") },
+    { icon: "copy", label: "复制恢复命令", action: () => void copyText(`claude -r ${sessionId}`, "恢复命令") },
+    "---",
+    {
+      icon: "plus",
+      label: "在新任务中继续",
+      disabled: !project.path,
+      action: () => {
+        state.selectedRunId = null;
+        state.sessionPreview = null;
+        state.pendingCwd = project.path;
+        renderRuns();
+        elements["task-input"].focus();
+        toast(`已切到新任务模式（项目地址 ${project.path}）`, "success");
+      },
+    },
+  ];
+}
+
 // ===== 项目侧栏偏好（置顶/重命名/隐藏）=====
 async function loadProjectPrefs() {
   try {
@@ -3765,6 +3799,15 @@ function bindEvents() {
       if (run) {
         event.preventDefault();
         showContextMenu(runContextItems(run), event.clientX, event.clientY);
+      }
+      return;
+    }
+    const sessionLink = event.target.closest("[data-session-project][data-session-id]");
+    if (sessionLink) {
+      const project = (state.projectsData?.projects ?? []).find((item) => item.id === sessionLink.dataset.sessionProject);
+      if (project) {
+        event.preventDefault();
+        showContextMenu(sessionContextItems(project, sessionLink.dataset.sessionId), event.clientX, event.clientY);
       }
       return;
     }

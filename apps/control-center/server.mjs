@@ -234,6 +234,13 @@ async function api(request, response, url) {
       state.pickingDirectory = false;
     }
   }
+  if (request.method === "POST" && pathname === "/api/sessions/reveal") {
+    // 资源管理器中定位历史会话 jsonl（路径由服务端安全解析，不信任前端拼装）
+    const { project, id } = await body(request);
+    const filePath = await state.sessions.resolveFilePath({ project, id });
+    spawn("explorer.exe", [`/select,${filePath}`], { detached: true, stdio: "ignore", windowsHide: false }).unref();
+    return json(response, 200, { revealed: filePath });
+  }
   if (request.method === "POST" && pathname === "/api/system/reveal") {
     // 在资源管理器中打开（本地特权面）：目录直接开，文件定位选中；路径必须真实存在
     const { path } = await body(request);

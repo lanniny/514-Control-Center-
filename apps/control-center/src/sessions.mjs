@@ -298,6 +298,31 @@ export class SessionAggregator {
     return result;
   }
 
+  // 会话 jsonl 的安全路径解析（与 preview 同纪律：白名单 + realpath 限根 + isFile）——
+  // 供"在资源管理器中定位会话文件"等只读定位用途
+  async resolveFilePath({ project, id } = {}) {
+    if (!safePathName(project) || !safePathName(id)) {
+      throw Object.assign(new Error("invalid project or session id"), { code: "VALIDATION_FAILED" });
+    }
+    const projectsRoot = join(this.home, ".claude", "projects");
+    const path = join(projectsRoot, project, `${id}.jsonl`);
+    let real;
+    let realRoot;
+    try {
+      [real, realRoot] = await Promise.all([realpath(path), realpath(projectsRoot)]);
+    } catch {
+      throw Object.assign(new Error("session not found"), { code: "SOURCE_NOT_FOUND" });
+    }
+    if (!real.startsWith(realRoot + sep)) {
+      throw Object.assign(new Error("session path escapes the projects root"), { code: "VALIDATION_FAILED" });
+    }
+    const info = await stat(real).catch(() => null);
+    if (!info?.isFile()) {
+      throw Object.assign(new Error("session not found"), { code: "SOURCE_NOT_FOUND" });
+    }
+    return real;
+  }
+
   // 历史对话只读预览：只回 user/assistant 文本骨架（不回 tool 结果/侧链——密钥最常藏在工具输出里），
   // 每条过双层 scrub + 截断。project/id 白名单校验防路径遍历。
   async preview({ project, id, maxMessages = PREVIEW_MAX_MESSAGES } = {}) {
