@@ -705,3 +705,18 @@ test("clearFinished skips a terminal run whose execution coroutine has not finis
   const secondPass = await fx.orchestrator.clearFinished();
   assert.ok(secondPass.runIds.includes(created.id), "协程收尾后再次清理成功");
 });
+
+test("session effort override validates the CLI whitelist and reaches the coordinator turn", async (t) => {
+  const fx = await fixture();
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  await assert.rejects(
+    () => fx.orchestrator.create({ prompt: "x", execute: false, permissionMode: "plan", effort: "ultra;rm" }),
+    { code: "INVALID_EFFORT" },
+  );
+  const created = await fx.orchestrator.create({ prompt: "x", execute: false, permissionMode: "plan", effort: "XHigh" });
+  assert.equal(created.effortOverride, "xhigh", "大小写归一后固化");
+  await fx.orchestrator.continue(created.id, { prompt: "go", agentId: "claude-fable" });
+  assert.equal(fx.calls.at(-1).effort, "xhigh", "主脑轮携带 /effort 覆盖到 adapter");
+  const plain = await fx.orchestrator.create({ prompt: "y", execute: false, permissionMode: "plan" });
+  assert.equal(plain.effortOverride, null, "未选择时不传（CLI 用自身默认档）");
+});

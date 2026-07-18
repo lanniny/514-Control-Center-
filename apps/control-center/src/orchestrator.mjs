@@ -264,6 +264,15 @@ export class Orchestrator {
       }
       modelOverride = requested;
     }
+    // /effort 会话级推理力度覆盖（claude 主脑轮生效）：CLI --effort 白名单四档，拒绝任意串进命令行
+    let effortOverride = null;
+    if (input.effort) {
+      const requestedEffort = String(input.effort).trim().toLowerCase();
+      if (!/^(?:low|medium|high|xhigh)$/.test(requestedEffort)) {
+        throw Object.assign(new Error(`unsupported effort level: ${requestedEffort}`), { code: "INVALID_EFFORT" });
+      }
+      effortOverride = requestedEffort;
+    }
     // 会话入口由团队主脑决定：主脑=规划/综合轮执行者（默认 claude-fable，旧 run 无字段时兜底）
     const coordinatorId = team?.coordinator || "claude-fable";
     const requestedMaxRounds = Number(input.maxRounds) || this.policy.limits.maxRounds;
@@ -299,6 +308,7 @@ export class Orchestrator {
       teamMembers: team ? [...team.members] : null, // 成员白名单快照，续聊按此服务端强制隔离（团队删除后仍固化）
       coordinatorId,
       modelOverride,
+      effortOverride,
       cwd: sessionCwd, // null=控制面默认（repoRoot）；有值=会话项目地址，CLI 原生会话落该项目
       collaborationMode: input.collaborationMode === "deep" ? "deep" : "standard",
       permissionMode: requestedPermissionMode,
@@ -443,6 +453,7 @@ export class Orchestrator {
         maxBudgetUsd: run.maxBudgetUsdPerTurn,
         timeoutMs: this.policy.limits.turnTimeoutMs,
         model: agentId === coordinatorId ? run.modelOverride || null : null, // /model 只作用于主脑轮
+        effort: agentId === coordinatorId ? run.effortOverride || null : null, // /effort 同样只作用于主脑轮
         cwd: run.cwd || null, // 会话项目地址（spawn 型适配器生效；常驻型 codex app-server 沿用启动 cwd）
         ...lifecycle,
       });

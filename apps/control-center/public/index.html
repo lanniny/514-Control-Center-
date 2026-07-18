@@ -385,11 +385,13 @@
                   </div>
                   <textarea id="task-input" name="prompt" rows="2" placeholder="描述要规划、实现、审查或调研的目标" required></textarea>
                   <div class="composer-footer">
-                    <fieldset class="segmented-control">
-                      <legend>风险等级</legend>
-                      <label><input type="radio" name="risk" value="low" /><span>低</span></label>
-                      <label><input type="radio" name="risk" value="medium" checked /><span>中</span></label>
-                      <label><input type="radio" name="risk" value="high" /><span>高</span></label>
+                    <fieldset class="segmented-control" id="task-effort-pick">
+                      <legend title="对应 CLI /effort：本次 claude 会话的推理力度（默认=CLI 自身默认档）">/effort</legend>
+                      <label><input type="radio" name="effort" value="" checked /><span>默认</span></label>
+                      <label><input type="radio" name="effort" value="low" /><span>low</span></label>
+                      <label><input type="radio" name="effort" value="medium" /><span>medium</span></label>
+                      <label><input type="radio" name="effort" value="high" /><span>high</span></label>
+                      <label><input type="radio" name="effort" value="xhigh" /><span>xhigh</span></label>
                     </fieldset>
                     <fieldset class="segmented-control">
                       <legend>权限模式</legend>
@@ -408,10 +410,10 @@
                     <label class="model-pick" id="task-model-pick" title="对应 CLI /model：本次会话 claude 主脑使用的模型">
                       <span aria-hidden="true">/model</span>
                       <select id="task-model" aria-label="选择模型">
-                        <option value="" selected>fable（默认）</option>
-                        <option value="opus">opus</option>
-                        <option value="sonnet">sonnet</option>
-                        <option value="haiku">haiku</option>
+                        <option value="" selected>claude-fable-5（默认）</option>
+                        <option value="claude-opus-4-8">claude-opus-4-8</option>
+                        <option value="claude-sonnet-5">claude-sonnet-5</option>
+                        <option value="claude-haiku-4-5-20251001">claude-haiku-4-5-20251001</option>
                       </select>
                     </label>
                     <button class="send-button" id="submit-task-button" type="submit" title="发起协作" aria-label="发起协作">

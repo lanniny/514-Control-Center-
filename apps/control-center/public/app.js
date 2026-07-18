@@ -196,6 +196,7 @@ function cacheElements() {
     "task-current-source",
     "task-model",
     "task-model-pick",
+    "task-effort-pick",
     "composer-mode-hint",
     "composer-new-task",
     "composer-cwd",
@@ -1909,6 +1910,7 @@ function setComposerMode(run, { waitingApproval = false } = {}) {
     elements["composer-cwd"].disabled = continuing;
   }
   elements["task-model-pick"].hidden = continuing; // /model 只在新任务时可选（run 已固化 modelOverride）
+  elements["task-effort-pick"].hidden = continuing; // /effort 同理（run 已固化 effortOverride，续聊显示会误导）
   elements["followup-agent-pick"].hidden = !continuing;
   // 轮间插话可用性前置告知：run 活跃时发送不打断当前轮，排队到轮边界送达（后端 pendingSteer FIFO）
   const steering = continuing && ACTIVE_RUN_STATES.has(run.status);
@@ -2790,7 +2792,9 @@ async function createRun(event) {
   if (selectedRun() && !state.sessionPreview) return continueSelectedRun(event);
   const prompt = elements["task-input"].value.trim();
   if (!prompt) return;
-  const risk = new FormData(elements["task-form"]).get("risk") ?? "medium";
+  // 任务表单的档位组对标 CLI /effort（risk 不再暴露，路由风险固定 medium；路由视图可单独按 risk 预览）
+  const risk = "medium";
+  const effort = String(new FormData(elements["task-form"]).get("effort") ?? "");
   const needsCurrentSource = elements["task-current-source"].checked;
   const permissionMode = String(new FormData(elements["task-form"]).get("permissionMode") ?? "plan");
   elements["submit-task-button"].disabled = true;
@@ -2816,6 +2820,7 @@ async function createRun(event) {
         teamId: state.selectedTeamId, // 会话按所选团队隔离能力配比
         maxBudgetUsdPerTurn: 2, // 真实 CLI 带工具轮，0.75 默认必超线；用满 policy 上限（permissions.json 可调）
         model: elements["task-model"]?.value || undefined, // /model：本会话 claude 主脑模型（空=profile 默认 fable）
+        effort: effort || undefined, // /effort：本会话 claude 主脑推理力度（空=CLI 自身默认档）
         cwd: state.pendingCwd || undefined, // 会话项目地址（空=控制面默认 repoRoot）
       },
     });

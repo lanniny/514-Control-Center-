@@ -13,7 +13,7 @@ export class ClaudeCliAdapter {
     this.cwd = cwd;
   }
 
-  async send({ sessionId, prompt, runId, signal, permissionMode = "plan", maxBudgetUsd = 2, timeoutMs = 15 * 60_000, model = null, cwd = null, onSessionStarted, onTurnSubmitting }) {
+  async send({ sessionId, prompt, runId, signal, permissionMode = "plan", maxBudgetUsd = 2, timeoutMs = 15 * 60_000, model = null, effort = null, cwd = null, onSessionStarted, onTurnSubmitting }) {
     const nativeSessionId = sessionId || randomUUID();
     const clientUserMessageId = randomUUID();
     const effectiveRequestedModel = model || this.model; // /model 会话级覆盖（orchestrator 已白名单校验）
@@ -41,6 +41,7 @@ export class ClaudeCliAdapter {
       "--max-budget-usd",
       String(maxBudgetUsd),
     ];
+    if (effort) args.push("--effort", effort); // /effort 会话级覆盖（orchestrator 已白名单四档校验）
     if (this.settingsFile) args.push("--settings", this.settingsFile);
     if (this.systemPromptFile) args.push("--system-prompt-file", this.systemPromptFile);
     if (sessionId) args.push("--resume", sessionId);
