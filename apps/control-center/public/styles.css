@@ -1942,13 +1942,12 @@ pre,
 }
 
 .composer-hint {
-  position: absolute;
-  top: 7px;
-  right: 16px;
+  /* 文档流右对齐（原绝对悬浮会与 textarea 首行文字叠印，"+新任务"热区盖住可点文字造成误触切走续聊） */
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 10px;
-  margin: 0;
+  margin: 0 0 5px;
   color: var(--text-soft);
   font-size: 11px;
   font-weight: 650;
@@ -2080,8 +2079,15 @@ pre,
 
 .composer-shell .composer-footer {
   flex-wrap: wrap;
+  align-items: center;
   margin-top: 7px;
   gap: 8px;
+}
+
+/* 发送键锚定最右：同行时 spacer(flex:1) 先吃剩余空间、auto margin 得 0 不干扰；
+   小屏换行落到下一行时无 grow 项、auto margin 生效贴右缘——不再被挤到左下角 */
+.composer-shell .send-button {
+  margin-left: auto;
 }
 
 .composer-shell .segmented-control {
@@ -2146,6 +2152,77 @@ pre,
   width: 16px;
   height: 16px;
   stroke-width: 2.4;
+}
+
+/* ➕ 附件按钮：与发送键同尺寸的中性圆钮，落座 footer 最左 */
+.attach-button {
+  display: inline-grid;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 50%;
+  background: var(--surface-muted);
+  color: var(--text-muted);
+  transition: border-color 120ms ease, color 120ms ease, transform 120ms ease;
+}
+
+.attach-button:hover {
+  border-color: var(--rose-line);
+  color: var(--rose);
+  transform: translateY(-1px);
+}
+
+.attach-button .icon {
+  width: 14px;
+  height: 14px;
+  stroke-width: 2.2;
+}
+
+/* 附件 chips：输入框上方一行小胶囊，×  可移除 */
+.attach-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 7px;
+}
+
+.attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 240px;
+  padding: 3px 6px 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: 99px;
+  background: var(--surface-muted);
+  color: var(--text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.attach-chip button {
+  display: inline-grid;
+  width: 16px;
+  height: 16px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-soft);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.attach-chip button:hover {
+  background: var(--rose-soft);
+  color: var(--rose);
 }
 
 .followup-composer {

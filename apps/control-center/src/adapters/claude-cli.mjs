@@ -41,7 +41,7 @@ export class ClaudeCliAdapter {
       "--max-budget-usd",
       String(maxBudgetUsd),
     ];
-    if (effort) args.push("--effort", effort); // /effort 会话级覆盖（orchestrator 已白名单四档校验）
+    if (effort) args.push("--effort", effort); // /effort 会话级覆盖（orchestrator 已白名单五档校验，含 ultracode）
     if (this.settingsFile) args.push("--settings", this.settingsFile);
     if (this.systemPromptFile) args.push("--system-prompt-file", this.systemPromptFile);
     if (sessionId) args.push("--resume", sessionId);

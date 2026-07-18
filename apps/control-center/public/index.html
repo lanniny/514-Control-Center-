@@ -383,24 +383,28 @@
                     <button class="composer-cwd" id="composer-cwd" type="button" hidden title="会话项目地址（点击更换）"></button>
                     <label id="composer-mode-hint" for="task-input">任务内容</label>
                   </div>
+                  <div class="attach-chips" id="attach-chips" hidden aria-label="已附加的资料文件"></div>
                   <textarea id="task-input" name="prompt" rows="2" placeholder="描述要规划、实现、审查或调研的目标" required></textarea>
                   <div class="composer-footer">
-                    <fieldset class="segmented-control" id="task-effort-pick">
-                      <legend title="对应 CLI /effort：本次 claude 会话的推理力度（默认=CLI 自身默认档）">/effort</legend>
-                      <label><input type="radio" name="effort" value="" checked /><span>默认</span></label>
-                      <label><input type="radio" name="effort" value="low" /><span>low</span></label>
-                      <label><input type="radio" name="effort" value="medium" /><span>medium</span></label>
-                      <label><input type="radio" name="effort" value="high" /><span>high</span></label>
-                      <label><input type="radio" name="effort" value="xhigh" /><span>xhigh</span></label>
-                    </fieldset>
-                    <fieldset class="segmented-control">
-                      <legend>权限模式</legend>
-                      <label><input type="radio" name="permissionMode" value="plan" checked /><span>Plan</span></label>
-                      <label><input type="radio" name="permissionMode" value="build" /><span>Build</span></label>
-                    </fieldset>
-                    <label class="check-control">
-                      <input type="checkbox" id="task-current-source" />
-                      <span>需要当前资料</span>
+                    <button type="button" class="attach-button" id="attach-button" title="附加资料文件（路径随任务提交，Claude 会读取作为上下文）" aria-label="附加资料文件">
+                      <svg class="icon" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
+                    </button>
+                    <label class="model-pick" id="task-effort-pick" title="对应 CLI /effort：本次 claude 会话的推理力度">
+                      <span aria-hidden="true">/effort</span>
+                      <select id="task-effort" aria-label="选择推理力度">
+                        <option value="low">low</option>
+                        <option value="medium">medium</option>
+                        <option value="high" selected>high</option>
+                        <option value="xhigh">xhigh</option>
+                        <option value="ultracode">ultracode</option>
+                      </select>
+                    </label>
+                    <label class="model-pick" id="task-permission-pick" title="权限模式：Plan=只读规划探索；Build=可写盘执行（提交后经审批门）">
+                      <span aria-hidden="true">权限</span>
+                      <select id="task-permission" aria-label="选择权限模式">
+                        <option value="plan" selected>Plan · 只读</option>
+                        <option value="build">Build · 写盘</option>
+                      </select>
                     </label>
                     <span class="composer-spacer"></span>
                     <label class="model-pick" id="followup-agent-pick" title="续聊消息发送给哪个团队成员" hidden>

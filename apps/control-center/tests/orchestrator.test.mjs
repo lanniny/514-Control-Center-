@@ -719,4 +719,6 @@ test("session effort override validates the CLI whitelist and reaches the coordi
   assert.equal(fx.calls.at(-1).effort, "xhigh", "主脑轮携带 /effort 覆盖到 adapter");
   const plain = await fx.orchestrator.create({ prompt: "y", execute: false, permissionMode: "plan" });
   assert.equal(plain.effortOverride, null, "未选择时不传（CLI 用自身默认档）");
+  const ultra = await fx.orchestrator.create({ prompt: "z", execute: false, permissionMode: "plan", effort: "ultracode" });
+  assert.equal(ultra.effortOverride, "ultracode", "ultracode 档在白名单内（CLI 实测接受）");
 });

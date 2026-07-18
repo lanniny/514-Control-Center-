@@ -87,6 +87,8 @@ function statusFor(error) {
   if (["CONFIRMATION_REQUIRED", "DEPLOYMENT_REQUIRED", "READ_ONLY_SOURCE", "FROZEN_BLOCK"].includes(error.code)) return 403;
   if (["VALIDATION_FAILED", "INVALID_PROMPT", "INVALID_JSON", "INVALID_DECISION", "PROVIDER_NOT_FOUND", "PROVIDER_UNAVAILABLE", "NO_ROUTE", "NO_INDEPENDENT_ROUTE", "ROUND_LIMIT", "INSUFFICIENT_ROUNDS", "SENSITIVE_PROMPT", "UNSUPPORTED_APPROVAL", "POLICY_VIOLATION", "ADAPTER_UNAVAILABLE", "TRANSACTION_INCONSISTENT"].includes(error.code)) return 422;
   if (error.code === "BODY_TOO_LARGE") return 413;
+  if (error.code === "PROCESS_TIMEOUT") return 408; // 系统选择框挂满 5 分钟未选属预期流程，不是服务端故障
+  if (error.code === "OUTPUT_LIMIT") return 413;
   return 500;
 }
 
@@ -179,6 +181,9 @@ async function api(request, response, url) {
     state.pickingDirectory = true;
     try {
       const script = [
+        // stdout 编码钉死 UTF-8：中文 Windows 的 powershell 管道默认 OEM 码页（GBK），
+        // runProcess 按 UTF-8 解码会把含中文的路径整条打成 U+FFFD（附件/项目地址静默失效）
+        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8",
         "Add-Type -AssemblyName System.Windows.Forms",
         "$f = New-Object System.Windows.Forms.FolderBrowserDialog",
         "$f.Description = '选择会话项目地址'",
@@ -195,6 +200,36 @@ async function api(request, response, url) {
       });
       const path = picked.stdout.trim().split(/\r?\n/).filter(Boolean).pop() || "";
       return json(response, 200, path ? { path } : { cancelled: true });
+    } finally {
+      state.pickingDirectory = false;
+    }
+  }
+  if (request.method === "POST" && pathname === "/api/system/pick-file") {
+    // 附件文件选择框（与目录选择器共用单例锁：同时只弹一个系统对话框）
+    if (state.pickingDirectory) return json(response, 409, { error: { code: "PICKER_BUSY", message: "a system picker is already open" } });
+    state.pickingDirectory = true;
+    try {
+      const script = [
+        // stdout 编码钉死 UTF-8：中文 Windows 的 powershell 管道默认 OEM 码页（GBK），
+        // runProcess 按 UTF-8 解码会把含中文的路径整条打成 U+FFFD（附件/项目地址静默失效）
+        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8",
+        "Add-Type -AssemblyName System.Windows.Forms",
+        "$f = New-Object System.Windows.Forms.OpenFileDialog",
+        "$f.Title = '附加资料文件'",
+        "$f.Multiselect = $true",
+        "$f.CheckFileExists = $true",
+        "$owner = New-Object System.Windows.Forms.Form -Property @{ TopMost = $true; ShowInTaskbar = $false; WindowState = 'Minimized' }",
+        "$owner.Show(); $owner.Activate()",
+        "$result = $f.ShowDialog($owner)",
+        "$owner.Close()",
+        "if ($result -eq [System.Windows.Forms.DialogResult]::OK) { $f.FileNames | ForEach-Object { Write-Output $_ } }",
+      ].join("; ");
+      const picked = await runProcess("powershell.exe", ["-NoProfile", "-STA", "-Command", script], {
+        timeoutMs: 5 * 60_000,
+        maxOutputBytes: 256 * 1024, // Multiselect 数百条长路径也容得下
+      });
+      const paths = picked.stdout.trim().split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+      return json(response, 200, paths.length ? { paths } : { cancelled: true });
     } finally {
       state.pickingDirectory = false;
     }

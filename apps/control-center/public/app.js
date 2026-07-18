@@ -116,6 +116,7 @@ const state = {
   // opt-in 记在 sessionStorage——与访问 token 同生命周期，重开 Console 需重新选择
   projectSummaries: false,
   sessionPreview: null,
+  attachments: [], // ➕ 附加的资料文件路径（随任务/续聊提交并入 prompt，Claude 自行读取）
   previewSeq: 0,
   projectsSeq: 0,
   teams: [],
@@ -193,7 +194,11 @@ function cacheElements() {
     "followup-agent-pick",
     "task-form",
     "task-input",
-    "task-current-source",
+    "task-effort",
+    "task-permission",
+    "task-permission-pick",
+    "attach-button",
+    "attach-chips",
     "task-model",
     "task-model-pick",
     "task-effort-pick",
@@ -1896,6 +1901,23 @@ function runFailureMarkup(run) {
 }
 
 // 胶囊 composer 双模式：run=null → 新任务；run → 续聊当前原生会话（一个输入框，语义随上下文切换）
+// ➕ 附件：路径清单并入 prompt 尾部（CLI 有读文件工具，Claude 自行读取；不上传内容本身）
+function withAttachments(prompt) {
+  if (!state.attachments.length) return prompt;
+  return `${prompt}\n\n[附件资料——请读取以下文件作为本任务的上下文]\n${state.attachments.map((path) => `- ${path}`).join("\n")}`;
+}
+
+function renderAttachments() {
+  const box = elements["attach-chips"];
+  box.hidden = !state.attachments.length;
+  box.innerHTML = state.attachments
+    .map((path, index) => {
+      const name = String(path).replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path;
+      return `<span class="attach-chip" title="${escapeHtml(path)}">📄 ${escapeHtml(name)}<button type="button" data-detach="${index}" aria-label="移除附件 ${escapeHtml(name)}">×</button></span>`;
+    })
+    .join("");
+}
+
 function setComposerMode(run, { waitingApproval = false } = {}) {
   const continuing = Boolean(run);
   elements["composer-mode-hint"].textContent = continuing ? "续聊当前会话" : "任务内容";
@@ -1911,6 +1933,7 @@ function setComposerMode(run, { waitingApproval = false } = {}) {
   }
   elements["task-model-pick"].hidden = continuing; // /model 只在新任务时可选（run 已固化 modelOverride）
   elements["task-effort-pick"].hidden = continuing; // /effort 同理（run 已固化 effortOverride，续聊显示会误导）
+  elements["task-permission-pick"].hidden = continuing; // 权限同理（run 已固化，Build 升权走审批门不走续聊）
   elements["followup-agent-pick"].hidden = !continuing;
   // 轮间插话可用性前置告知：run 活跃时发送不打断当前轮，排队到轮边界送达（后端 pendingSteer FIFO）
   const steering = continuing && ACTIVE_RUN_STATES.has(run.status);
@@ -2792,16 +2815,16 @@ async function createRun(event) {
   if (selectedRun() && !state.sessionPreview) return continueSelectedRun(event);
   const prompt = elements["task-input"].value.trim();
   if (!prompt) return;
-  // 任务表单的档位组对标 CLI /effort（risk 不再暴露，路由风险固定 medium；路由视图可单独按 risk 预览）
+  // 档位对标 CLI：/effort 折叠下拉恒有值；权限折叠下拉（plan/build）；路由风险固定 medium
   const risk = "medium";
-  const effort = String(new FormData(elements["task-form"]).get("effort") ?? "");
-  const needsCurrentSource = elements["task-current-source"].checked;
-  const permissionMode = String(new FormData(elements["task-form"]).get("permissionMode") ?? "plan");
+  const effort = elements["task-effort"].value;
+  const permissionMode = elements["task-permission"].value;
+  const fullPrompt = withAttachments(prompt);
   elements["submit-task-button"].disabled = true;
 
   let route = null;
   try {
-    route = await previewRoute(prompt, "auto", String(risk), needsCurrentSource);
+    route = await previewRoute(fullPrompt, "auto", String(risk), false); // 预览与实际提交同一文本（含附件块）
   } catch (error) {
     appendDiagnostic(`任务预路由不可用，将由运行时最终路由：${error.message}`, "warning");
   }
@@ -2810,17 +2833,16 @@ async function createRun(event) {
     const payload = await request(API.runs, {
       method: "POST",
       body: {
-        prompt,
+        prompt: fullPrompt,
         taskType: undefined,
         risk,
         execute: true,
         collaborationMode: "deep",
         permissionMode,
-        needsCurrentSource,
         teamId: state.selectedTeamId, // 会话按所选团队隔离能力配比
         maxBudgetUsdPerTurn: 2, // 真实 CLI 带工具轮，0.75 默认必超线；用满 policy 上限（permissions.json 可调）
         model: elements["task-model"]?.value || undefined, // /model：本会话 claude 主脑模型（空=profile 默认 fable）
-        effort: effort || undefined, // /effort：本会话 claude 主脑推理力度（空=CLI 自身默认档）
+        effort, // /effort：本会话 claude 主脑推理力度（对标 CLI 档位表，默认 high）
         cwd: state.pendingCwd || undefined, // 会话项目地址（空=控制面默认 repoRoot）
       },
     });
@@ -2830,6 +2852,8 @@ async function createRun(event) {
     if (state.sessionPreview) closeSessionPreview({ restoreFocus: false }); // 新任务落地即退出历史预览（烛 R5 致命2）
     state.selectedRunId = run.id;
     elements["task-input"].value = "";
+    state.attachments = [];
+    renderAttachments();
     toast("任务已交给控制面", "success");
     appendDiagnostic(`任务创建 ${run.id}: ${prompt.slice(0, 80)}`);
     renderRuns();
@@ -2853,12 +2877,14 @@ async function continueSelectedRun(event) {
     const acknowledge = state.recoveryAckRunId === run.id;
     const payload = await request(`/api/runs/${encodeURIComponent(run.id)}/messages`, {
       method: "POST",
-      body: { prompt, agentId: elements["followup-agent"].value, ...(acknowledge ? { acknowledgeRecovery: true } : {}) },
+      body: { prompt: withAttachments(prompt), agentId: elements["followup-agent"].value, ...(acknowledge ? { acknowledgeRecovery: true } : {}) },
     });
     const updated = normalizeRun(payload?.run ?? payload, 0);
     state.runs = [updated, ...state.runs.filter((item) => item.id !== updated.id)];
     state.recoveryAckRunId = null; // 确认标记一次性消费
     elements["task-input"].value = "";
+    state.attachments = [];
+    renderAttachments();
     // 排队与即时送达如实区分：活跃 run 的 continue 进 pendingSteer，不是"已完成"
     const queuedDepth = Array.isArray(updated.pendingSteer) ? updated.pendingSteer.length : 0;
     toast(queuedDepth ? `轮间插话已排队（第 ${queuedDepth} 位），当前轮结束后送达` : "续接消息已完成", "success");
@@ -3422,6 +3448,28 @@ function bindEvents() {
   elements["session-cwd-input"].addEventListener("input", updateSessionCwdHint);
   elements["session-close-button"].addEventListener("click", () => elements["session-dialog"].close());
   elements["session-cancel-button"].addEventListener("click", () => elements["session-dialog"].close());
+  elements["attach-button"].addEventListener("click", async () => {
+    // ➕ 附件：服务端原生文件选择框（多选），路径入 chips、提交时并入 prompt
+    const button = elements["attach-button"];
+    button.disabled = true;
+    try {
+      const result = await request("/api/system/pick-file", { method: "POST" });
+      if (Array.isArray(result.paths) && result.paths.length) {
+        for (const path of result.paths) if (!state.attachments.includes(path)) state.attachments.push(path);
+        renderAttachments();
+      }
+    } catch (error) {
+      toast(`附件选择失败：${error.message}`, "error");
+    } finally {
+      button.disabled = false;
+    }
+  });
+  elements["attach-chips"].addEventListener("click", (event) => {
+    const detach = event.target.closest("[data-detach]");
+    if (!detach) return;
+    state.attachments.splice(Number(detach.dataset.detach), 1);
+    renderAttachments();
+  });
   elements["session-browse-button"].addEventListener("click", async () => {
     // 弹本机资源管理器目录选择框（服务端原生对话框，可拿绝对路径）
     const button = elements["session-browse-button"];

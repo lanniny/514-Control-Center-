@@ -264,11 +264,12 @@ export class Orchestrator {
       }
       modelOverride = requested;
     }
-    // /effort 会话级推理力度覆盖（claude 主脑轮生效）：CLI --effort 白名单四档，拒绝任意串进命令行
+    // /effort 会话级推理力度覆盖（claude 主脑轮生效）：CLI --effort 白名单五档（含 ultracode，
+    // 2026-07-19 headless 实测 CLI 接受），拒绝任意串进命令行
     let effortOverride = null;
     if (input.effort) {
       const requestedEffort = String(input.effort).trim().toLowerCase();
-      if (!/^(?:low|medium|high|xhigh)$/.test(requestedEffort)) {
+      if (!/^(?:low|medium|high|xhigh|ultracode)$/.test(requestedEffort)) {
         throw Object.assign(new Error(`unsupported effort level: ${requestedEffort}`), { code: "INVALID_EFFORT" });
       }
       effortOverride = requestedEffort;
