@@ -31,6 +31,9 @@ export class Orchestrator {
     this.closing = false;
     this.runDir = join(dataRoot, "runs");
     this.saveChains = new Map(); // per-run 写盘串行链（save 竞态修复），完成即自清
+    // 已清除 run 的墓碑：终态尾巴协程（drain 收尾/emitEvent 降级路径）持有 run 引用的迟到 save
+    // 会绕过 Map 复活文件——墓碑让 save 直接丢弃。uuid 每条约 40B、清除频率低，不回收。
+    this.clearedRuns = new Set();
   }
 
   async init() {
@@ -42,14 +45,18 @@ export class Orchestrator {
       names = [];
     }
     for (const name of names.filter((item) => item.endsWith(".json"))) {
+      let run = null;
       try {
-        const run = JSON.parse(await readFile(join(this.runDir, name), "utf8"));
+        run = JSON.parse(await readFile(join(this.runDir, name), "utf8"));
+        let restatedOnRestart = false; // 重启改写必须落盘，否则内存与磁盘分叉（烛 wave2 回炉 P2）
         if (run.status === "waiting_approval") {
+          restatedOnRestart = true;
           run.status = "cancelled";
           if (run.buildApproval) run.buildApproval.status = "expired";
           run.error = "Pending approval expired when the control plane restarted.";
           run.recoveryNote = "Submit a new build run to create a fresh action-bound approval.";
         } else if (["running", "waiting_agent"].includes(run.status)) {
+          restatedOnRestart = true;
           if (run.permissionMode === "build") {
             run.status = "cancelled";
             if (run.buildApproval) run.buildApproval.status = "revoked";
@@ -64,9 +71,14 @@ export class Orchestrator {
             run.recoveryNote = "Control plane restarted; native session IDs are retained and can be continued.";
           }
         }
-        this.runs.set(run.id, run);
+        // 重启改写必须先成功落盘才入内存（烛 wave2 回炉 P2a）：save 失败抛进外层 catch。
+        // save() 成功路径内部已做 runs.set。
+        if (restatedOnRestart) await this.save(run);
+        else this.runs.set(run.id, run);
       } catch {
-        // Invalid run files remain on disk for forensic inspection.
+        // 解析失败或落盘失败的 run 不入内存、文件留盘待查。save() 的同步段先 runs.set 后写盘，
+        // 真实 writeFile/rename 失败时 run 已在 Map——此处显式移除，堵住内存新态/磁盘旧态分叉。
+        if (run?.id) this.runs.delete(run.id);
       }
     }
     return this;
@@ -106,6 +118,7 @@ export class Orchestrator {
   }
 
   async save(run) {
+    if (this.clearedRuns.has(run.id)) return run; // 墓碑：已清除 run 的迟到写盘直接丢弃，不复活文件
     // 竞态修复（烛 wave2 P1）：旧序"快照 → await 写盘 → 回写旧快照"会把写盘窗口内的并发变更
     // （pendingSteer.push/shift、turns.push）用旧快照覆盖抹掉——用户插话可能静默丢失或已执行项
     // 被写回重复执行。现序两根支柱：①快照+回写在同一 tick 内完成（事件循环内原子，无覆盖窗口）；
@@ -116,6 +129,8 @@ export class Orchestrator {
     this.runs.set(run.id, run);
     const previous = this.saveChains.get(run.id) || Promise.resolve();
     const flush = previous.catch(() => {}).then(async () => {
+      // 写盘前复查墓碑（纵深防御，烛 R6）：清理窗口内已通过入口检查、排在链上的迟到写盘也丢弃
+      if (this.clearedRuns.has(run.id)) return;
       const target = join(this.runDir, `${run.id}.json`);
       const temp = join(this.runDir, `.${run.id}.${randomUUID()}.tmp`);
       await writeFile(temp, `${JSON.stringify(safe, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
@@ -149,10 +164,34 @@ export class Orchestrator {
   async clearFinished() {
     const cleared = [];
     for (const run of [...this.runs.values()]) {
-      if (!TERMINAL.has(run.status)) continue;
+      // 活跃协程门闩（烛 R7）：终态置位与协程收尾之间（emitEvent/排干轮间的 await 窗口）不清理——
+      // 否则协程持有的 run 被删、get 抛 RUN_NOT_FOUND 或"记录已清、agent 仍执行"。跳过本轮，下次再收。
+      const coroutineActive = () =>
+        this.controllers.has(run.id) || this.executions.has(run.id) || this.executions.has(`continue:${run.id}`);
+      if (!TERMINAL.has(run.status) || coroutineActive()) continue;
       try {
-        await rm(join(this.runDir, `${run.id}.json`), { force: true });
+        // 清理屏障（烛 wave2 回炉 P1a）：①循环收敛在途写链——等待期间挂上的新链继续等，
+        // 只删自己等完的那条引用，不误删新链②复查 terminal（等待期间被续聊激活则放过）
+        // ③先摘内存 Map 再删文件——摘除后 continue 必 RUN_NOT_FOUND，rm 的 await 窗口内
+        // 不可能再产生新 save 链或激活，迟到 rename 复活与误删活跃 run 两个口同时堵死。
+        let chain;
+        while ((chain = this.saveChains.get(run.id))) {
+          await chain.catch(() => {});
+          if (this.saveChains.get(run.id) === chain) {
+            this.saveChains.delete(run.id);
+            break;
+          }
+        }
+        if (!TERMINAL.has(run.status) || coroutineActive()) continue; // 链等待期间被激活/新协程接管则放过
         this.runs.delete(run.id);
+        this.clearedRuns.add(run.id); // 墓碑先立（与 Map 摘除同 tick）：rm 的 await 窗口内迟到 save 直接被丢弃（烛 R6）
+        try {
+          await rm(join(this.runDir, `${run.id}.json`), { force: true });
+        } catch (removeError) {
+          this.clearedRuns.delete(run.id); // 删盘失败撤销墓碑并恢复内存可见性——磁盘还在就不能装作已清除
+          this.runs.set(run.id, run);
+          throw removeError;
+        }
         cleared.push(run.id);
       } catch {
         // 删除失败的保留在列表，如实反映磁盘状态
@@ -568,7 +607,8 @@ export class Orchestrator {
         if (!(await this.injectNextSteer(run))) break;
         run.result = { ...(run.result || {}), continued: run.turns.at(-1)?.text ?? null };
       }
-      run.status = "succeeded";
+      // abort 与拓扑收尾竞态：取消回执优先，不改回 succeeded
+      run.status = controller.signal.aborted ? "cancelled" : "succeeded";
       await this.save(run);
       await this.emitEvent(run, "run.completed", { status: run.status, rounds: run.round, sessions: run.sessions }, { runId: run.id });
     } catch (error) {
@@ -577,16 +617,36 @@ export class Orchestrator {
       await this.save(run);
       await this.emitEvent(run, "run.failed", { status: run.status, code: error.code || null, message: error.message }, { runId: run.id });
     } finally {
-      this.controllers.delete(id);
+      // 只删自己的 controller：terminal 置位到此处之间新 continue 可能已接管同键（烛 wave2 R5 余波）
+      if (this.controllers.get(id) === controller) this.controllers.delete(id);
     }
     return this.get(id);
   }
 
   startExecution(id) {
     if (this.executions.has(id)) return this.executions.get(id);
-    const execution = this.execute(id).finally(() => this.executions.delete(id));
+    const execution = this.execute(id)
+      .finally(() => this.executions.delete(id))
+      .then(() => this.ensureSteerDrained(id));
     this.executions.set(id, execution);
     return execution;
+  }
+
+  // 收尾窗口兜底：terminal 置位与 controller/executions 释放之间排入的插话没有活跃消费者，
+  // 协程链彻底结束后补启后台 drain——排队项最多滞留一瞬，绝不静默丢失。队列空/run 已清除时 no-op。
+  ensureSteerDrained(id) {
+    if (this.closing) return; // 关闭中不重启任何排干（烛 R6）
+    const run = this.runs.get(id);
+    if (!run || this.clearedRuns.has(id)) return;
+    if (this.executions.has(id)) return; // 已有 execute/drain 在消费——再建 controller 只会覆盖占位（烛 R6）
+    if (!(run.pendingSteer || []).length) return;
+    // 仅 succeeded 补收：cancelled/failed 的留队是取消/失败语义的如实呈现，重启消费违背用户意图（烛 R6）
+    if (run.status !== "succeeded") return;
+    // 封顶主动留队（丢弃即停排、剩余如实可见）不是滞留——补启只会把留队项逐条丢光，违背审计语义
+    if (run.round >= this.policy.limits.maxRounds) return;
+    const controller = new AbortController();
+    this.controllers.set(id, controller); // cancel(id) 仍可中止补启的排干
+    this.startSteerDrain(id, controller);
   }
 
   // 取最早一条排队追问注入为下一轮：先发 user.message（前端实时可见），再走既有 turn 路径。
@@ -614,7 +674,7 @@ export class Orchestrator {
     try {
       while ((run.pendingSteer || []).length && !controller.signal.aborted) {
         if (!(await this.injectNextSteer(run))) break;
-        run.status = "succeeded";
+        run.status = controller.signal.aborted ? "cancelled" : "succeeded"; // 轮内被取消不覆盖 cancel 回执
         run.result = { ...(run.result || {}), continued: run.turns.at(-1)?.text ?? null };
         await this.save(run);
       }
@@ -624,7 +684,7 @@ export class Orchestrator {
       await this.save(run);
       await this.emitEvent(run, "run.failed", { status: run.status, code: error.code || null, message: error.message }, { runId: id });
     } finally {
-      this.controllers.delete(id);
+      if (this.controllers.get(id) === controller) this.controllers.delete(id);
     }
   }
 
@@ -632,7 +692,9 @@ export class Orchestrator {
   // 与 startExecution 同构的后台执行：进 executions（close() 会等待、isBusy() 计入），不进 HTTP 等待路径。
   startSteerDrain(id, controller) {
     if (this.executions.has(id)) return this.executions.get(id);
-    const drain = this.drainSteer(id, controller).finally(() => this.executions.delete(id));
+    const drain = this.drainSteer(id, controller)
+      .finally(() => this.executions.delete(id))
+      .then(() => this.ensureSteerDrained(id)); // 排干尾窗又排入的继续补收，队列空即终止递归
     this.executions.set(id, drain);
     return drain;
   }
@@ -651,10 +713,6 @@ export class Orchestrator {
     if (run.status === "recovery_required" && acknowledgeRecovery !== true) {
       throw Object.assign(new Error("the previous native turn has an ambiguous submission state"), { code: "RECOVERY_REQUIRED" });
     }
-    if (run.status === "recovery_required") {
-      run.recoveryAcknowledgedAt = new Date().toISOString();
-      run.recoveryNote = "Operator acknowledged the ambiguous prior turn before sending a new prompt.";
-    }
     if (!this.adapters.get(agentId)) throw Object.assign(new Error(`no executable adapter for ${agentId}`), { code: "ADAPTER_UNAVAILABLE" });
     // 续聊只能派给团队成员（派工白名单服务端强制，不信前端下拉）——旧 run 无快照时放行兼容
     if (Array.isArray(run.teamMembers) && !run.teamMembers.includes(agentId)) {
@@ -662,6 +720,12 @@ export class Orchestrator {
     }
     if (run.round >= this.policy.limits.maxRounds) {
       throw Object.assign(new Error("maximum collaboration rounds reached"), { code: "ROUND_LIMIT" });
+    }
+    // recovery 确认在全部准入校验通过后才写入（烛 wave2 回炉 P2）：先写后校验会在校验抛错时
+    // 留下未持久化的孤儿字段，内存与磁盘分叉
+    if (run.status === "recovery_required") {
+      run.recoveryAcknowledgedAt = new Date().toISOString();
+      run.recoveryNote = "Operator acknowledged the ambiguous prior turn before sending a new prompt.";
     }
     if (this.controllers.has(id)) {
       // 轮间插话：run 活跃时 continue 不再抛 RUN_ACTIVE——准入校验同上，排队持久化到 run.pendingSteer，
@@ -672,33 +736,47 @@ export class Orchestrator {
       await this.emitEvent(run, "run.steer_queued", { text: nextPrompt, agentId, depth: run.pendingSteer.length }, { runId: run.id, agentId: "LO" });
       return this.get(id);
     }
+    // HTTP 直接续聊注册进 executions（烛 wave2 回炉 R5/R6）：close() 等待、isBusy() 计入——
+    // 否则关闭时在途续聊的落盘不被等待、可能被进程 exit 截断。键加前缀避免与
+    // startExecution/startSteerDrain 的裸 id 去重键冲突（drain 启动需 has(id) 为空）。
+    // controller 建立、状态变更与 executions 注册同 tick 完成（首个 await 前）——close 的
+    // active 快照不再有"已进入但未注册"的漏等窗口。
     const controller = new AbortController();
     this.controllers.set(id, controller);
     run.status = "running";
     run.maxRounds = Math.min(this.policy.limits.maxRounds, Math.max(run.maxRounds, run.round + 1));
-    await this.save(run);
-    // 续聊的用户追问进对话历史（实时+重启后都可见）——否则只有 assistant 回复、看不到问的是什么
-    await this.emitEvent(run, "user.message", { text: nextPrompt }, { runId: run.id, agentId: "LO" });
-    let drainStarted = false;
-    try {
-      const text = await this.turn(run, agentId, nextPrompt);
-      run.status = "succeeded";
-      run.result = { ...(run.result || {}), continued: text };
-      await this.save(run);
-      // 本轮结束后仍有排队追问 → 后台 driver 接管同一 controller 逐轮排干（HTTP 即刻返回，不等排干）
-      if ((run.pendingSteer || []).length) {
-        this.startSteerDrain(id, controller);
-        drainStarted = true;
+    const continuation = (async () => {
+      let drainStarted = false;
+      try {
+        await this.save(run);
+        // 续聊的用户追问进对话历史（实时+重启后都可见）——否则只有 assistant 回复、看不到问的是什么
+        await this.emitEvent(run, "user.message", { text: nextPrompt }, { runId: run.id, agentId: "LO" });
+        const text = await this.turn(run, agentId, nextPrompt);
+        // abort 与轮完成竞态：cancel 已对用户回执 cancelled，即使轮恰好跑完也不改回 succeeded
+        run.status = controller.signal.aborted ? "cancelled" : "succeeded";
+        run.result = { ...(run.result || {}), continued: text };
+        await this.save(run);
+        // 本轮结束后仍有排队追问 → 后台 driver 接管同一 controller 逐轮排干（HTTP 即刻返回，不等排干）
+        if ((run.pendingSteer || []).length) {
+          this.startSteerDrain(id, controller);
+          drainStarted = true;
+        }
+        return this.get(id);
+      } catch (error) {
+        run.status = controller.signal.aborted ? "cancelled" : "failed";
+        run.error = error.message;
+        await this.save(run);
+        throw error;
+      } finally {
+        if (!drainStarted && this.controllers.get(id) === controller) this.controllers.delete(id);
       }
-      return this.get(id);
-    } catch (error) {
-      run.status = controller.signal.aborted ? "cancelled" : "failed";
-      run.error = error.message;
-      await this.save(run);
-      throw error;
-    } finally {
-      if (!drainStarted) this.controllers.delete(id);
-    }
+    })();
+    const tracked = continuation.finally(() => {
+      this.executions.delete(`continue:${id}`);
+      this.ensureSteerDrained(id); // 直接续聊的收尾窗兜底（同 startExecution 链）；同步 no-op 不阻塞 HTTP 返回
+    });
+    this.executions.set(`continue:${id}`, tracked);
+    return tracked;
   }
 
   async cancel(id) {
@@ -742,6 +820,18 @@ export class Orchestrator {
       await this.eventStore.emit("adapter.close_degraded", { message: error.message }, { agentId: "control-plane" }).catch(() => {});
     }
     await Promise.allSettled(active);
+    // 关闭前循环收敛全部在途写链（烛 wave2 回炉 P1b）：直接 HTTP continue 的写盘不在 executions
+    // 集合内；一次性快照会漏掉等待期间新挂的链（abort/catch 路径仍可 save）。每轮等完快照后
+    // 兜底清除"已 settle 但未自清"的条目（save() 的 finally 自清只覆盖它自己建的链），否则
+    // size 恒>0 死循环；被新链替换的条目留到下轮继续等。上游 server 先停 HTTP 再调 close，
+    // 新链来源有限、循环必然收敛。
+    while (this.saveChains.size) {
+      const snapshot = [...this.saveChains.entries()];
+      await Promise.allSettled(snapshot.map(([, chain]) => chain));
+      for (const [runId, chain] of snapshot) {
+        if (this.saveChains.get(runId) === chain) this.saveChains.delete(runId);
+      }
+    }
   }
 
   isBusy() {

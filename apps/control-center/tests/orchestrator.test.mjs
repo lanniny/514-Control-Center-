@@ -126,6 +126,10 @@ test("an approved build grant is not reused by a later manual continuation", asy
   const created = await fx.orchestrator.create({ prompt: "implement", execute: true, maxRounds: 3, permissionMode: "build" });
   const completed = await waitTerminal(fx.orchestrator, created.id);
   assert.equal(completed.status, "succeeded");
+  // 等收尾窗口关闭（terminal 置位后 controller 释放前 continue 会按设计排队而非直接执行）
+  while (fx.orchestrator.controllers.has(created.id)) {
+    await new Promise((resolveTick) => setTimeout(resolveTick, 5));
+  }
   const continued = await fx.orchestrator.continue(created.id, { prompt: "inspect the result", agentId: "codex-technical" });
   assert.equal(continued.status, "succeeded");
   assert.equal(fx.calls.at(-1).permissionMode, "read-only");
@@ -437,4 +441,267 @@ test("save never clobbers concurrent steer mutations; memory and disk converge l
     latest.pendingSteer.map((steer) => steer.prompt),
     "磁盘与内存逐项一致（无丢失、无重复、无回退）",
   );
+});
+
+test("clearFinished waits for in-flight save chains so cleared runs cannot resurrect", async (t) => {
+  const fx = await fixture();
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const created = await fx.orchestrator.create({ prompt: "implement", execute: false, permissionMode: "plan" });
+  const runPath = join(fx.root, "runs", `${created.id}.json`);
+  // 门闩模拟迟到的写盘：释放后才把快照写回磁盘（旧实现 rm 不等链，该写回会让已清除 run 复活）
+  let releaseSave;
+  const gate = new Promise((resolveGate) => { releaseSave = resolveGate; });
+  fx.orchestrator.saveChains.set(created.id, gate.then(async () => {
+    const { writeFile } = await import("node:fs/promises");
+    await writeFile(runPath, JSON.stringify(fx.orchestrator.get(created.id)), "utf8");
+  }));
+  const clearing = fx.orchestrator.clearFinished();
+  releaseSave();
+  const result = await clearing;
+  assert.ok(result.runIds.includes(created.id), "终态 run 被清除");
+  await assert.rejects(() => readFile(runPath, "utf8"), { code: "ENOENT" }, "在途写盘收敛后文件被删净，不复活");
+});
+
+test("close drains pending save chains before returning", async (t) => {
+  const fx = await fixture();
+  t.after(async () => { await rm(fx.root, { recursive: true, force: true }); });
+  const created = await fx.orchestrator.create({ prompt: "implement", execute: false, permissionMode: "plan" });
+  let flushed = false;
+  fx.orchestrator.saveChains.set(created.id, new Promise((resolveSlow) => setTimeout(resolveSlow, 120)).then(() => { flushed = true; }));
+  await fx.orchestrator.close();
+  assert.equal(flushed, true, "close 返回前全部在途写链已收敛（进程 exit 不截断写盘）");
+});
+
+test("recovery acknowledgement is not written when admission checks reject the continue", async (t) => {
+  const fx = await fixture();
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const created = await fx.orchestrator.create({ prompt: "implement", execute: false, permissionMode: "plan" });
+  const run = fx.orchestrator.get(created.id);
+  run.status = "recovery_required";
+  await assert.rejects(
+    () => fx.orchestrator.continue(created.id, { prompt: "retry", agentId: "no-such-agent", acknowledgeRecovery: true }),
+    { code: "ADAPTER_UNAVAILABLE" },
+  );
+  assert.equal(run.recoveryAcknowledgedAt, undefined, "校验拒绝时不留未持久化的孤儿确认字段");
+});
+
+test("restart-restated run statuses are persisted back to disk during init", async (t) => {
+  const fx = await fixture();
+  const root = fx.root;
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  const created = await fx.orchestrator.create({ prompt: "implement", execute: false, permissionMode: "plan" });
+  const runPath = join(root, "runs", `${created.id}.json`);
+  const record = JSON.parse(await readFile(runPath, "utf8"));
+  record.status = "running"; // 模拟控制面中断时的活跃态
+  const { writeFile } = await import("node:fs/promises");
+  await writeFile(runPath, JSON.stringify(record), "utf8");
+  await fx.orchestrator.close();
+  const { Orchestrator: Reloaded } = await import("../src/orchestrator.mjs");
+  const second = await new Reloaded({
+    router: { preview: async () => route() },
+    adapters: new Map(),
+    eventStore: { emit: async () => {} },
+    dataRoot: root,
+    policy: policy(),
+    approvalBroker: { request: async () => ({ decision: "accept" }), denyRun() {} },
+  }).init();
+  assert.equal(second.get(created.id).status, "waiting_agent", "重启改写进内存");
+  const persisted = JSON.parse(await readFile(runPath, "utf8"));
+  assert.equal(persisted.status, "waiting_agent", "重启改写同步落盘，内存与磁盘不分叉");
+  await second.close();
+});
+
+test("clearFinished keeps waiting when a new save chain appears mid-drain", async (t) => {
+  const fx = await fixture();
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const created = await fx.orchestrator.create({ prompt: "implement", execute: false, permissionMode: "plan" });
+  const runPath = join(fx.root, "runs", `${created.id}.json`);
+  const { writeFile } = await import("node:fs/promises");
+  let releaseFirst;
+  const firstGate = new Promise((resolveGate) => { releaseFirst = resolveGate; });
+  // 链 A settle 前夕挂上更迟的链 B（旧实现只等 A 且误删 B 引用，B 的迟到写盘会让文件复活）
+  fx.orchestrator.saveChains.set(created.id, firstGate.then(async () => {
+    await writeFile(runPath, JSON.stringify(fx.orchestrator.get(created.id)), "utf8");
+    fx.orchestrator.saveChains.set(created.id, (async () => {
+      await new Promise((resolveSlow) => setTimeout(resolveSlow, 60));
+      await writeFile(runPath, JSON.stringify(fx.orchestrator.get(created.id)), "utf8");
+    })());
+  }));
+  const clearing = fx.orchestrator.clearFinished();
+  releaseFirst();
+  const result = await clearing;
+  assert.ok(result.runIds.includes(created.id));
+  await assert.rejects(() => readFile(runPath, "utf8"), { code: "ENOENT" }, "循环收敛把链 B 也等完，文件不复活");
+});
+
+test("close keeps draining save chains that appear while it is waiting", async (t) => {
+  const fx = await fixture();
+  t.after(async () => { await rm(fx.root, { recursive: true, force: true }); });
+  const created = await fx.orchestrator.create({ prompt: "implement", execute: false, permissionMode: "plan" });
+  let secondFlushed = false;
+  fx.orchestrator.saveChains.set(created.id, new Promise((resolveSlow) => setTimeout(resolveSlow, 60)).then(() => {
+    // 首链收敛瞬间挂上新链（一次性快照会漏掉它）
+    fx.orchestrator.saveChains.set(created.id, new Promise((resolveNext) => setTimeout(resolveNext, 60)).then(() => { secondFlushed = true; }));
+  }));
+  await fx.orchestrator.close();
+  assert.equal(secondFlushed, true, "close 循环收敛等待期间新增的写链");
+});
+
+test("init skips a run whose restart restatement cannot be persisted", async (t) => {
+  const fx = await fixture();
+  const root = fx.root;
+  t.after(async () => { await rm(root, { recursive: true, force: true }); });
+  const created = await fx.orchestrator.create({ prompt: "implement", execute: false, permissionMode: "plan" });
+  const runPath = join(root, "runs", `${created.id}.json`);
+  const { writeFile } = await import("node:fs/promises");
+  const record = JSON.parse(await readFile(runPath, "utf8"));
+  record.status = "running";
+  await writeFile(runPath, JSON.stringify(record), "utf8");
+  await fx.orchestrator.close();
+  const { Orchestrator: Reloaded } = await import("../src/orchestrator.mjs");
+  class PersistFailing extends Reloaded {
+    // 模拟基类真实失败序：同步段已 runs.set，之后 writeFile/rename 才抛——init 的 catch 必须兜底移除
+    async save(run) {
+      this.runs.set(run.id, run);
+      throw new Error("disk full");
+    }
+  }
+  const second = await new PersistFailing({
+    router: { preview: async () => route() },
+    adapters: new Map(),
+    eventStore: { emit: async () => {} },
+    dataRoot: root,
+    policy: policy(),
+    approvalBroker: { request: async () => ({ decision: "accept" }), denyRun() {} },
+  }).init();
+  assert.throws(() => second.get(created.id), { code: "RUN_NOT_FOUND" }, "落盘失败的改写不入内存（不分叉），文件留盘待查");
+  const persisted = JSON.parse(await readFile(runPath, "utf8"));
+  assert.equal(persisted.status, "running", "磁盘原样保留 forensic 状态");
+  await second.close();
+});
+
+test("a late save from a lingering coroutine cannot resurrect a cleared run", async (t) => {
+  const fx = await fixture();
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const created = await fx.orchestrator.create({ prompt: "implement", execute: false, permissionMode: "plan" });
+  const run = fx.orchestrator.get(created.id); // 模拟终态尾巴协程仍持有的 run 引用
+  const runPath = join(fx.root, "runs", `${created.id}.json`);
+  const result = await fx.orchestrator.clearFinished();
+  assert.ok(result.runIds.includes(created.id));
+  await fx.orchestrator.save(run); // 迟到写盘（emitEvent 降级 / drain 收尾路径）
+  await assert.rejects(() => readFile(runPath, "utf8"), { code: "ENOENT" }, "墓碑丢弃迟到写盘，文件不复活");
+  assert.throws(() => fx.orchestrator.get(created.id), { code: "RUN_NOT_FOUND" }, "run 不回内存 Map");
+});
+
+test("a failed disk removal restores the run instead of orphaning it in memory", async (t) => {
+  const fx = await fixture();
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const created = await fx.orchestrator.create({ prompt: "implement", execute: false, permissionMode: "plan" });
+  const runPath = join(fx.root, "runs", `${created.id}.json`);
+  // node 打开文件带 FILE_SHARE_DELETE，句柄锁不住删除——把 run 文件换成非空目录让 rm 必然抛错
+  const { mkdir, writeFile } = await import("node:fs/promises");
+  await rm(runPath, { force: true });
+  await mkdir(runPath);
+  await writeFile(join(runPath, "hold.txt"), "block non-recursive rm", "utf8");
+  const result = await fx.orchestrator.clearFinished();
+  assert.ok(!result.runIds.includes(created.id), "删盘失败不谎报已清除");
+  assert.equal(fx.orchestrator.get(created.id).id, created.id, "run 恢复内存可见性（磁盘还在就不装作已清除）");
+});
+
+test("a direct HTTP continuation is tracked in executions so close waits for it", async (t) => {
+  const fx = await fixture();
+  t.after(async () => { await rm(fx.root, { recursive: true, force: true }); });
+  const created = await fx.orchestrator.create({ prompt: "implement", execute: false, permissionMode: "plan" });
+  let releaseTurn;
+  const gate = new Promise((resolveGate) => { releaseTurn = resolveGate; });
+  fx.orchestrator.adapters.get("claude-fable").send = async () => {
+    await gate;
+    return { sessionId: "s", text: "done", protocol: "mock" };
+  };
+  const continuing = fx.orchestrator.continue(created.id, { prompt: "go", agentId: "claude-fable" });
+  // continue 入口有多个 await（save/emitEvent）才到注册点，轮询等待而非赌单 tick
+  const registerDeadline = Date.now() + 1_000;
+  while (!fx.orchestrator.executions.has(`continue:${created.id}`) && Date.now() < registerDeadline) {
+    await new Promise((resolveTick) => setImmediate(resolveTick));
+  }
+  assert.ok(fx.orchestrator.executions.has(`continue:${created.id}`), "在途续聊注册进 executions（close 可等待）");
+  assert.equal(fx.orchestrator.isBusy(), true);
+  releaseTurn();
+  await continuing;
+  assert.ok(!fx.orchestrator.executions.has(`continue:${created.id}`), "完成后自清");
+  await fx.orchestrator.close();
+});
+
+test("cancelling a run with queued steers does not restart consumption afterwards", async (t) => {
+  const fx = await fixture();
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const created = await fx.orchestrator.create({ prompt: "route only", execute: false, permissionMode: "plan" });
+  let releaseTurn;
+  const gate = new Promise((resolveGate) => { releaseTurn = resolveGate; });
+  let markEntered;
+  const turnEntered = new Promise((resolveEnter) => { markEntered = resolveEnter; });
+  fx.orchestrator.adapters.get("claude-fable").send = async () => {
+    markEntered();
+    await gate;
+    return { sessionId: "s", text: "done", protocol: "mock" };
+  };
+  const continuing = fx.orchestrator.continue(created.id, { prompt: "第一轮", agentId: "claude-fable" });
+  await turnEntered;
+  await fx.orchestrator.continue(created.id, { prompt: "排队插话", agentId: "claude-fable" });
+  await fx.orchestrator.cancel(created.id);
+  releaseTurn();
+  await continuing.catch(() => {}); // 取消路径抛错属预期
+  await new Promise((resolveTimer) => setTimeout(resolveTimer, 50)); // 让链尾 ensure 有机会（不该）触发
+  const done = fx.orchestrator.get(created.id);
+  assert.equal(done.status, "cancelled");
+  assert.deepEqual(done.pendingSteer.map((steer) => steer.prompt), ["排队插话"], "取消后留队如实可见，不被补启消费");
+  assert.equal(fx.orchestrator.executions.size, 0, "无补启的排干协程");
+});
+
+test("a save already queued behind the chain is discarded once the tombstone lands", async (t) => {
+  const fx = await fixture();
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const created = await fx.orchestrator.create({ prompt: "implement", execute: false, permissionMode: "plan" });
+  const run = fx.orchestrator.get(created.id);
+  const runPath = join(fx.root, "runs", `${created.id}.json`);
+  // 门闩占住写链 → save 通过入口检查排在链上 → 墓碑落地 → 释放门闩 → flush 的写盘前复查应丢弃
+  let releaseChain;
+  fx.orchestrator.saveChains.set(created.id, new Promise((resolveChain) => { releaseChain = resolveChain; }));
+  const lateSave = fx.orchestrator.save(run);
+  fx.orchestrator.runs.delete(created.id);
+  fx.orchestrator.clearedRuns.add(created.id);
+  await rm(runPath, { force: true });
+  releaseChain();
+  await lateSave;
+  await assert.rejects(() => readFile(runPath, "utf8"), { code: "ENOENT" }, "链上迟到写盘被墓碑复查丢弃，文件不复活");
+});
+
+test("clearFinished skips a terminal run whose execution coroutine has not finished", async (t) => {
+  const fx = await fixture();
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  // 门闩 run.completed 事件写盘：execute 已置 succeeded 但协程卡在 emitEvent 的 await 窗口
+  let releaseEmit;
+  const emitGate = new Promise((resolveGate) => { releaseEmit = resolveGate; });
+  const originalEmit = fx.orchestrator.eventStore.emit.bind(fx.orchestrator.eventStore);
+  fx.orchestrator.eventStore.emit = async (type, data, context) => {
+    if (type === "run.completed") await emitGate;
+    return originalEmit(type, data, context);
+  };
+  const created = await fx.orchestrator.create({ prompt: "implement", execute: true, maxRounds: 3, permissionMode: "plan" });
+  const statusDeadline = Date.now() + 5_000;
+  while (Date.now() < statusDeadline && fx.orchestrator.get(created.id).status !== "succeeded") {
+    await new Promise((resolveTimer) => setTimeout(resolveTimer, 10));
+  }
+  assert.equal(fx.orchestrator.get(created.id).status, "succeeded");
+  assert.ok(fx.orchestrator.executions.has(created.id), "协程仍在（卡在事件写盘）");
+  const skipped = await fx.orchestrator.clearFinished();
+  assert.ok(!skipped.runIds.includes(created.id), "终态但协程未收尾——本轮跳过不清");
+  assert.equal(fx.orchestrator.get(created.id).id, created.id, "run 未被删除，协程不会 RUN_NOT_FOUND");
+  releaseEmit();
+  const drainDeadline = Date.now() + 5_000;
+  while (Date.now() < drainDeadline && (fx.orchestrator.executions.has(created.id) || fx.orchestrator.controllers.has(created.id))) {
+    await new Promise((resolveTimer) => setTimeout(resolveTimer, 10));
+  }
+  const secondPass = await fx.orchestrator.clearFinished();
+  assert.ok(secondPass.runIds.includes(created.id), "协程收尾后再次清理成功");
 });
