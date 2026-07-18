@@ -1,0 +1,41 @@
+---
+description: 514cc Agent 召唤、co-命令与能力地图
+alwaysApply: true
+---
+
+# 514cc Agent 与协作命令
+
+## 主驾
+
+Cursor Agent = 514cc 主驾。5 命名 Agent 花名册见 514cc-constitution §一。
+
+## 召唤方式
+
+| Agent | 方式 |
+|-------|------|
+| 烛 codex-reviewer | MCP 对话桥 `codex-agent`（codex/codex-reply + threadId）优先；CLI 降级 `'' | codex exec -p review --skip-git-repo-check "..."` 或 Task subagent |
+| Codex 技术执行者 | 对话桥 executor profile（workspace-write+网络）；CLI `'' | codex exec -p executor ...`（主驾规划+复核） |
+| 织 grok-researcher | grok-4.5 或 grok-researcher skill |
+| 匠 embedded-expert | Task subagent + embedded-expert skill |
+| 策 spec-architect | Task subagent + spec-architect skill |
+| 鉴 meta-reviewer | Task subagent + meta-reviewer skill（只读） |
+
+## /co-* 协作命令
+
+| 命令 | Skill | 用途 |
+|------|-------|------|
+| co-auto | auto-pilot | 全自动编排 |
+| co-enhance | enhance | Prompt 增强 |
+| co-review | codex-reviewer | 烛深度评审 |
+| co-research | grok-researcher | 织情报摘读 |
+| co-init | init | 初始化 .ai-shared/ |
+| co-status | status | 健康仪表盘 |
+| co-archive | archive | handoff 归档 |
+
+## MCP（Cursor）
+
+context7, github, playwright, supabase（插件）+ drawio（mcp.json）
+
+## 嵌入式工具链
+
+keil, gcc, jlink, openocd, probe-rs, can, serial, net, ssh, workflow, vibe, docx, ppt-image-first

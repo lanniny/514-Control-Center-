@@ -1,0 +1,237 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://514cc.local/schemas/control-center/contracts.schema.json",
+  "title": "514cc Control Center Contracts",
+  "$defs": {
+    "evidence": {
+      "type": "object",
+      "required": ["source", "verifiedAt"],
+      "properties": {
+        "source": {"type": "string"},
+        "detail": {"type": "string"},
+        "url": {"type": "string", "format": "uri"},
+        "verifiedAt": {"type": "string", "format": "date"}
+      },
+      "additionalProperties": false
+    },
+    "sourceRegistry": {
+      "type": "object",
+      "required": ["version", "explicit", "discover", "runtime"],
+      "properties": {
+        "$schema": {"type": "string"},
+        "version": {"type": "integer", "minimum": 1},
+        "explicit": {"type": "array", "items": {"$ref": "#/$defs/configSource"}},
+        "discover": {"type": "array", "items": {"$ref": "#/$defs/discoveryRule"}},
+        "runtime": {"type": "array", "items": {"$ref": "#/$defs/configSource"}}
+      },
+      "additionalProperties": false
+    },
+    "configSource": {
+      "type": "object",
+      "required": ["id", "path", "label", "kind", "scope"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "path": {"type": "string", "minLength": 1},
+        "label": {"type": "string", "minLength": 1},
+        "kind": {"enum": ["json", "yaml", "toml", "markdown", "text", "python"]},
+        "scope": {"enum": ["repo", "runtime"]},
+        "critical": {"type": "boolean", "default": false},
+        "writePolicy": {"enum": ["transactional", "deploy-only", "read-only"]},
+        "exposeContent": {"type": "boolean", "default": true},
+        "sensitive": {"type": "boolean", "default": false}
+      },
+      "additionalProperties": false
+    },
+    "discoveryRule": {
+      "type": "object",
+      "required": ["root", "critical"],
+      "properties": {
+        "root": {"type": "string"},
+        "extensions": {"type": "array", "items": {"type": "string"}},
+        "names": {"type": "array", "items": {"type": "string"}},
+        "critical": {"type": "boolean"}
+      },
+      "anyOf": [{"required": ["extensions"]}, {"required": ["names"]}],
+      "additionalProperties": false
+    },
+    "modelRegistry": {
+      "type": "object",
+      "required": ["version", "profiles"],
+      "properties": {
+        "$schema": {"type": "string"},
+        "version": {"type": "integer", "minimum": 1},
+        "profiles": {"type": "array", "items": {"$ref": "#/$defs/modelProfile"}}
+      },
+      "additionalProperties": false
+    },
+    "modelProfile": {
+      "type": "object",
+      "required": ["id", "label", "role", "provider", "adapter", "capabilities", "quality", "speed", "costTier", "enabled", "evidence"],
+      "properties": {
+        "id": {"type": "string"},
+        "label": {"type": "string"},
+        "role": {"type": "string"},
+        "provider": {"type": "string"},
+        "adapter": {"type": "string"},
+        "command": {"type": ["string", "null"]},
+        "model": {"type": ["string", "null"]},
+        "systemPromptFile": {"type": "string", "minLength": 1},
+        "capabilities": {"type": "array", "minItems": 1, "items": {"type": "string"}, "uniqueItems": true},
+        "defaultPermissionMode": {"enum": ["plan", "read-only", "workspace-write"]},
+        "quality": {"type": "number", "minimum": 0, "maximum": 1},
+        "speed": {"type": "number", "minimum": 0, "maximum": 1},
+        "costTier": {"type": "integer", "minimum": 1, "maximum": 5},
+        "enabled": {"type": "boolean"},
+        "healthMode": {"enum": ["command", "external"]},
+        "evidence": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/evidence"}}
+      },
+      "additionalProperties": false
+    },
+    "routingPolicy": {
+      "type": "object",
+      "required": ["version", "primaryCoordinator", "technicalExecutor", "maxRounds", "maxDepth", "maxParallelAgents", "requireHealthyProvider", "failOnUnavailableExplicitProvider", "weights", "rules", "independentPass"],
+      "properties": {
+        "$schema": {"type": "string"},
+        "version": {"type": "integer", "minimum": 1},
+        "primaryCoordinator": {"type": "string"},
+        "technicalExecutor": {"type": "string"},
+        "maxRounds": {"type": "integer", "minimum": 1, "maximum": 20},
+        "maxDepth": {"type": "integer", "minimum": 1, "maximum": 6},
+        "maxParallelAgents": {"type": "integer", "minimum": 1, "maximum": 16},
+        "requireHealthyProvider": {"type": "boolean"},
+        "failOnUnavailableExplicitProvider": {"type": "boolean"},
+        "weights": {
+          "type": "object",
+          "required": ["capability", "quality", "speed", "health", "cost"],
+          "properties": {
+            "capability": {"type": "number", "minimum": 0, "maximum": 1},
+            "quality": {"type": "number", "minimum": 0, "maximum": 1},
+            "speed": {"type": "number", "minimum": 0, "maximum": 1},
+            "health": {"type": "number", "minimum": 0, "maximum": 1},
+            "cost": {"type": "number", "minimum": 0, "maximum": 1}
+          },
+          "additionalProperties": false
+        },
+        "rules": {"type": "array", "items": {"type": "object", "required": ["id", "taskTypes", "prefer"], "properties": {"id": {"type": "string"}, "taskTypes": {"type": "array", "items": {"type": "string"}}, "prefer": {"type": "array", "items": {"type": "string"}}}, "additionalProperties": false}},
+        "independentPass": {
+          "type": "object",
+          "required": ["requiredFor", "mustDifferFromPrimary", "capabilities"],
+          "properties": {
+            "requiredFor": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+            "mustDifferFromPrimary": {"type": "boolean"},
+            "capabilities": {"type": "array", "minItems": 1, "items": {"type": "string"}, "uniqueItems": true}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "permissionPolicy": {
+      "type": "object",
+      "required": ["version", "defaultMode", "modes", "limits", "runtimeWrites", "secrets", "approval"],
+      "properties": {
+        "$schema": {"type": "string"},
+        "version": {"type": "integer", "minimum": 1},
+        "defaultMode": {"enum": ["plan", "review", "build"]},
+        "modes": {
+          "type": "object",
+          "required": ["plan", "review", "build"],
+          "additionalProperties": {
+            "type": "object",
+            "required": ["write", "shell", "network", "approvalRequired"],
+            "properties": {
+              "write": {"type": ["boolean", "string"]},
+              "shell": {"type": ["boolean", "string"]},
+              "network": {"type": ["boolean", "string"]},
+              "approvalRequired": {"type": "boolean"}
+            },
+            "additionalProperties": false
+          }
+        },
+        "limits": {
+          "type": "object",
+          "required": ["turnTimeoutMs", "maxRounds", "maxDepth", "maxParallelAgents", "maxBudgetUsdPerTurn"],
+          "properties": {
+            "turnTimeoutMs": {"type": "integer", "minimum": 1000, "maximum": 3600000},
+            "maxRounds": {"type": "integer", "minimum": 1, "maximum": 20},
+            "maxDepth": {"type": "integer", "minimum": 1, "maximum": 6},
+            "maxParallelAgents": {"type": "integer", "minimum": 1, "maximum": 16},
+            "maxBudgetUsdPerTurn": {"type": "number", "exclusiveMinimum": 0, "maximum": 50}
+          },
+          "additionalProperties": false
+        },
+        "runtimeWrites": {
+          "type": "object",
+          "required": ["allowed", "requiresApproval", "requiresBackup", "requiresReadback"],
+          "properties": {
+            "allowed": {"type": "boolean"},
+            "requiresApproval": {"type": "boolean"},
+            "requiresBackup": {"type": "boolean"},
+            "requiresReadback": {"type": "boolean"}
+          },
+          "additionalProperties": false
+        },
+        "secrets": {
+          "type": "object",
+          "required": ["exposeValues", "persistValues", "allowedReferences"],
+          "properties": {
+            "exposeValues": {"const": false},
+            "persistValues": {"const": false},
+            "allowedReferences": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+          },
+          "additionalProperties": false
+        },
+        "approval": {
+          "type": "object",
+          "required": ["ttlMs", "bindToActionSha256", "defaultDecision"],
+          "properties": {
+            "ttlMs": {"type": "integer", "minimum": 1000, "maximum": 3600000},
+            "bindToActionSha256": {"const": true},
+            "defaultDecision": {"const": "deny"}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "eventEnvelope": {
+      "type": "object",
+      "required": ["schemaVersion", "eventId", "sequence", "timestamp", "type", "runId", "sensitivity", "data"],
+      "properties": {
+        "schemaVersion": {"const": 1},
+        "eventId": {"type": "string", "format": "uuid"},
+        "sequence": {"type": "integer", "minimum": 1},
+        "timestamp": {"type": "string", "format": "date-time"},
+        "type": {"type": "string"},
+        "runId": {"type": ["string", "null"]},
+        "sessionId": {"type": ["string", "null"]},
+        "parentSessionId": {"type": ["string", "null"]},
+        "agentId": {"type": ["string", "null"]},
+        "correlationId": {"type": ["string", "null"]},
+        "causationId": {"type": ["string", "null"]},
+        "sensitivity": {"enum": ["public", "internal", "sensitive"]},
+        "data": {"type": "object"}
+      },
+      "additionalProperties": false
+    },
+    "run": {
+      "type": "object",
+      "required": ["id", "status", "prompt", "taskType", "createdAt", "updatedAt", "maxRounds", "round"],
+      "properties": {
+        "id": {"type": "string", "format": "uuid"},
+        "status": {"enum": ["queued", "running", "waiting_agent", "waiting_approval", "recovery_required", "succeeded", "failed", "cancelled"]},
+        "prompt": {"type": "string"},
+        "taskType": {"type": "string"},
+        "createdAt": {"type": "string", "format": "date-time"},
+        "updatedAt": {"type": "string", "format": "date-time"},
+        "maxRounds": {"type": "integer", "minimum": 1},
+        "round": {"type": "integer", "minimum": 0},
+        "route": {"type": ["object", "null"]},
+        "sessions": {"type": "object"},
+        "result": {},
+        "error": {"type": ["string", "null"]}
+      },
+      "additionalProperties": true
+    }
+  }
+}

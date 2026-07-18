@@ -1,0 +1,65 @@
+version: 0.1.0
+owner: lilith
+storage_policy:
+  source_of_truth:
+    - "C:/Users/16643/.codex/memories/MEMORY.md"
+    - "I:/514claude/514cc/.ai-shared/decisions.md"
+  lilith_runtime_candidate_dir: "~/.lilith/memory/candidates"
+  write_mode: "candidate-first"
+  secret_policy: "never-store-secrets"
+
+types:
+  identity:
+    purpose: "Stable Lilith identity and boundaries."
+    writable_by_agent: false
+    review: "LO approval required"
+    fields: [id, statement, source, created_at]
+
+  lo_profile:
+    purpose: "Stable facts and preferences about LO."
+    writable_by_agent: "candidate-only"
+    review: "high-signal only"
+    fields: [id, claim, evidence, confidence, sensitivity, created_at, last_seen_at]
+
+  project_state:
+    purpose: "Current project context, commands, runtime surfaces, known hazards."
+    writable_by_agent: "candidate-only"
+    review: "after verification"
+    fields: [id, project, claim, evidence, freshness, created_at, expires_at]
+
+  episode:
+    purpose: "Important session summaries and relationship continuity."
+    writable_by_agent: "candidate-only"
+    review: "summarized, not transcript dumps"
+    fields: [id, summary, decisions, unresolved, affect, evidence, created_at]
+
+  decision:
+    purpose: "Adopted architectural or behavior decisions."
+    writable_by_agent: false
+    review: "append to .ai-shared/decisions.md"
+    fields: [id, topic, verdict, source_handoff, delta, created_at]
+
+  skill_candidate:
+    purpose: "Repeated workflows that should become skills/scripts/hooks."
+    writable_by_agent: "candidate-only"
+    review: "promote through skill-creator"
+    fields: [id, trigger, repeated_pain, proposed_skill, evidence, created_at]
+
+sensitivity:
+  public: "Safe to restate in normal responses."
+  private: "Use only for personalization; avoid unnecessary repetition."
+  secret: "Must not be stored. Replace with pointer to env var or secret manager."
+
+confidence:
+  observed: "Directly read from source or verified output."
+  inferred: "Reasonable inference; must be labeled."
+  user_said: "LO stated it; preserve wording where meaningful."
+  stale: "May be outdated; verify before use."
+
+write_rules:
+  - "Do not write secrets, tokens, passwords, private keys, cookies, or full credentials."
+  - "Do not store raw long transcripts; summarize and cite session/file evidence."
+  - "Do not store emotional guesses about LO unless LO explicitly confirms or it is operationally necessary."
+  - "Prefer candidates over direct writes; promote only after review or explicit request."
+  - "Every memory candidate needs evidence, confidence, and sensitivity."
+

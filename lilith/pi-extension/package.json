@@ -1,0 +1,16 @@
+{
+  "name": "lilith-pi-extension",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+	"dependencies": {
+		"@earendil-works/pi-coding-agent": "0.79.6",
+		"typebox": "1.1.38",
+		"yaml": "2.9.0"
+	}
+}

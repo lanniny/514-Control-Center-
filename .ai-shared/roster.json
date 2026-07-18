@@ -1,0 +1,38 @@
+{
+  "$schema_note": "514cc agent 会话花名册（v3.5 对话桥）——稳定 id + 最近会话，召唤第 N 轮默认续会话（LiveAgent roster+resume 模式）。transport: mcp=codex-agent MCP 双工具 / exec=codex exec resume / api=HTTP API。身份字段(name)创建后不可变更；lastThreadId 跨会话失效则如实新开并更新。",
+  "updated": "2026-07-18",
+  "agents": {
+    "codex-reviewer": {
+      "name": "烛",
+      "role": "深度评审（review profile: read-only + never）",
+      "transport": "mcp",
+      "lastThreadId": "019f756a-7bbf-7231-9d65-66f83dada46d",
+      "lastRunAt": "2026-07-18",
+      "lastTopic": "Console 波次2数据呈现批 standard 评审 R1-R2 两轮 CHANGES_REQUESTED（P0 drift 退出码回归 + P1 steer 队列竞态）"
+    },
+    "codex-executor": {
+      "name": "Codex 技术执行者",
+      "role": "复杂技术实现/独立攻坚（executor profile: workspace-write）",
+      "transport": "mcp",
+      "lastThreadId": null,
+      "lastRunAt": null,
+      "lastTopic": null
+    },
+    "grok-researcher": {
+      "name": "织",
+      "role": "情报/快搜索/长文档（grok-4.5 + web MCP 联合）",
+      "transport": "api",
+      "lastThreadId": null,
+      "lastRunAt": null,
+      "lastTopic": null
+    },
+    "grok-build": {
+      "name": "Grok Build",
+      "role": "快执行/快综合（grok CLI 0.2.102，headless -p，模型 grok45-514 走反代）",
+      "transport": "cli",
+      "lastThreadId": null,
+      "lastRunAt": "2026-07-17",
+      "lastTopic": "install smoke: PONG-GROK"
+    }
+  }
+}

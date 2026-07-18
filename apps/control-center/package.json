@@ -1,0 +1,17 @@
+{
+  "name": "@514cc/control-center",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {"node": ">=22"},
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node server.mjs --dev",
+    "test": "node --test tests/*.test.mjs",
+    "probe": "node scripts/probe-clis.mjs",
+    "probe:codex-protocol": "node scripts/probe-codex-protocol.mjs",
+    "qa:ui": "node scripts/qa-ui.mjs",
+    "validate": "node scripts/validate-control-configs.mjs",
+    "smoke:collaboration": "node scripts/smoke-collaboration.mjs"
+  }
+}

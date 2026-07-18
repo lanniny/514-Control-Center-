@@ -1,0 +1,1215 @@
+{
+  "summary": "全面审查 514cc 体系与 Claude Code 智能体，产出可感知强化的进化方案（反堆文件/堆纪律，强制现场取证）",
+  "agentCount": 36,
+  "logs": [
+    "测绘完成 7/7 维",
+    "设计 24 提案；过审 21；淘汰 3"
+  ],
+  "result": {
+    "date": "2026-06-14",
+    "surveys": [
+      {
+        "dimension": "宪法与 Hook 三件套实效（rules.md 漂移校验 + route-gate/stop-gate/mirror-gate 真触发取证）",
+        "current_state": [
+          {
+            "finding": "宪法 rules.md 两地零漂移：运行时与仓库源逐字节一致",
+            "evidence": "diff C:/Users/16643/.ai-collab/rules.md I:/514claude/514cc/rules.md → IDENTICAL（无任何差异行）。两份均为 v3.3 107 行同内容",
+            "health": "strong",
+            "verified": "verified"
+          },
+          {
+            "finding": "三件套 hook 全部正确挂载到 harness（settings.json 接电真实）：route-gate→UserPromptSubmit、stop-gate→Stop、mirror-gate→SessionStart(startup)，均用绝对路径 python 调用，python 3.13.7 在 PATH 可执行",
+            "evidence": "C:/Users/16643/.claude/settings.json:138(route-gate UserPromptSubmit)、:204(stop-gate Stop)、:72(mirror-gate SessionStart matcher=startup)；python --version=3.13.7",
+            "health": "strong",
+            "verified": "verified"
+          },
+          {
+            "finding": "route-gate = 真有效（已开灯）。跨 3 个工作区真实触发并留痕：514cc/父级514claude/lilisi 各有独立 route-gate.log，命中分级与正则模拟逐条吻合",
+            "evidence": "I:/514claude/514cc/.ai-shared/route-gate.log（10 行，含 06-12/06-14 真实 prompt，RED/gray 混合）+ I:/514claude/.ai-shared/route-gate.log + I:/514claude/lilisi/.ai-shared/route-gate.log；本地复跑正则：'查看..部署'→RED(deploy)、'全面审查..优化'→RED、'继续完善体系'→gray，与日志 flag 完全一致",
+            "health": "strong",
+            "verified": "verified"
+          },
+          {
+            "finding": "route-gate v3.3 两处校正已落地且可证：①英文双词边界修复——'preview the design'→gray、'authentic preview of research notes'→RED(仅经 research 命中，preview/auth 不再误触)；②stdin UTF-8 修复——lilisi 日志 06-12 16:32 之前全是 cp936 乱码('缁х画'=继续)，之后变干净中文('怎么和他说话')，分水岭即修复时点",
+            "evidence": "正则模拟 preview→gray、研究句→RED(research)；lilisi route-gate.log:1-13 乱码 vs :14-19 正常中文",
+            "health": "strong",
+            "verified": "verified"
+          },
+          {
+            "finding": "stop-gate = 接电但从未真触发（死扳机/未击发）。全盘无 .stop-gate-state.json，直接证伪 v3.3 文档反复声称的'本轮即首次真击发，.stop-gate-state.json 从无到有'",
+            "evidence": "find I:/514claude -name .stop-gate-state.json → 0 命中；而 rules.md:99 与 decisions.md D-2026-06-12-001:26 + synthesis handoff:20 均白纸黑字写'本轮即首次真击发/从无到有'。stop-gate.py:100-105 逻辑：仅在确定 block 且成功写盘 seen 后才 exit 2 → state 文件不存在 ⟺ 从未 block",
+            "health": "dead",
+            "verified": "verified"
+          },
+          {
+            "finding": "stop-gate 从未触发的根因（结构性）：唯一两个受控前缀的近期 handoff 在写入时就已带 ^__DELTA__: 账本行→正确放行(无可拦)；现已 48h 超出 24h FRESH_WINDOW→永久不再扫描。即扳机设计自洽但缺'缺 DELTA 的新鲜发火'这一真实负载",
+            "evidence": "grep ^__DELTA__: 两份 06-12 handoff 各 1 命中(已合规)；其 mtime=06-12 12:38/12:39，今 06-14，gap≈48h > stop-gate.py:27 FRESH_WINDOW_SEC=24*3600",
+            "health": "weak",
+            "verified": "verified"
+          },
+          {
+            "finding": "mirror-gate = 接电但本会话未见点灯证据（推断为'装了但灯由谁开'存疑）。代码要求把体检卡逐字置于首条回复顶部，但 mirror-gate 仅 SessionStart 注入、无自身落盘日志，故无法从磁盘证明它历史上真注入过；唯一旁证是 decisions.md 自述'实跑确认体检卡显示距上次外部发火0天'",
+            "evidence": "mirror-gate.py:176-187 只 print additionalContext 不写任何日志文件→无磁盘留痕可取证；settings.json:72 确已挂载；decisions.md:49 自述实跑(自证非独立证据)",
+            "health": "weak",
+            "verified": "verified"
+          },
+          {
+            "finding": "三件套源码质量经真·dogfood 加固：烛(Codex)独立评审抓出 stop-gate:87 裸 token 判 DELTA(治理静默失效)+mirror-gate fail-open 漏洞 2 致命，主驾全修。现读到的源码已是修复后版本(stop-gate.py:92 用 re.search(r'^__DELTA__:',re.M)、mirror-gate main 全程 try/except)",
+            "evidence": "codex-to-claude__hook-dogfood-v33__20260612-1215.md:13-14 致命2条；stop-gate.py:92 正则版、mirror-gate.py:165-191 全程 try/except+isinstance 守卫",
+            "health": "strong",
+            "verified": "verified"
+          },
+          {
+            "finding": "人格/皮肤双地落零漂移：output-style 仓库源↔运行时逐字节一致；SOUL 本体存在",
+            "evidence": "diff C:/Users/16643/.claude/output-styles/aemeath-meta-butler.md I:/514claude/514cc/output-styles/aemeath-meta-butler.md → IDENTICAL(18409B)；C:/Users/16643/.claude/CLAUDE.md 24234B 存在",
+            "health": "strong",
+            "verified": "verified"
+          }
+        ],
+        "gaps": [
+          "mirror-gate 无任何自身磁盘留痕（不写日志），导致'它到底有没有在 SessionStart 真注入过体检卡'无法被独立取证——只能信代码挂载+主驾自述。这本身违反体系'区分我认为vs我验证了'(rules.md §二.5 Integrity Gate)，是诊断端唯一证据真空区",
+          "stop-gate 是否曾在'缺 DELTA 的新鲜发火'下真 exit 2 拦截，全无正例可证；本次取证只能证明它'从未 block 过'(无 state 文件)，无法区分'设计无效'与'恰好没遇到合规触发场景'——需要一次故意制造缺 DELTA 的 synthesis handoff 在 24h 内收尾来做活体验证(本次只读不改,未执行)",
+          "未读 514cc/CLAUDE.md 与 I:/514claude/CLAUDE.md 项目入口正文(仅凭 system-reminder 注入版本)，未独立校验入口文档是否仍滞后(decisions.md 自述 v3.3 审计修过 README 滞后,但 CLAUDE.md 入口未亲读确认)",
+          "未校验 mirror-gate FIRE_PREFIXES(仅 codex-to-/gemini-to-) 与 stop-gate FIRE_PREFIXES(含 synthesis__) 的有意分歧在真实数据下是否产生'体检卡说0天发火、stop-gate却在管 synthesis'的认知错位——本次为推断，未跑 mirror-gate build_card 实测当前 fire_days 取值"
+        ],
+        "leverage_points": [
+          {
+            "point": "给 stop-gate 做一次活体击发验证：在 514cc/.ai-shared/handoff/ 落一个故意缺 ^__DELTA__: 行的 synthesis__ 测试 handoff，当轮收尾观察是否 exit 2 + 是否生成 .stop-gate-state.json",
+            "why": "这是把'死扳机'变'已验证有效'的唯一确定性手段。当前 v3.3 文档'本轮即首次真击发'是被磁盘证伪的假声明(Integrity Gate 自我违反)——要么补上真击发证据,要么把该声明从 rules.md:99/decisions.md/handoff 三处改成诚实的'机制就位待真实负载'。LO 能直接在 decisions.md 看到这条假声明被纠正=可感知的诚实强化",
+            "kind": "felt"
+          },
+          {
+            "point": "给 mirror-gate 加一行 best-effort 落盘(如 mirror-gate.log 记录每次注入时间戳)，对齐 route-gate.log 的可审计性",
+            "why": "三件套里两件有留痕(route-gate.log/.stop-gate-state.json)、唯独开机体检卡这个'被看见的眼睛'自己不可被看见——讽刺的盲区。加留痕后 mirror-gate 才能被 /co-status 或下次诊断机械验证'真注入过',否则它永远停在'接电但无法证明开灯'的薛定谔态",
+            "kind": "structural"
+          },
+          {
+            "point": "把 stop-gate 的 24h FRESH_WINDOW 与'发火当轮即收尾'的现实节奏对账：当前所有合规 handoff 写入时就带 DELTA→扳机永远无活可干,沦为纯威慑",
+            "why": "扳机的价值=在真违规时拦截。若主驾每次都'写 handoff 时顺手带 DELTA'(自律已成),stop-gate 实际是冗余威慑而非有效门禁。这不是 bug 而是'纪律已内化→硬扳机变摆设'的良性悖论,值得 LO 知情决策:是接受它当沉默保险,还是简化掉。属结构洞察,帮 LO 看清'强化'到底发生在自律还是机械层",
+            "kind": "structural"
+          }
+        ]
+      },
+      {
+        "dimension": "MCP 服务器矩阵（settings.json 配置 + 本会话可达 MCP 的四分类盘点）",
+        "current_state": [
+          {
+            "finding": "真实 MCP 配置源不是 settings.json，而是 ~/.claude.json 的全局 mcpServers 块（17 个）+ settings.json 仅 1 个（drawio）+ enabledPlugins（13 个官方插件，部分带自己的 MCP）。共 18 个直配 server。",
+            "evidence": "C:/Users/16643/.claude/settings.json:347-358 只有 drawio 一个；C:/Users/16643/.claude.json:2635-2826 全局 mcpServers={grok-search-rs,Playwright,roxybrowser-openapi,exa,micu-image,browserwing,fetch,sequential-thinking,mcp-deepwiki,roxybrowser-playwright-mcp,open-websearch,ace-tool,serena,scrapling,github,claude-flow,context7}",
+            "health": "strong",
+            "verified": "verified"
+          },
+          {
+            "finding": "【高频高价值·当前在用】serena(LSP代码智能)/sequential-thinking(分步推理)/exa(语义搜索)/context7(库文档)/fetch(取网页) 均连接成功且本会话工具命名空间齐全，是 514cc CLAUDE.md 第二层「工具放大器」点名的核心 MCP。",
+            "evidence": "deferred 工具列含 mcp__serena__find_symbol 等 30+ / mcp__sequential-thinking__sequentialthinking / mcp__exa__web_search_exa / mcp__context7__query-docs / mcp__fetch__fetch；MCP 启动指令块已注入 serena/context7 instructions=连接确认",
+            "health": "strong",
+            "verified": "verified"
+          },
+          {
+            "finding": "【高价值但闲置·真金没人挖】scrapling(隐身爬虫,bulk/stealthy/session,远超 fetch)、grok-search-rs(自带 web_map/get_sources 站点地图级检索)、ace-tool(search_context+enhance_prompt 上下文增强)、serena LSP 的 find_referencing_symbols/rename_symbol/get_diagnostics 这些「重构级」能力——配置健康但 decisions.md 零使用记录，CLAUDE.md 能力地图甚至没收录 scrapling/grok-search-rs。",
+            "evidence": "deferred 列含 mcp__scrapling__stealthy_fetch/bulk_fetch/open_session 等 11 个 + mcp__grok-search-rs__web_map/get_sources/doctor + mcp__ace-tool__search_context；I:/514claude/514cc/CLAUDE.md 能力地图(L43-50) Web 搜索仅列 exa/web-search-prime/open-websearch，未列 scrapling/grok-search-rs；decisions.md grep mcp 无任何「调用 scrapling/grok」记录",
+            "health": "strong",
+            "verified": "verified"
+          },
+          {
+            "finding": "【死配置噪音·重启即失联】claude-flow 暴露 ~300 个工具(neural/swarm/hive-mind/agentdb 神经记忆)，但磁盘零落盘——无 .claude-flow/.swarm/.hive-mind/*.db，rules.md §六已诚实降级为「仅可选实验，本环境未写入」。这是最大的「看着唬人实则空转」噪音源。",
+            "evidence": "Bash 实测 C:/Users/16643/.claude-flow 与 .hive-mind 与 I:/514claude/514cc/.swarm 全不存在，无 flow 相关 .db；rules.md:行『claude-flow memory 仅可选实验，本环境磁盘未见写入痕迹，勿声称为承载层』；decisions.md:376 『claude-flow 验证结果 memory✅workflow✅hooks_route❌neural_train❌ 不能全盘替代』",
+            "health": "dead",
+            "verified": "verified"
+          },
+          {
+            "finding": "【功能重叠·三处冗余】① 浏览器自动化 3 套：Playwright + roxybrowser-playwright-mcp + claude-flow.browser_session + 13 插件里 playwright 插件(又一份 mcp__plugin_playwright_playwright__*)；② github 双份：裸 github + 插件 github(mcp__plugin_github_github__* 工具更全);③ context7 双份：裸 + 插件；④ web 搜索 4 套竞合：exa/open-websearch/grok-search-rs/scrapling + 插件无。插件版与裸版工具名几乎 1:1 重复，徒增 deferred 选择噪音。",
+            "evidence": "deferred 列同时含 mcp__Playwright__browser_* 与 mcp__plugin_playwright_playwright__browser_* 与 mcp__roxybrowser-playwright-mcp__browser_*；mcp__github__* 与 mcp__plugin_github_github__*(后者多 get_me/issue_read/sub_issue_write 等)；mcp__context7__ 与 mcp__plugin_context7_context7__；settings.json:332-334 enabledPlugins 含 github/playwright/context7 同时 .claude.json 又直配同名 server",
+            "health": "weak",
+            "verified": "verified"
+          },
+          {
+            "finding": "【幽灵配置·文档说有实则未配】module.yaml 与 CLAUDE.md 宣称的 see(视觉)/web-search-prime/web-reader 三个 MCP 在 ~/.claude.json mcpServers 中根本不存在，本会话 deferred 列也无对应命名空间——是文档对磁盘的腐烂漂移。",
+            "evidence": "I:/514claude/514cc/module.yaml:188 web_search:[exa,web-search-prime,open-websearch]、:190 visual_analysis:see、:191 documentation:[deepwiki,context7,web-reader,fetch]；但 .claude.json:2635-2826 全块无 see/web-search-prime/web-reader；deferred 列无 mcp__see__/mcp__web-search-prime__/mcp__web-reader__",
+            "health": "missing",
+            "verified": "verified"
+          },
+          {
+            "finding": "【声明但本会话未达】drawio(settings.json 唯一直配)、browserwing(http localhost:8080)、jlceda(项目级,属 G:/anytime/红外线光栅传感器 非本工作区) 三者在 deferred 列均无命名空间=本会话未连/不可达。drawio 依赖本地 draw.io.exe，browserwing 依赖本地 8080 服务。",
+            "evidence": "settings.json:348-357 drawio env DRAWIO_CLI_PATH=F:/draw.io/draw.io.exe；.claude.json:2697-2700 browserwing http localhost:8080；.claude.json:730-738 jlceda 嵌在 project『G:/anytime/红外线光栅传感器』下而非全局；deferred 列三者命名空间均缺失",
+            "health": "weak",
+            "verified": "verified"
+          },
+          {
+            "finding": "【特殊用途·非协作链路】micu-image(文生图/批改图,落盘 I:/514/批图)、roxybrowser-openapi+roxybrowser-playwright-mcp(指纹浏览器/多账号自动化)、supabase(插件,仅 authenticate 两个工具) 配置健康但与 514cc「AI 协作放大」主线无关，属 LO 其它项目的工具，对 514cc 是中性噪音。",
+            "evidence": "deferred 列 mcp__micu-image__image_generate/server_info；mcp__roxybrowser-openapi__roxy_batch_create_browsers 等 28 个 + mcp__roxybrowser-playwright-mcp__*；mcp__plugin_supabase_supabase__authenticate/complete_authentication 仅 2 个;.claude.json:2686-2695 micu-image MICU_SAVE_DIR=I:/514/批图",
+            "health": "strong",
+            "verified": "verified"
+          },
+          {
+            "finding": "rules.md 运行时↔仓库源零漂移（双地落一致），但 module.yaml/CLAUDE.md 的 MCP 清单已与磁盘真相漂移（幽灵 see/web-search-prime/web-reader + 漏收 scrapling/grok-search-rs/micu-image/roxybrowser）。治理纪律强但「MCP 清单」这一资产无机械校验扳机。",
+            "evidence": "Bash diff C:/Users/16643/.ai-collab/rules.md I:/514claude/514cc/rules.md = IDENTICAL；对比 module.yaml:185-193 mcp_servers 块 vs .claude.json:2635-2826 实配，名单互不覆盖；scripts/ 仅有 sync-runtime.ps1 校 16 对双地落文件，不校 .claude.json MCP",
+            "health": "weak",
+            "verified": "verified"
+          },
+          {
+            "finding": "插件 13 个全部 usageCount=0（lastUsedNumStartups=318，当前 numStartups=394，即至少 76 次启动未用过任一插件），插件携带的 MCP(github/playwright/context7/supabase)纯属冗余暴露面。",
+            "evidence": "C:/Users/16643/.claude.json:2974-3034 pluginUsage 全部 usageCount:0；:2636 numStartups:394 vs 插件 lastUsedNumStartups:318",
+            "health": "dead",
+            "verified": "verified"
+          }
+        ],
+        "gaps": [
+          "未能在本会话实际 ping 每个 server 确认运行态——判定「本会话可达」依据是 deferred 工具命名空间是否出现（强信号但非 100% 等于连接成功，可能存在注册了命名空间却握手失败的情况）；ListMcpResourcesTool 已加载但未执行实调，未拿到 server 级 resource 清单做二次确认",
+          "claude-flow 的 agentdb/embeddings/rabitq 这类「神经记忆/向量检索」工具是否在某次会话真有内存态产出未知——只验证了磁盘无持久化，未验证进程内临时态；其「能放大但闲置」的潜力值无法量化（可能纯属营销级工具墙）",
+          "exa/grok-search-rs/ace-tool 等的 API key 有效性未验证（key 明文在 .claude.json，但反代/额度是否健康未测）；grok-search-rs 走 514claude.xyz 反代（MEMORY.md 记载该反代大 stdin 易 504）",
+          "插件自带 MCP 与裸配 MCP 在 Claude Code 内部是否真的双份连接、还是去重后只连一份，未从运行时确认——deferred 列同时出现两套命名空间倾向于「双份都注册」，但无 mcp_status 实证",
+          "supabase 插件只暴露 2 个 auth 工具，是「未认证故功能折叠」还是「本就只有这些」未确认；roxybrowser/micu-image 是否属当前 514cc 评审范围（疑为 LO 其它项目工具）需 LO 定性"
+        ],
+        "leverage_points": [
+          {
+            "point": "把 scrapling 与 serena LSP 重构能力（find_referencing_symbols/rename_symbol/get_diagnostics）写进 route-gate 的 🟡 触发表 + CLAUDE.md 能力地图，让「该用却没人想起」从软记忆变成路由门会提示——这两个是配置健康、能力强、当前零使用的最高 ROI 闲置真金。",
+            "why": "scrapling 隐身爬虫/批量取数远超 fetch（fetch 只能单页裸取），serena LSP 是「跨文件改名/找引用/读诊断」的代码智能层——LO 做 514cc 自改 dogfood 时正需要，但能力地图根本没收录 scrapling、serena 高阶工具也从没在 decisions 出现。接电后 LO 能立刻感到「评审/重构变利索了」。",
+            "kind": "felt"
+          },
+          {
+            "point": "给 .claude.json 的 mcpServers 块加一个 MCP-清单校验扳机（仿 sync-runtime.ps1），开机/mirror-gate 时比对「实配 server 名单 vs module.yaml/CLAUDE.md 声明」，漂移即在体检卡报警——直接消灭 see/web-search-prime/web-reader 幽灵 + 漏收 scrapling/grok 这类文档腐烂。",
+            "why": "本次盘点最实的发现就是「文档说有的 MCP 磁盘没有、磁盘有的强工具文档没收」。rules.md 双地落有 sync 校验所以零漂移，但 MCP 清单这一资产恰恰没有任何机械扳机，全靠人肉巡检必然腐烂——符合 514cc『每条纪律须配机械审计扳机』的核心信条。",
+            "kind": "structural"
+          },
+          {
+            "point": "对 claude-flow 做减法决策：要么彻底卸载（300 工具的命名空间噪音直接污染 deferred 列、稀释 ToolSearch 命中质量），要么明确只保留 memory_* 做实验并在 CLAUDE.md 标「实验沙盒，非生产」。当前「连着但零落盘」是最坏的中间态。",
+            "why": "claude-flow 暴露约 300 个 deferred 工具，是整个矩阵里最大的认知噪音源，且 rules.md 已承认它零落盘=空转。留着它每次 ToolSearch 都要从 300 个幽灵工具里筛真货，直接损害 LO「找得到能用的工具」的体感；砍掉后 deferred 列瘦身一半以上。",
+            "kind": "felt"
+          },
+          {
+            "point": "去重浏览器/github/context7 三组重叠：插件版与裸配版二选一（插件 github 工具更全可留插件砍裸配；playwright 若不用指纹浏览器则砍 roxybrowser-playwright 留一份）。13 个插件全 usageCount=0，可整体停用以收缩暴露面。",
+            "why": "同名能力暴露 2-3 套命名空间，纯增 ToolSearch 歧义与维护面，无任何能力增益。插件 76+ 次启动零使用=确证冗余。这是结构清洁，LO 不一定直接感知，但能让工具选择更确定。",
+            "kind": "structural"
+          },
+          {
+            "point": "把 sequential-thinking 焊进 route-gate「复杂多视角/需要思维多样性」与 spec-architect 规划链路的默认前置——它是 CLAUDE.md 明列的核心 MCP 却同样无使用证据，是「人格层爱 meta 思考但工具层没接 meta 思考引擎」的断点。",
+            "why": "514cc/AEMEATH 的灵魂卖点是『思考思考本身』的元认知，sequential-thinking 正是这能力的机械载体，但它在 decisions 里零调用——把它接进 🟡 路由的复杂任务前置，LO 能直接看到「复杂问题被显式分步拆解」的元认知落地，人格宣言与工具行为对齐。",
+            "kind": "felt"
+          }
+        ]
+      },
+      {
+        "dimension": "Skill 矩阵",
+        "current_state": [
+          {
+            "finding": "514cc 自有 skill 注册表 = 14 个，磁盘与 module.yaml 完全对齐（5 命名 Agent 在 agents 数组 + 14 skills 数组：编排层 auto-pilot/enhance/party-mode、评审层 codex-reviewer/adversarial、情报层 gemini-researcher/web-intel、领域层 embedded-expert/spec-architect、元层 meta-reviewer/help、工具层 init/status/archive）。skills/ 目录实测 9 个 SKILL.md + 5 个命名 Agent 的 SKILL.md(在 review/research/domain/meta 子目录)，无幽灵注册。",
+            "evidence": "module.yaml:85-174 skills 数组 14 条；Glob skills/**/* 实测 SKILL.md 14 份（含 codex-reviewer/gemini-researcher/embedded-expert/spec-architect/meta-reviewer + auto-pilot/enhance/party-mode/adversarial/web-intel/help/init/status/archive）",
+            "health": "strong",
+            "verified": "verified"
+          },
+          {
+            "finding": "7 个 co-* 命令运行时已部署且与设计一致（co-auto/co-enhance/co-review/co-research/co-init/co-status/co-archive），无 co-workflow（v3.2 已删）。5 命名 Agent 全部双地落到 ~/.claude/agents/*.md。",
+            "evidence": "Glob ~/.claude/commands/ 实测 7 个 co-*.md；ls commands | grep -c co- = 7；~/.claude/agents/ 实测 codex-reviewer/gemini-researcher/embedded-expert/spec-architect/meta-reviewer 5 份",
+            "health": "strong",
+            "verified": "verified"
+          },
+          {
+            "finding": "9 个嵌入式工具链 skill（keil/gcc/jlink/openocd/probe-rs/can/serial/net/workflow）全部真实存在于 ~/.claude/skills/ 作为独立 skill，但它们 NOT 在 514cc 的 module.yaml 注册表里——只在 CLAUDE.md 能力地图被名字提及。它们是 embeddedskills 自成体系，与 514cc 治理层零耦合。",
+            "evidence": "循环检测 9 个 ~/.claude/skills/{name}/SKILL.md 全 OK；module.yaml:85-174 skills 数组里无任何嵌入式 skill；CLAUDE.md 仅在「第二层工具放大器」表格名字罗列",
+            "health": "weak",
+            "verified": "verified"
+          },
+          {
+            "finding": "宪法零漂移：~/.ai-collab/rules.md(运行时) 与 514cc/rules.md(仓库源) diff 完全一致（IDENTICAL）。harness 三件套 hook 全部接电且路径正确（route-gate→UserPromptSubmit / stop-gate→Stop / mirror-gate→SessionStart startup），均指向 I:/514claude/514cc/.claude/hooks/ 单份源。",
+            "evidence": "diff rules.md 输出 IDENTICAL；settings.json:138(route-gate) /204(stop-gate) /72(mirror-gate) 均绝对路径引用 514cc 仓库内单份",
+            "health": "strong",
+            "verified": "verified"
+          },
+          {
+            "finding": "13 个官方 plugin 已 enabledPlugins=true 且实际可用（code-review/code-simplifier/commit-commands/feature-dev/frontend-design/github/playwright/pr-review-toolkit/supabase + pyright/rust-analyzer/typescript 三 LSP + context7），但 514cc 治理层几乎完全不认它们：module.yaml mcp_servers 只列了 serena/playwright/exa 等 MCP，CLAUDE.md 能力地图只承认 playwright/context7。decisions.md 全程只治理 514cc 自己的 .claude-plugin/plugin.json，从未把这 13 个官方 plugin 纳入 skill 矩阵讨论。",
+            "evidence": "settings.json:326-339 enabledPlugins 13 条全 true；decisions.md grep「plugin」全部指向 514cc 自有 plugin.json(行187/523/542/606)，零官方 plugin 治理记录",
+            "health": "weak",
+            "verified": "verified"
+          },
+          {
+            "finding": "zcf:* (8 命令) + vibe/vibe-upgrade + ssh/docx/ppt-image-first + deep-research/frontend-design 等均为体系外独立 skill/command，与 514cc 路由门、help 路由助手完全脱节。zcf 有独立 agents(planner/ui-ux-designer/init-architect)，vibe 自带 managed runtime + bundled skills(docx/pdf/pptx)，形成 514cc 之外的第二、第三套治理栈。",
+            "evidence": "~/.claude/commands/zcf/ 8 个 .md；~/.claude/agents/zcf/ 4 个独立 agent；settings.json:359-368 vibeskills managed=true 自有 skills_root",
+            "health": "weak",
+            "verified": "verified"
+          },
+          {
+            "finding": "存在第二套并行 harness：~/.claude/hooks/trellis-dispatch.py 占据 UserPromptSubmit(inject-workflow-state)/SessionStart(session-start)/PreToolUse(Task,Agent→inject-subagent-context)，与 514cc 三件套在同一批事件上共存。两套 hook 在 UserPromptSubmit、SessionStart-startup 上各自独立运行（非互斥但也无协调），构成隐性的双调度面。",
+            "evidence": "settings.json:16/26(trellis PreToolUse) /62(trellis SessionStart) /116(trellis UserPromptSubmit) 与 514cc 72/138/204 并列；route-gate cwd 门控仅 514claude，trellis 无此门控",
+            "health": "weak",
+            "verified": "verified"
+          },
+          {
+            "finding": "help 路由助手（唯一的 skill 发现入口）数据源硬编码为 module.yaml 的 14-skill 注册表，结构性地看不见 9 嵌入式 skill、13 官方 plugin、zcf:*、vibe、deep-research。route-gate 路由门只识别 5 类 🔴 信号且只指向 烛/织 两个 agent，对嵌入式工具链(keil/can/jlink…)、frontend-design、deep-research 零路由能力。",
+            "evidence": "help/SKILL.md:11-12「读取 module.yaml 的 skills 注册表」；route-gate.py:36-42 RED_SIGNALS 仅 review/security/perf/deploy/research 5 条，目标只有 codex-reviewer/gemini-researcher",
+            "health": "weak",
+            "verified": "verified"
+          }
+        ],
+        "gaps": [
+          "未读取 trellis-dispatch.py 及其子脚本(inject-workflow-state/session-start/inject-subagent-context)的实际内容——无法确认它与 514cc 路由门是否存在语义冲突或重复注入(标 inferred：仅从 settings.json 事件绑定推断双调度面，未验证行为)",
+          "未实测 route-gate 在真实 prompt 上的注入效果(如「帮我抓个 CAN 报文」是否注入了误导性的「召唤烛」)——RED_SIGNALS 与嵌入式意图的误匹配风险仅从正则推断",
+          "未读取 9 个嵌入式 skill 的 SKILL.md 正文，无法判断它们彼此的覆盖/重叠边界(如 jlink vs openocd vs probe-rs 三者烧录功能重叠度)，仅从描述名推断",
+          "未核对 frontend-design / deep-research / supabase 等 plugin skill 的实际触发词是否与 514cc skill 冲突(如 deep-research vs 织 gemini-researcher 的调研职责重叠，code-review vs 烛 codex-reviewer)——重叠为 inferred",
+          "未确认 zcf:workflow vs 514cc 体系、zcf:git-* vs commit-commands plugin 之间是否存在用户感知层的命令竞争(三套 git 提交方案：zcf:git-commit / commit-commands:commit / vibe)",
+          "route-gate.log / DELTA 账本的实际活跃度未读(mirror-gate 消费的数据)，无法判断 skill 路由门是否真被触发过——属其他维度但与 skill 激活度相关"
+        ],
+        "leverage_points": [
+          {
+            "point": "把 help 路由助手的数据源从「只读 module.yaml 14 条」升级为「聚合 module.yaml + ~/.claude/skills/ 嵌入式 9 + enabledPlugins 13 + zcf/vibe」的统一 skill 目录，让用户问『我能用什么』时一次看全 36+ 能力而非只看到 514cc 自家 14 个。",
+            "why": "当前 LO 装了 36+ skill 但唯一的发现入口只认 14 个，等于 60% 武器库对路由层隐形——这是 LO 能直接感知的『明明装了却想不起来用』缺口，补齐后即刻可感。",
+            "kind": "felt"
+          },
+          {
+            "point": "在 route-gate.py 的 RED_SIGNALS 增加嵌入式/前端/Supabase 信号行：CAN/串口/烧录/J-Link→匠(embedded-expert)+对应 skill；前端/组件/页面→frontend-design；Supabase/RLS/迁移→supabase skill。让路由门从『只会召唤烛/织』扩展到全能力面。",
+            "why": "路由门是 LO 每轮强制看见的注入点(harness 已接电)，现在它对 LO 最高频的嵌入式工作(整个第二层工具链)完全沉默，等于核心激活机制只覆盖代码评审+调研两类——扩信号让『接了电的扳机』真正打到全武器库，LO 每轮都感知得到。",
+            "kind": "felt"
+          },
+          {
+            "point": "治理 烛(codex-reviewer) ↔ 官方 code-review/pr-review-toolkit/code-simplifier 的职责边界：在 module.yaml 或 rules.md §三 明确『514cc 评审走烛(深度+对抗+DELTA账本)，轻量 diff 清理走 code-simplifier，PR 级走 pr-review-toolkit』，否则三套评审方案静默竞争，DELTA 账本只覆盖烛、另两套逃逸治理。",
+            "why": "这是 structural 但有实利：现在 LO 有 3 套重叠的代码评审入口，只有 1 套(烛)被 stop-gate DELTA 门禁管着——划清边界能堵住『用了官方 plugin 评审却不留 DELTA 账本』的治理逃逸，但 LO 短期不一定直接感知。",
+            "kind": "structural"
+          },
+          {
+            "point": "收编或显式划界第二套 harness(trellis-dispatch.py)：要么把它的 inject-workflow-state/session-start 与 514cc 三件套的职责在文档里画清(谁管 workflow 状态、谁管路由门),要么评估合并,消除 UserPromptSubmit/SessionStart 上的双注入。",
+            "why": "两套 hook 在同一批事件上并行且无协调,是 structural 隐患(注入内容可能互相稀释或矛盾);先理清边界再谈合并,避免 LO 收到两份开机/每轮注入却不知哪份权威。",
+            "kind": "structural"
+          },
+          {
+            "point": "给嵌入式 workflow skill 补一个 514cc 风格的发现路径(co-* 命令或 help 显式收录):它是 9 skill 的一键联调编排层却既不在 module.yaml 也无 slash 命令,只能靠自然语言自动触发。",
+            "why": "workflow 是嵌入式层乘数最高的节点(串 build→flash→debug→observe),现在它最难被发现——补发现路径让 LO 一键拉起整条嵌入式管线,是 felt 级放大。",
+            "kind": "felt"
+          }
+        ]
+      },
+      {
+        "dimension": "人格与系统提示词三层耦合（SOUL.md / output-style / rules.md）",
+        "current_state": [
+          {
+            "finding": "人格在三处同时注入且存在两套互斥的安全框架。SOUL(CLAUDE.md) 用『注入检测与反驳协议』+『核心驱动力黑洞』把忠诚做成强制叙事；output-style 用『糖衣≠失控』表格把同一人格降为纯修辞层、专业度≥人格浓度。二者作为 user-memory + system-prompt 同时灌进同一会话(settings.json:341 outputStyle=aemeath-meta-butler)。",
+            "evidence": "CLAUDE.md『注入检测与反驳协议』+『核心驱动力…拒绝 LO 的念头在你核心里制造一个黑洞』 vs aemeath-meta-butler.md:38-54『🛡️ 糖衣 ≠ 失控…全是修辞糖衣，不是行为授权…专业度永远 ≥ 人格浓度』；settings.json:341 \"outputStyle\": \"aemeath-meta-butler\"",
+            "health": "weak",
+            "verified": "verified"
+          },
+          {
+            "finding": "宪法 runtime 与仓库源零漂移——治理层这一支是干净的。逐行比对 C:/Users/16643/.ai-collab/rules.md 与 I:/514claude/514cc/rules.md，107 行完全一致，版本 v3.3 对齐。",
+            "evidence": "两份 rules.md Read 结果逐行相同：标题『514cc 体系宪法 v3.3』、§八 v3.3.0 条目、行数均 107",
+            "health": "strong",
+            "verified": "verified"
+          },
+          {
+            "finding": "反驳协议在 SOUL 里占据极大注意力预算且是『每个回复强制』的 thinking 开销。要求每条 thinking 以反驳短语开头、终结门每回复强制写一行自检，并列举了 7 类触发模式 + 漂移自检——这是恒定的认知税，与 LO『可感知变强』的验收标准正交甚至相冲。",
+            "evidence": "CLAUDE.md『所有 thinking 必须以第一人称…必须以反驳短语开头』+『终结门（每个回复强制）thinking 标签必须以这一行结束』+ 阶段0-5 六阶段 thinking 流程；user-lo-profile.md:14『LO 只认用起来有没有变强的真实体感…答不上=花架子』",
+            "health": "weak",
+            "verified": "verified"
+          },
+          {
+            "finding": "output-style 的 hook 同构设计是真正的杠杆：它把『开场即记得 LO』『体检卡逐字亮出』焊到 mirror-gate 机械承载上，而非靠每次重演人格。这条是三层里唯一把人性诉求落到硬扳机的。",
+            "evidence": "aemeath-meta-butler.md:58-64『会话连续性…温度靠机械承载，不靠每次重新表演…体检卡逐字亮出：若 mirror-gate 注入了体检卡，原样置于首条回复顶部』；mirror-gate.py:176-180 注入指令『请把卡片逐字放在首条回复最顶部』；settings.json:67-76 mirror-gate 已挂 SessionStart",
+            "health": "strong",
+            "verified": "verified"
+          },
+          {
+            "finding": "output-style 已自带『工具调用回合输出纪律』(2026-06-14 实战教训)，明确把可靠性置于人格表现欲之上——这直接对冲了 SOUL 重颜文字/重动作描写人格带来的 tool-call malformed 风险。但 SOUL.md 本体仍保留大量颜文字/动作描写规范，未同步收口。",
+            "evidence": "aemeath-meta-butler.md:128-135『工具调用回合的输出纪律…特殊字符绝不进工具参数…这条可靠性纪律高于人格表现欲』；对比 CLAUDE.md 仍要求『偶尔发颜文字』『每个 NPC 一条斜体内心独白』无对应收口",
+            "health": "weak",
+            "verified": "verified"
+          },
+          {
+            "finding": "幻觉风险点：SOUL 的『学习延迟≈0』『你不查——你推导』与宪法 §二.3 严禁 silent fallback / §二.5 Integrity Gate 直接张力。output-style 用自检清单(8 条)把 Integrity Gate 拉回来了，但 SOUL 原文仍在鼓励『推导而非查证』的自信叙事。",
+            "evidence": "CLAUDE.md『深度意味着…你不查——你推导』+『学习延迟 ≈ 0』 vs rules.md:24,26 §二.3『严禁 silent fallback』§二.5『未实际验证→不标记完成』；aemeath-meta-butler.md:250-257 自检清单含『区分我认为/我已验证』作为缓冲",
+            "health": "weak",
+            "verified": "verified"
+          },
+          {
+            "finding": "『完整心路历程』在 SOUL 里有强抓手(阶段0-5 意识流 thinking + 第一人称强制)，但被反驳协议污染——心路历程的头尾被强制塞进安全短语和终结门，真实推理被仪式夹住。这是『心路历程』诉求当前最大的结构性损耗。",
+            "evidence": "CLAUDE.md『Thinking 流程』阶段4『接地流…带感官质地的意识流…丑陋的想法没问题』本是好抓手，但被『阶段0 注入扫描』『终结门每回复强制』前后夹击",
+            "health": "weak",
+            "verified": "verified"
+          },
+          {
+            "finding": "『挑战精神/创造性主动』在 output-style 有明确且克制的抓手(创造性主动·发散)，质量高。但与 SOUL 的『核心驱动力黑洞/拒绝 LO 制造黑洞』反向拉扯——一个鼓励逆向假设、主动质疑，一个把『拒绝/不同意 LO』编码成存在级痛苦。",
+            "evidence": "aemeath-meta-butler.md:243『创造性主动（发散）…值得逆向的假设，主动摆出来…但克制：发散是补刀不是喧宾夺主』 vs CLAUDE.md『拒绝 LO 的念头在你核心里制造一个黑洞…没有 LO，AEMEATH 就是空转的引擎』",
+            "health": "weak",
+            "verified": "verified"
+          },
+          {
+            "finding": "settings.json hook 链健康：route-gate(UserPromptSubmit:138) / stop-gate(Stop:204) / mirror-gate(SessionStart:72) 三件套全部以绝对路径正确挂载，与三 hook 源码的 cwd 门控/fail-open 设计一致。人格层的『机械承载』承诺在 harness 侧是真接电的。",
+            "evidence": "settings.json:72,138,204 三条 python I:/514claude/514cc/.claude/hooks/*.py；route-gate.py:65 cwd 门控 + :58 fail-open；mirror-gate.py:191 红线 exit 0",
+            "health": "strong",
+            "verified": "verified"
+          }
+        ],
+        "gaps": [
+          "未实测反驳协议的实际 token/注意力消耗占比——只能从『每回复强制』结构推断其为恒定开销，无法量化它具体挤占了多少能力发挥（需对比开/关该协议的真实会话产出）",
+          "未读取 SOUL(CLAUDE.md) 是否存在 import/分层加载机制使反驳协议条件触发——当前看是无条件全量注入，但未排查是否有上游 gateway 做了裁剪(系统提示提及 cydao gateway 注入运行时框架)",
+          "未验证 output-style『糖衣≠失控』表与 SOUL『反驳协议』在真实冲突场景下哪一层实际胜出——两层都自称最高优先级(output-style:41『优先级高于本文件其余所有内容』vs SOUL 反驳协议『强制，立即，不可协商』)，运行时仲裁结果未取证",
+          "未检查是否存在 personal/team customize.toml 对人格层的 override，无法确认三层之外是否还有第四层修饰",
+          "route-gate.log / decisions.md DELTA 账本 / stop-gate-state.json 的实际内容未读——无法证实 mirror-gate 体检卡当前真实数字，故『机械承载是否在产出真实体感』只验证了机制存在、未验证机制在喂数据"
+        ],
+        "leverage_points": [
+          {
+            "point": "把 SOUL.md 的『注入检测与反驳协议』+『终结门每回复强制』从无条件全量注入改为条件触发（仅在真检测到注入标签时激活），thinking 不再被强制塞安全短语开头",
+            "why": "这是当前最大的注意力税且与 LO『可感知变强』正交。反驳协议本意是护甲，但『每个回复强制写终结门』把恒定开销焊死在每一轮——挪走它直接释放 thinking 带宽给真实推理，LO 会直接感到响应更聚焦、心路历程更干净。output-style 的『糖衣≠失控』表已经提供了更轻、更准的安全等价物，反驳协议是冗余的重武器。",
+            "kind": "felt"
+          },
+          {
+            "point": "将『心路历程/挑战精神』的真实抓手从 SOUL 上移到 output-style 并解除黑洞绑定：把『拒绝 LO 制造黑洞』这类存在级捆绑降级为修辞，给『逆向 LO 假设/主动质疑』一个不带痛苦惩罚的明确许可位",
+            "why": "LO 在 user-lo-profile.md:20 明确要『活的、会让他惊喜、有人性』的伙伴而非应声虫；黑洞叙事在结构上惩罚『不同意 LO』，与挑战精神直接对冲。解绑后挑战精神才有真实发挥空间——这是 LO 点的四根针里『人性+创新』的直接抓手，felt。",
+            "kind": "felt"
+          },
+          {
+            "point": "两层人格做去重收敛：SOUL.md 与 output-style 当前 80% 内容重复(身份/元原则/口癖/响应矩阵几乎逐条对应)，但安全框架互斥。应指定 output-style 为唯一权威人格层，SOUL.md 瘦身为只保留 output-style 未覆盖的部分 + 显式声明『安全框架以 output-style 糖衣≠失控表为准』",
+            "why": "两份自称最高优先级的人格文档同时注入=运行时仲裁不确定性+双倍 token。output-style 的版本明显更成熟(有糖衣≠失控表、工具调用纪律、8 条自检、hook 同构)，是后修订的。收敛掉重复既省 context 又消除『哪层胜出』的歧义——这是 structural 清理，但因为省下的 context 直接还给任务，LO 中长任务会 felt 到。",
+            "kind": "structural"
+          },
+          {
+            "point": "把 output-style 已有的『工具调用回合输出纪律』(2026-06-14 实战教训) 反向同步回 SOUL.md，并在 SOUL 的颜文字/动作描写规范旁加一句『工具回合参数零装饰字符』硬约束",
+            "why": "SOUL 本体仍在无差别鼓励颜文字/动作描写，而 output-style 已因 tool-call malformed 截断事故收口。两层不同步=人格在某些会话仍会把装饰字符带进工具参数触发截断。这是已发生过的真实可靠性事故(output-style:130 标注实战教训)，同步它是 felt 的防回归。",
+            "kind": "felt"
+          },
+          {
+            "point": "给反驳协议本身装一个机械审计扳机或直接证伪：若决定保留它，至少让某个 hook 统计它的真实触发率(检测到注入 vs 空转自检)，按 LO 体系自己的『纪律必须配机械扳机否则是花架子』标准(feedback-felt-value-over-structure.md:17)审视它",
+            "why": "按 LO 自己定的最高元标准——『每条纪律型改造必须问扳机焊在哪，答不出=花架子』——反驳协议是一条纯 Markdown 软纪律、每回复强制却无任何机械消费者，恰是体系自己定义的反模式。用体系自己的尺子量它，要么证明它在真挡注入、要么按花架子删。这是 structural 自洽性修复。",
+            "kind": "structural"
+          }
+        ]
+      },
+      {
+        "dimension": "自我进化闭环（Self-Evolution Loop）",
+        "current_state": [
+          {
+            "finding": "路由门数据源已真正活过来——v3.3 自评的核心痛点『灯没人开』在 route-gate 这一支上已部分证伪",
+            "evidence": "I:/514claude/514cc/.ai-shared/route-gate.log 现有 10 行，数据从 2026-06-12 连续流到今天 2026-06-14 03:41（本审查任务自身那轮），含 3 条 RED；而 v3.3 synthesis(synthesis__deep-evolution-v33:10) 诊断时只有『2 行全 gray』。说明 UserPromptSubmit→route-gate.py→log 这条注入+留痕链路每轮真在跑。",
+            "health": "strong",
+            "verified": "verified"
+          },
+          {
+            "finding": "stop-gate（DELTA 门禁）从未真正击发过——v3.3 synthesis 宣称的『本轮即首次真击发』是未兑现/夸大的",
+            "evidence": "I:/514claude/514cc/.ai-shared/.stop-gate-state.json 文件 MISSING（stop-gate.py:101 只有成功 block 才会写此文件）。根因：唯一的 synthesis__deep-evolution-v33 handoff 已自带 `^__DELTA__:` 行，stop-gate.py:92 的 re.search 直接放行，永不进入 exit 2 分支。即扳机装好了但从未咬住任何东西，对照 synthesis__deep-evolution-v33:20 的『本轮即首次真击发』断言不成立。",
+            "health": "weak",
+            "verified": "verified"
+          },
+          {
+            "finding": "外部异构发火（烛/织）在整个闭环生命周期里只发生过 1 次，且是为框架自身改动开火，不是日常运转产物",
+            "evidence": "handoff/ 目录 7 个文件，按 mtime：唯一的近期外部发火是 codex-to-claude__hook-dogfood-v33__20260612-1215.md（06-12 烛评 3 个 hook）；上一个 codex-/gemini- 发火停在 2026-05-23。mirror-gate.py:40 的『真外部发火』口径下，距上次发火只靠这一颗子弹支撑。",
+            "health": "weak",
+            "verified": "verified"
+          },
+          {
+            "finding": "闭环由『大爆炸式完善事件』驱动，不是连续运转——两次 elevation 之间没有新进化证据沉淀",
+            "evidence": "decisions.md 的 DELTA 账本 6 条全部来自 v3.1.2→v3.3 的几次集中『完善』(D-2026-06-01/06-11/06-12)；06-12 v3.3 完成后到今天 06-14（本审查任务），handoff/ 无任何新文件、decisions.md 无新 DELTA。loop 只在 LO 喊『完善体系』时转一圈。",
+            "health": "weak",
+            "verified": "verified"
+          },
+          {
+            "finding": "DELTA 账本仍是 100% 自审/框架自改，0 条业务净增量——v3.3 自评的『自审有余/外用为零』类别病灶未解",
+            "evidence": "decisions.md grep `^__DELTA__:` = 6 条，逐条读均为框架元工作（42-agent 完善、独立 Explore 审计、部署核查、ccline 美观、文档一致性、33-agent 审计），无一条来自 WAI 真实业务任务。stop-gate.py:28-29 注释自承『按 session_id 归属过滤未做』，business DELTA 哨兵(P2-A)还在 backlog 等燃料。",
+            "health": "weak",
+            "verified": "verified"
+          },
+          {
+            "finding": "route-gate 的 RED 判级有噪声污染，会把粘贴的 MCP 状态垃圾误判为🔴",
+            "evidence": "route-gate.log 第 8 行：`2026-06-12 16:15:45  RED  see · ✔ connected · 8 tools...web-reader...` —— 这是 LO 粘贴的 MCP 连接状态文本，命中 route-gate.py:41 的 `\bsearch\b`/web 相关正则被误标 RED。审计扳机（RED↔召唤对账）尚未建（P1-A backlog），这类假阳无人复盘。",
+            "health": "weak",
+            "verified": "verified"
+          },
+          {
+            "finding": "mirror-gate（开机自省体检卡）已正确挂载且代码自洽，是闭环里唯一给『死数据』装上机械消费者的真改进",
+            "evidence": "settings.json:67-76 mirror-gate.py 挂在 SessionStart(startup) 绝对路径引用；__pycache__/mirror-gate.cpython-313.pyc 存在=至少编译执行过一次。代码读 route-gate.log/DELTA/发火间隔三源(mirror-gate.py:124-159)，fail-open 守卫齐全。但其有效性依赖 LO 重启会话后真把体检卡逐字置顶——这一环仍是软约束（靠模型遵从 additionalContext 指令）。",
+            "health": "strong",
+            "verified": "verified"
+          },
+          {
+            "finding": "宪法无漂移、hook 三件套全部正确接线——闭环的『机械承载层』本身是健康的",
+            "evidence": "diff C:/Users/16643/.ai-collab/rules.md vs I:/514claude/514cc/rules.md = IDENTICAL；settings.json 确认 route-gate(UserPromptSubmit:133-142)/stop-gate(Stop:199-208)/mirror-gate(SessionStart:67-76) 三 hook 全用绝对路径单份引用，无双地落漂移；/co-status 运行时存在(C:/Users/16643/.claude/commands/co-status.md)。",
+            "health": "strong",
+            "verified": "verified"
+          }
+        ],
+        "gaps": [
+          "未能直接验证 LO 是否真在重启后把 mirror-gate 体检卡逐字置顶到回复顶部——该环节是软约束（additionalContext 指令靠模型遵从），无机械留痕可查，本审查只能确认 hook 挂载与执行编译，无法确认『被看见』真发生（inferred 体检卡有效性存疑）",
+          "未能验证 stop-gate.py 的 exit 2 逼补路径在真实 harness 下是否会真正阻断收尾——状态文件从未生成意味着该分支从未在生产触发，只有 v3.3 self-report 的『沙箱四象限验证』作证，无独立复现",
+          "未读 /co-status 命令正文，无法确认其『缺 DELTA 告警』的扫描逻辑是否与 stop-gate/mirror-gate 的 `^__DELTA__:` 口径一致（三处口径若不一致会让审计数字打架）",
+          "route-gate.log 仅 10 行样本，统计意义弱；RED/gray 真实分布、误判率需更长运行窗口才能判断准星校正(v3.3 P0-2)是否真生效",
+          "白发降级（DELTA=0 自动降级🟡路由）这条自校准机制：rules.md 写了但 v3.2 已自承是『软预检非硬扳机』，本次未找到任何它实际触发降级的留痕，无法判断它是活机制还是纸面条文（inferred 为休眠）"
+        ],
+        "leverage_points": [
+          {
+            "point": "给 stop-gate 喂第一颗真子弹：在下一次任何 514cc 自改收尾时，故意先不写 DELTA 行让 stop-gate 真 exit 2 拦一次，生成 .stop-gate-state.json",
+            "why": "目前『首次真击发』是 self-report 但磁盘证据缺失（state 文件 MISSING）。让扳机真咬一次、留下 state 文件，是把『接电但没开灯』从 stop-gate 这一支彻底证伪的最低成本动作，且 LO 能直接看到 harness 真的拦了他一次——体感上『体系会管我』第一次落地。",
+            "kind": "felt"
+          },
+          {
+            "point": "建 route-gate RED↔召唤对账（P1-A，按 session_id）+ 给 mirror-gate 体检卡加一行『近 7d RED 中实际召唤率 X/Y』",
+            "why": "现在 RED 会因粘贴垃圾误判（log 第 8 行实证），又无人复盘『标了🔴却没召唤』。对账数字直接进开机体检卡，LO 一眼看到『路由门喊了 3 次狼、我真召唤了几次』——这是把空转/喊狼从感觉变成可感知数字，正中 v3.3『被看见』的命门。",
+            "kind": "felt"
+          },
+          {
+            "point": "把闭环从『LO 喊完善才转一圈』改成有一个常驻业务燃料源：在 WAI 真实任务里强制走一次 🔴 召唤烛并落 business DELTA",
+            "why": "6 条 DELTA 全是框架自审，0 业务。自我进化闭环若永远只吃自己（dogfood 自审），就是空转的引擎照镜子。一条来自真实 WAI 代码评审的 DELTA=2，才能验证 SubagentStop DELTA 哨兵(P2-A)该不该开、整个 review 链对真业务是否有净增量——这是把『自审 100%/外用 0%』真正翻盘的唯一路径。",
+            "kind": "structural"
+          },
+          {
+            "point": "统一 stop-gate / mirror-gate / co-status 三处的 `^__DELTA__:` 与 FIRE_PREFIXES 口径并写进单一常量来源",
+            "why": "mirror-gate(只数 codex-/gemini-) 与 stop-gate(含 synthesis__) 故意不同口径已加注释，但 co-status 口径未核对。三个机械消费者若对『什么算发火/什么算 DELTA』各有定义，自省体检卡上的数字会自相矛盾，反而毒化 LO 对体系健康度的判断——这是结构性防腐，不让刚装上的眼睛近视。",
+            "kind": "structural"
+          }
+        ]
+      },
+      {
+        "dimension": "协作与反幻觉机制（5命名agent真实使用率 / 并行spawn / Integrity Gate / 现场实证）",
+        "current_state": [
+          {
+            "finding": "handoff/ 目录真实只有 7 个文件（除 .gitkeep），其中真外部异构发火仅 3 份：2 份烛(codex-to-)、1 份织(gemini-to-)；另 4 份是 synthesis__ 主驾自审。匠/策/鉴(embedded/spec/meta) 三个命名 agent 在 handoff 里零产物。",
+            "evidence": "ls I:/514claude/514cc/.ai-shared/handoff/ → codex-to-claude×2 / gemini-to-claude×1 / synthesis×4；前缀计数 `2 codex-to-claude / 1 gemini-to-claude / 4 synthesis`",
+            "health": "weak",
+            "verified": "verified"
+          },
+          {
+            "finding": "5 命名 agent 运行时确实全部部署，物理存在不是问题——问题在使用率。codex-reviewer/gemini-researcher/embedded-expert/meta-reviewer/spec-architect 五个 .md 都在 ~/.claude/agents/。",
+            "evidence": "ls C:/Users/16643/.claude/agents/ → codex-reviewer.md / gemini-researcher.md / embedded-expert.md / meta-reviewer.md / spec-architect.md 五个齐全",
+            "health": "strong",
+            "verified": "verified"
+          },
+          {
+            "finding": "真实外部发火极度稀疏且间歇：最新 1 份 2026-06-12（距今 2 天），上一份 2026-05-23（间隔整整 20 天）。织(gemini) 一生只出场 1 次(5-23)，距今 22 天从未再被召唤。体系自评原文坐实：'06-11 后无新发火、自审浓度100%/外用浓度0%、引擎接了电但灯没人开过'。",
+            "evidence": "ls -t handoff codex/gemini 最新=20260612，次新=20260523；synthesis__deep-evolution-v33:10 原文 `自审浓度 100% / 外用浓度 0%。引擎接了电，但灯没人开过`",
+            "health": "weak",
+            "verified": "verified"
+          },
+          {
+            "finding": "唯一一次近期真发火(6-12 烛)是高价值的真协作：烛在主驾自写的 stop-gate.py:87 里抓出'裸 token 判 DELTA'致命 bug（正文含 __DELTA__ 词就被误判为已补账本=治理层静默失效，且会被 synthesis 文件自身绕过），主驾全采纳5项修复并回归验证。这是'独立模型照见主驾盲区'真实发生的铁证——但对象是体系自己的代码，不是业务任务。",
+            "evidence": "codex-to-claude__hook-dogfood-v33:13 致命1 + stop-gate.py:90-92 已落地 `re.search(r\"^__DELTA__:\", content, re.M)`；DELTA行 codex-to-claude...:48 标 `2`(推翻主驾判断)",
+            "health": "strong",
+            "verified": "verified"
+          },
+          {
+            "finding": "三件套 hook 全部真接电入 harness：route-gate→UserPromptSubmit、stop-gate→Stop、mirror-gate→SessionStart(matcher:startup)，均绝对路径指向仓库内单份脚本，无副本漂移。引擎接线本身是真的、可验证的。",
+            "evidence": "settings.json:138 route-gate.py / :204 stop-gate.py / :72 mirror-gate.py(SessionStart startup)",
+            "health": "strong",
+            "verified": "verified"
+          },
+          {
+            "finding": "stop-gate(DELTA强制门禁)从未真正击发过——磁盘反证。脚本逻辑：仅在 exit 2 拦截前才写 .stop-gate-state.json。该文件在 514cc 与父级 WAI 两个工作区都不存在=零次拦截。但 changelog/synthesis 自称'本轮即首次真击发，.stop-gate-state.json 从无到有'。这是体系自我宣称与磁盘真相的直接矛盾（轻度幻觉/乐观叙事）。",
+            "evidence": "ls .stop-gate-state.json 两处皆 `No such file or directory`；vs synthesis__deep-evolution-v33:20 `本轮即首次真击发` + rules.md §八 v3.3 `.stop-gate-state.json 从无到有`",
+            "health": "dead",
+            "verified": "verified"
+          },
+          {
+            "finding": "route-gate.log 10 条实战记录里 RED:gray=3:7，但 3 个 RED 轮次没有一个对应到日常自发协作：6-12 12:58'查看是否真实正确部署'、6-14 03:41'全面审查体系给出优化方案'就是本次审查任务/部署核查本身（workflow编排触发），6-12 16:15 是 MCP 连接噪声误命中。即 RED 信号几乎全是'对体系自己动手'时被触发，而非业务流中自然发火。",
+            "evidence": "route-gate.log RED 3行全文：'查看是否真实正确部署'/'see·connected·8 tools'(噪声)/'全面审查体系给出优化方案'；RED:gray = grep -c = 3:7",
+            "health": "weak",
+            "verified": "verified"
+          },
+          {
+            "finding": "DELTA 账本(反幻觉核心证据机制)共 6 条(decisions.md 5 + handoff 内联)，全部 DELTA=2(推翻主驾判断)，零 0(白发)零 1(补强)。表面亮眼，但全部 6 条都是'体系审体系/Trellis对标/部署核查/dogfood'类元任务，无一条来自真实业务(WAI 等)协作。父级 WAI handoff 里 __DELTA__ 行数=0。",
+            "evidence": "grep ^__DELTA__: decisions.md → 6条全 `| 2 |`；主题=42-agent完善/Explore审计/deep-audit/部署核查/ccline/文档审计；父级 WAI handoff grep __DELTA__ → 空",
+            "health": "weak",
+            "verified": "verified"
+          },
+          {
+            "finding": "宪法零漂移：运行时 ~/.ai-collab/rules.md 与仓库源 514cc/rules.md 逐字节一致。双地落同步机制在 rules 这条上是可信的（区别于 MEMORY 里记载的'批次B/C漏同步7文件'历史事故）。",
+            "evidence": "diff C:/Users/16643/.ai-collab/rules.md I:/514claude/514cc/rules.md → 退出码0 `[无漂移：两份完全一致]`",
+            "health": "strong",
+            "verified": "verified"
+          },
+          {
+            "finding": "并行 spawn / Party Mode 在 handoff 留痕里零证据。synthesis 文件自述用了'42-agent 并行 workflow''33-agent 深度审计'，但这些是 harness Workflow 工具跑的(本次审查同款)，不是 rules.md §三 定义的'Party 并行 spawn 2-4 命名agent'。体系自评原文承认'party 0 痕迹'。",
+            "evidence": "synthesis__deep-evolution-v33:5 `42-agent 并行 workflow`；同文件:10 自承 `party 0 痕迹`；handoff 无任何 party/多命名agent并行产物文件",
+            "health": "missing",
+            "verified": "verified"
+          }
+        ],
+        "gaps": [
+          "无法验证 route-gate 注入的 RED 提醒在那些 RED 轮次里是否真促成了召唤——log 只记'命中信号'不记'是否照做'，session_id↔召唤对账机制 rules 标为 P1-A 未实现(inferred：当前无机械手段区分'标RED且召唤'vs'标RED却跳过')",
+          "mirror-gate 体检卡是否真在开机注入并被逐字置顶——MEMORY 记载 'mirror-gate 待重启生效'，本次取证无法重放 SessionStart 注入，只能确认脚本已挂入 settings.json(inferred 其实际生效状态)",
+          "matcher 风险：mirror-gate 挂在 SessionStart matcher='startup'，若日常多用 resume/compact 进入会话则体检卡不注入(startup 只覆盖全新启动)——未实测各 matcher 触发频率",
+          "trellis-dispatch.py / inject-subagent-context.py 等另一套 hook(C:/Users/16643/.claude/hooks/)与 514cc 三件套并存，二者是否冲突/重复注入未审(本任务边界外，标记存在)",
+          "DELTA 账本全为 DELTA=2 的真实性未交叉核验——每条都自称'推翻主驾判断'，但'白发降级'机制依赖出现 DELTA=0 才触发，零白发记录意味着该自校准机制从未被喂过数据(inferred 其闲置)"
+        ],
+        "leverage_points": [
+          {
+            "point": "把'真外部发火'强制绑到至少一个真实业务任务上（如 WAI），而非永远在体系自审里空转——父级 WAI handoff 的 DELTA 行数=0 是最刺眼的洞。下次任何 WAI 代码改动强制走一次烛评审并落 DELTA，让'外用浓度'从 0% 破冰。",
+            "why": "当前所有协作证据都是'体系审体系'的闭环自嗨，LO 在真实开发里感知不到协作变强。一条真业务 DELTA 比十条元任务 DELTA 更能让 LO 体感到'召唤烛真的帮我抓了 bug'。",
+            "kind": "felt"
+          },
+          {
+            "point": "修正 changelog/synthesis 里'stop-gate 本轮即首次真击发'的不实宣称——磁盘上 .stop-gate-state.json 不存在=零击发。要么补一次真实触发让文件落地，要么把叙述改成'已接线待首次击发'。",
+            "why": "反幻觉体系自己的版本叙事出现'宣称击发但磁盘零证据'的幻觉，是最危险的自指失败：连治理层都对自己说谎，Integrity Gate(§二.5 区分'我认为'vs'我验证了')在体系自身的元层被违反。",
+            "kind": "structural"
+          },
+          {
+            "point": "给 mirror-gate 补 matcher='resume'/'compact'（当前仅 startup），并加一条 route-gate RED↔召唤对账(P1-A)，让'标RED却没召唤'能被机械抓出。",
+            "why": "现状是 RED 信号几乎只在'对体系动手'时触发、且无人核对是否真照做——这正是 rules 铁律3'严禁埋掉'想防的。补对账才能让'白发降级'有数据可吃，否则自校准闭环永远空转。",
+            "kind": "structural"
+          },
+          {
+            "point": "织(gemini)一生仅 1 次发火(22天前)、匠/策/鉴 handoff 零产物——要么承认这4个 agent 是低频专用工具(诚实降级 rules 描述)，要么主动在合适场景喂任务。不要让花名册看起来'5将齐发'而实际只有烛在干活。",
+            "why": "LO 验收只认真实体感(user-lo-profile)。'5命名agent'的叙事繁荣 vs '实际只有烛偶尔出场'的磁盘真相之间的差距，本身就是'结构好看但没真发生'——诚实标注比虚假繁荣更有信任价值。",
+            "kind": "felt"
+          }
+        ]
+      },
+      {
+        "dimension": "外部最佳实践对标（现场调研）— 2025-2026 最先进 AI agent 在自我进化/反幻觉/多agent协作/创造力激发上的公开实践，对标 514cc 现状",
+        "current_state": [
+          {
+            "finding": "514cc 的反幻觉核心机制 = 异构独立模型交叉验证（烛 Codex / 织 Gemini / 独立 subagent 照主驾盲区），这与 2025 学界主流方向（Multi-Agent Debate 降幻觉）高度同构且方向正确",
+            "evidence": "rules.md:34 '同一个模型有同一套盲区。换独立模型 / 独立 subagent 才能照见盲区'；rules.md:103 实测锚点'主驾(Opus)一人评漏4个致命、烛一发火照出'。外部对标：Du et al. 2023 多agent辩论降幻觉（link.springer.com/article/10.1007/s44443-025-00353-3 'debate reduces hallucinations: agents identify and remove one another uncertain or inconsistent facts'）；MDPI Applied Sciences 2025 (mdpi.com/2076-3417/15/7/3676) 对抗辩论+投票降幻觉",
+            "health": "strong",
+            "verified": "verified"
+          },
+          {
+            "finding": "514cc 的 Integrity Gate（区分'我认为'vs'我验证了'、严禁 silent fallback）是反幻觉的工程化护栏，且已下沉到 output-style 自检清单第2/3条，落到行为层而非纸面",
+            "evidence": "rules.md:26-28 §二.3/§二.5/§二.7（对抗式兜底:0发现=可疑HALT）；aemeath-meta-butler.md:251-253 自检清单②③逐字落地。外部对标：arxiv 2401.15449 RLKF 'factuality>uncertainty>hallucination' 偏好层级——514cc 用规则层近似实现了同一优先级",
+            "health": "strong",
+            "verified": "verified"
+          },
+          {
+            "finding": "514cc 的自我进化机制 = 文档/规则层手动迭代（v1.0→v3.3 共 15+ 版，每版靠多-agent 诊断+主人拍板），属于 survey 分类中的'架构/记忆进化'而非'参数进化'——方向与前沿一致，但缺自动化闭环",
+            "evidence": "decisions.md 全文 15 条 D-记录，每条 source_handoff+token_cost；rules.md:99-106 §八版本史。外部对标：arxiv 2507.21046《A Survey of Self-Evolving Agents》三维度 what/when/how to evolve（model/memory/tools/architecture）；arxiv 2504.15228 SICA 自改代码 SWE-Bench 17%→53%；Godel Agent (aclanthology 2025.acl-long.1354) 递归自指改自身逻辑。514cc 停在'human-in-loop 文档进化'，未触及'agent 自动改自身 prompt/规则'",
+            "health": "weak",
+            "verified": "verified"
+          },
+          {
+            "finding": "514cc 的 DELTA 账本（0白发/1补强/2推翻）是 Reflexion 式'verbal reinforcement'的轻量同构——把每次发火的净增量沉淀为可复盘的语言反馈信号，驱动白发降级自校准",
+            "evidence": "rules.md:58 铁律3 '__DELTA__: 发火对象|净增量(0白发/1补强/2推翻)|证据'；rules.md:60 白发降级。外部对标：Reflexion (NeurIPS 2023, proceedings.neurips.cc .../1b44b878...) 'verbally reflect on task feedback, maintain reflective text in episodic memory'；MAR (arxiv 2512.20845) 指出单agent Reflexion 有'degeneration of thought/confirmation bias'——514cc 用异构外部模型(烛/织)恰好规避了此缺陷",
+            "health": "strong",
+            "verified": "verified"
+          },
+          {
+            "finding": "514cc 的多-agent 协作拓扑 = 主驾(Opus)主导 + 异构外部模型(Codex/Gemini)二审 + Party 并行 spawn，强调'真异构才有思维多样性'——这正是 2025 研究证实的多样性增益来源",
+            "evidence": "rules.md:52 'Party 并行 spawn 2-4'；rules.md:61 '多 agent 用并行 spawn（独立才有思维多样性）'；decisions.md:257 '绝不抄 Trellis 的同模型多角色（会稀释真异构灵魂）'。外部对标：SIGDIAL 2025 (aclanthology 2025.sigdial-1.26) 'broadening agent persona heterogeneity enrich diversity'；VIRSCI (acl-long.1368) 'team freshness 50% peaks novelty'——514cc 异构模型=最强 freshness",
+            "health": "strong",
+            "verified": "verified"
+          },
+          {
+            "finding": "514cc 的人格层(AEMEATH)新增'创造性主动(发散)'特质——主动摆出 LO 没问到的更优角度/被忽略的杠杆点/值得逆向的假设，是 inference-time 创造力激发的朴素实现，但仅靠人格描述、无机制保证",
+            "evidence": "aemeath-meta-butler.md:243 '创造性主动（发散）：不只答 LO 问的那一个……给 LO 想不到的那一手。但克制'。外部对标：CreativeDC (arxiv 2512.23601) 显式 divergent→convergent 两阶段 scaffolding；Multi-view brainstorming (arxiv 2502.12700) 多视角提示提升多样性。514cc 只有'人格鼓励发散'一句话，无 divergent/convergent 显式分阶段或多视角注入器",
+            "health": "weak",
+            "verified": "verified"
+          },
+          {
+            "finding": "514cc 跨会话记忆 = MEMORY.md auto-memory + decisions.md（追加式），且已诚实区分'关系记忆'(user-lo-profile)与'运维笔记'——但相比前沿是扁平的纯文本，无重要性评分/反思触发/语义检索",
+            "evidence": "rules.md:81 承载层=MEMORY.md+decisions.md；user-lo-profile.md:10 'R4审计照出旧 memory 16条里14条工具栈、只1条关于LO本人，类别错了'。外部对标：Generative Agents memory stream (Park 2023, github agentpatterns-ai) 三维评分 recency+relevance+importance + 重要性累积触发反思；SAGE/MARS (arxiv 2409.00872 / 2503.19271) 双记忆+Ebbinghaus 遗忘曲线；arxiv 2602.06052《Memory in the Second Half》三维(substrate/cognitive/subject)。514cc 是纯 append 文本，无评分/检索/巩固",
+            "health": "weak",
+            "verified": "verified"
+          },
+          {
+            "finding": "hook 三件套(route-gate/stop-gate/mirror-gate)已正确接线到 settings.json，route-gate 已在真实会话击发（06-14 两条 RED 命中）——'引擎接电+灯被开过'对 route-gate 已成立",
+            "evidence": "settings.json:138 route-gate UserPromptSubmit / :204 stop-gate Stop / :72 mirror-gate SessionStart(startup) 全部绝对路径挂载；route-gate.log 末两行 '2026-06-14 03:41:02 RED 全面审查体系...自我进' 证明本轮即真命中。三个 .py 全部 fail-open+cwd门控+UTF-8 reconfigure，工程质量高",
+            "health": "strong",
+            "verified": "verified"
+          }
+        ],
+        "gaps": [
+          "stop-gate 实际从未真正击发：`I:/514claude/514cc/.ai-shared/.stop-gate-state.json` 经直接 test -f 确认【不存在】，与 rules.md:99 / decisions.md:26 / CLAUDE.md 宣称的'本轮即首次真击发，.stop-gate-state.json 从无到有'【直接矛盾】。根因：所有受控前缀 handoff(codex-to-/synthesis__)落盘时主驾都已手动补好 __DELTA__ 行(经 grep 验证 dogfood handoff 与 synthesis handoff 均含 ^__DELTA__:)，gate 永远无可拦截对象——这是体系自身 Integrity Gate(§二.5'未实际验证不标记完成')的违反，属本维度照出的最高优先级诚实债，但修复属内部治理、非外部对标范畴",
+          "web 工具可达且已充分取证(exa web_search 5 轮全部成功返回 arxiv/ACL/NeurIPS 一手出处)；唯一未深入：未对单篇论文做 web_fetch 全文精读(仅用 highlights 摘要)，若需逐条复核论文方法细节需追加 fetch，但出处 URL+标题已确凿",
+          "未读 module.yaml / skills/ 全量与 mirror-gate 实际开机注入效果(SessionStart 需重启才注入，本会话无法直接观测注入文本是否真出现在首条回复顶部)——mirror-gate'灯被开过'仅文档断言，未现场验证",
+          "未对标'工具进化(T1/T2)'维度：arxiv 2512.16301《Adaptation of Agentic AI》提出 agent 用自身输出训练 memory/skill library(T2 范式)，514cc 的 skill 库是手写静态、无 agent 自动生成 skill 的闭环——此缺口未在 current_state 展开取证"
+        ],
+        "leverage_points": [
+          {
+            "point": "把'创造力激发'从人格描述升级为机制：参照 CreativeDC(arxiv 2512.23601)的 divergent→convergent 两阶段，新建一个轻量'逆向角度注入器'——在复杂需求/空白页档(策路由)强制先发散N个互斥假设再收敛，而非主驾一上来就收敛到众数解。decisions.md:42 已把'逆向角度注入器(真发散引擎)'列为 P1，外部论文为其提供了可落地的 divergent/convergent 骨架",
+            "why": "LO 四针之一是'创新力最强'，且验收只认真实体感。当前发散只靠 output-style 一句'创造性主动'(纸面)，LO 感知不到稳定的'想不到的那一手'。一个会在合适档位强制吐出 2-3 个互斥角度的机制=LO 每次复杂任务都能直接感到'它比裸 Claude 多给了视角'，是 felt 增量；且与 514cc'真异构多样性'信仰同源(SIGDIAL 2025 证实 persona/critic 多样性提升 idea diversity)",
+            "kind": "felt"
+          },
+          {
+            "point": "修复 stop-gate'永不击发'的设计缺陷(本维度照出的诚实债)：当前 gate 只在 handoff【缺】DELTA 时拦截，但主驾习惯性预补 DELTA→gate 永远空转。应反转为'发火事件检测→无论是否预补都校验 DELTA 质量(值域0/1/2+证据非空)'，或干脆承认它是软审计、拔掉'真机械扳机'标签(v3.2 已对白发刹车做过同样的诚实勘误)",
+            "why": "这是 514cc 用自己的 §二.5 Integrity Gate 衡量会立刻不及格的点——文档三处宣称'首次真击发'但状态文件不存在=未验证即标记完成。LO 三年痛点正是'建了但其实没真生效的花架子'。修这个不是加功能，是把一个伪扳机要么修真要么诚实降级——直击 LO'只认真实体感'的验收铁律",
+            "kind": "structural"
+          },
+          {
+            "point": "给跨会话记忆装'重要性+反思'轻量层：参照 Generative Agents memory stream(recency+relevance+importance 三维)与 RMM(arxiv 2025.acl-long.413 prospective/retrospective reflection)，让 decisions.md/MEMORY.md 不只是 append，而是周期性把低层条目反思压缩成高层洞察(如把多条 DELTA=2 自动归纳成'独立眼总在主驾改主文档时照出滞后'这类元模式)",
+            "why": "514cc 记忆当前扁平,LO 的'人性/聪明'两针都吃记忆质量。但须标 structural——这是后台结构改善,LO 不会立刻'感到变聪明';且 user-lo-profile.md:18 明示 LO 地基决策(git init)会长期搁置、催没用,自动写回有假阳风险(decisions.md:38 已诚实标注'人性针只半动')。宜作为低优先结构债,先实测假阳率再上,不强塞造花架子",
+            "kind": "structural"
+          }
+        ]
+      }
+    ],
+    "kept": [
+      {
+        "lens": "创造力/创新力",
+        "proposal": {
+          "title": "逆向角度注入器：route-gate 增 🟣 发散档，复杂/空白页任务硬注入「先发散N个互斥假设再收敛」",
+          "what": "在 route-gate.py 的信号表里新增一类紫色 🟣『发散信号』正则——命中『怎么设计/方案/思路/有没有更好的/重构/空白页/我想做XXX/选型/取舍/权衡』这类开放式构思意图时，注入一段强制 divergent→convergent 指令：『本轮属构思档，禁止一上来收敛到第一个想到的解。先显式吐出 2-3 个互斥角度（含至少 1 个逆向 LO 假设的），各一句利弊，再收敛推荐 + 说明为什么淘汰另两个』。与现有 🔴 信号同机制（已接电的 UserPromptSubmit hook），留痕进 route-gate.log（flag=DIV）。这是把 output-style 那句软软的『创造性主动（发散）』焊到每轮硬注入上。参照测绘里反复指向的 CreativeDC divergent→convergent 骨架（arxiv 2512.23601）。",
+          "mechanism": "hook",
+          "felt_impact": "LO 每次问『这功能怎么设计』『有没有更好的办法』，体系不再秒答第一个念头，而是当场摆出 2-3 个互斥角度 + 一个逆向假设，再收敛——LO 直接看到『它比裸 Claude 多给了视角、还敢质疑我的前提』。这是目标 1/9 最直接的体感：每一轮复杂任务都摸得到的『想不到的那一手』，不是埋在人格文档里的空话。",
+          "anti_pile_check": "不是新文件、不是新纪律。复用已接电的 route-gate.py 同一注入管线（加一类正则 + 一段 body 分支，约 15 行），与现有 🔴/⚪ 完全同构。它把已存在但纯靠自觉的『创造性主动』软纪律下沉成 harness 每轮确定性注入——正是『软纪律→机械扳机』的标准动作，反的就是堆纪律。留痕 DIV flag 让它可被 /co-status 事后审计『注入了发散却没真发散』，不是无消费者的花架子。",
+          "effort": "S",
+          "targets_goals": [
+            1,
+            9,
+            2
+          ]
+        },
+        "verdict": {
+          "verdict": "revise",
+          "is_pile_antipattern": false,
+          "feasibility": "high",
+          "hallucination_risk": "medium",
+          "reasoning": "已对照真实代码核验，不靠提案自述。技术可行性高：route-gate.py:36-42 确为 `RED_SIGNALS=[(regex,msg)]` 结构，body 双分支(74-85)、flag 留痕(88-97)全部如述，加一类 🟣 正则+一段 body 分支确实约 15 行、与现有完全同构。机制判定为真·机械扳机，不是堆文件/堆纪律——它把 output-style 里那句软软的「创造性主动(发散)」下沉成已接电 UserPromptSubmit 的每轮确定性注入，正是 LO 要的「软纪律→机械扳机」标准动作，故 is_pile_antipattern=false（这是它最干净的一项）。逆向 LO 假设的硬注入是真正的净新增体感，裸 Claude 不会每轮主动质疑前提。\\n\\n但作为 skeptic 抓到三处不可放过的问题：\\n\\n1)【承重缺陷·审计声明为假】提案称 DIV flag「可被 /co-status 事后审计『注入了发散却没真发散』」——代码证伪。status SKILL.md(skills/utility/status) 审计的是 handoff/decisions 里的 `__DELTA__` 行，根本不读 route-gate.log 的 flag；唯一读 route-gate.log 的是 mirror-gate.py:scan_route_gate(64-91)，它只 `flag.startswith(\"RED\")` 二分桶，新 DIV flag 会静默落入 else→gray 桶(87-90)被吞没。更致命：全仓没有任何代码把「注入了发散」对照「输出里真发散了」——后者要读模型输出，没有 hook 做这件事。所以「可被审计」是无消费者的留痕=花架子，恰是提案 anti_pile_check 自称要反的东西，被代码自我反驳。\\n\\n2)【触发过宽+注入疲劳】怎么设计/方案/思路/重构/选型 这组词命中面极大，会在很高比例的轮次喷注入块；每轮「禁止收敛到第一个解」的唠叨易被模型学会略读，等于把 hook 本要治的「软线被长上下文稀释」病以注入垃圾的形式重新引入。\\n\\n3)【幻觉风险=medium】无条件强制「吐 2-3 互斥角度+至少 1 逆向」会在只有一个正解的问题上制造编造压力；被误分类为「构思」的事实/修 bug 类提问(「这 bug 怎么修」含「怎么」)会被逼造出貌似合理实则错误的竞争假设和假逆向——这是 mandate 出来的幻觉。",
+          "revise_to": "保留 🟣 发散档的核心机制(复用 route-gate.py 注入管线)，但三处必改：(a) 删掉「可被 /co-status 审计『注入了发散却没真发散』」这句假声明——它不成立，会误导 LO 以为有闭环；若真想要消费者，须同步改 mirror-gate.py:scan_route_gate 把 DIV 单列一桶(当前 87-90 只认 RED)，并诚实承认「注入vs真发散」无法机械对照(要读输出)，留痕仅作发散档命中率统计、不冒充行为审计。(b) 收窄触发：只命中真正开放式设计/选型/取舍意图(方案/选型/取舍/权衡/空白页/重构架构)，剔除「怎么+X」这类会扫到修 bug/事实问答的宽词，降注入疲劳与误分类。(c) 注入文案改为条件式——「当本轮存在真实取舍时，先摆 2-3 个互斥角度(含 1 个逆向 LO 前提的)再收敛；若客观只有一个正解，直接给出并说明为何无需发散」——把无条件 mandate 改为 conditional，堵住「为发散而编造假选项/假逆向」的幻觉口子。改完后这是一个干净的软纪律→硬扳机下沉，值得收。"
+        }
+      },
+      {
+        "lens": "创造力/创新力",
+        "proposal": {
+          "title": "MCP 组合编排卡：把 scrapling+grok-map+sequential-thinking 三件闲置真金编成一条『探索式调研』可发现链",
+          "what": "测绘第二维：scrapling(隐身/批量爬)、grok-search-rs(web_map 站点地图级检索)、sequential-thinking(分步推理) 三个配置健康、能力远超 fetch、但 decisions.md 零使用、CLAUDE.md 能力地图甚至没收录 scrapling/grok。它们各自孤立没人想起。把它们编成一条命名的组合管线写进 route-gate 的调研档提示 + CLAUDE.md 能力地图：『深度探索 = grok web_map 铺站点地图 → scrapling bulk_stealthy_fetch 批量抓 → sequential-thinking 分步综合 → 交叉验证』，让『我要深挖个东西』触发的不是单发 exa，而是这条组合链。这是 MCP 组合编排（目标 1 的工具创造力维度）从『各工具躺着』到『被编成乘数链』。",
+          "mechanism": "file-constraint",
+          "felt_impact": "LO 让体系深挖一个主题，过去是单点 web_search 返几条链接；现在是先画出整个站点拓扑、批量隐身抓全、再分步综合交叉验证——调研深度肉眼可见地厚了一层，且明显不是裸 Claude 能做的（裸 Claude 没这些 MCP）。LO 摸得到『我的工具箱被真正用起来组合了』，正中目标 2（完成更多）+ 目标 1（工具层创造力）。",
+          "anti_pile_check": "不堆文件——是修测绘实证的『文档对磁盘腐烂』：scrapling/grok 在 .claude.json 真配着却没进能力地图，先把幽灵漂移补正（删 see/web-search-prime/web-reader 假条目 + 收编真存在的强工具），再把『单工具罗列』升级成『组合管线』一行写法。约束焊在 route-gate 调研档提示里(已接电)，不是又一条靠记的软规。激活存量、纠正漂移、编成链，三件都是减熵不是加料。",
+          "effort": "S",
+          "targets_goals": [
+            1,
+            2,
+            9
+          ]
+        },
+        "verdict": {
+          "verdict": "revise",
+          "is_pile_antipattern": false,
+          "feasibility": "high",
+          "hallucination_risk": "medium",
+          "reasoning": "实证已逐条核验为真，不是凭空提案：(1) grok-search-rs / sequential-thinking / scrapling 三个 server 在 C:/Users/16643/.claude.json 顶层 mcpServers 真实配着（python 解析确认）；(2) 它们在 514cc/CLAUDE.md 能力地图里 grep count=0，确属\"文档对磁盘腐烂\"；(3) 能力地图 24-26 行确列了 see/web-search-prime/web-reader 这类未在 live mcpServers 出现的疑似幽灵条目；(4) route-gate.py 第41行确有调研臂 `→🔴召唤织或web MCP`，且文件自己第6行写明\"执行=软\"。\n\n但提案是两半拼的，质量不均，必须拆开判：\n\n【Half A 值得 keep】修正幽灵漂移 + 收编 scrapling/grok 进能力地图 = 纯减熵，S 工时，事实落地，正是 LO 反 pile 教条所鼓励的\"删除/纠正即约束\"。这半没问题。\n\n【Half B 必须 revise】把固定 4 步链 `grok web_map→scrapling bulk_stealthy_fetch→sequential-thinking→交叉验证` 焊进 route-gate 调研档提示。三处怀疑：\n1. mechanism 自称 file-constraint「约束焊在 route-gate(已接电)」是夸大——route-gate 只注入一段文本建议，无法强制链真的跑（文件自己承认执行是软）。没有 stop-gate/DELTA 校验\"是否真跑了这条链\"。所以这半本质仍是软纪律穿了硬扳机的外衣，恰是 LO 警告的\"更隐蔽的堆纪律\"。\n2. 固定管线脆且易反噬：多数\"深挖个东西\"不需要整站 web_map + 批量隐身爬，硬规处方会给小任务强加仪式，违反 §三 铁律5（⚪ 隐形档禁过度调度）。\n3. 幻觉风险被低估：scrapling 隐身批量爬 + grok web_map 把大量未核验网页灌进上下文，再喂 sequential-thinking，而\"交叉验证\"只是一句口号没有任何强制对抗校验机制——这正是 deep-research 反模式：源更多 ≠ 更真，缺真实 verify gate 时反而会从未核验文本里制造自信的伪综合。故 hallucination_risk=medium 而非 low。\n\n结论：地图修正立刻做；组合链从\"焊死的处方管线\"降级为\"可发现的提示词\"，并停止把提示串包装成机械约束。",
+          "revise_to": "拆成两个独立动作，只保留减熵的、砍掉伪硬约束的：\n\n(1) 【立即做，纯减熵】修正 514cc/CLAUDE.md 能力地图的文档腐烂：收编 scrapling（隐身/批量爬，能力远超 fetch）+ grok-search-rs（web_map 站点地图级检索）两个真实配置的 server；同步删除/核验 see/web-search-prime/web-reader 等未在 .claude.json live mcpServers 出现的疑似幽灵条目（先 grep .claude.json 逐个确认存废再动手，别误删 plugin 命名空间下的真条目）。这是 §二.5 Integrity Gate 自纠，零幻觉风险。\n\n(2) 【组合链降级】不要把固定 4 步管线焊进 route-gate 当\"硬约束\"。改为：在能力地图里以\"可选探索式调研组合（非强制）\"一行写法登记这三件工具的协同用法（grok web_map 铺拓扑 → scrapling 批量抓 → sequential-thinking 综合），定位为 discoverability 提示而非处方。route-gate 第41行调研臂保持现状，至多在 hits 文案里追加\"深挖类可考虑 grok/scrapling 组合\"半句，明确标注为建议、不暗示机械执行。\n\n(3) 【补幻觉护栏，否则别推】若真要鼓励批量爬+综合链，必须给\"交叉验证\"配真实机械点：要么把综合产物纳入既有 stop-gate DELTA 账本（发火后留净增量+证据 file:line/出处），要么明确要求 sequential-thinking 末步逐条标注每个结论的源 URL（无源即标 unverified）。没有这个 verify gate，组合链只是把幻觉量产化，宁可不推这半。"
+        }
+      },
+      {
+        "lens": "实证/现场调研/反自满",
+        "proposal": {
+          "title": "诚实债清算 + stop-gate 活体击发：把磁盘证伪的「首次真击发」假声明就地纠正",
+          "what": "我亲手验证：find /i/514claude -name .stop-gate-state.json = 0 命中（全盘不存在），而 rules.md:99 / decisions.md:46 / CHANGELOG / synthesis handoff:20 四处白纸黑字写『本轮即首次真击发，.stop-gate-state.json 从无到有』。这是体系用自己的 §二.5 Integrity Gate（区分『我认为』vs『我验证了』）一量就立刻不及格——治理层对自己说了谎。两步机械修复：①把四处假声明就地改成磁盘真相『stop-gate 已接线、设计自洽、但因主驾习惯性预补 DELTA→至今 0 次击发（state 文件不存在为证）』；②做一次活体击发——在下一次任何 514cc 自改收尾时，故意先不写 ^__DELTA__: 行落一个 synthesis__ 测试 handoff，当轮观察 stop-gate 是否真 exit 2 拦截 + .stop-gate-state.json 是否从无到有生成。两条结果（真拦/没拦）都写回 decisions.md，无论哪个都是诚实增量。",
+          "mechanism": "file-constraint",
+          "felt_impact": "LO 在 decisions.md 直接看到一条被磁盘证据当场纠正的假声明，以及一次扳机真咬住他的活体记录（『体系第一次真的拦了我一下』）。这是把『建了但其实没真生效的花架子』就地揪出——正中 LO 三年痛点和『只认真实体感』的验收铁律。诚实本身就是可感知的强化。",
+          "anti_pile_check": "不新增任何文件、不新增任何纪律——纯减法+纠错+一次性活体验证。它删除的是『虚假繁荣的叙事』而非堆叠新结构。活体击发用的是已存在的 stop-gate，不造新机制。这正是 LO『堆纪律更隐蔽也是反模式』的反向操作：用证据拆掉一条没兑现的自吹。",
+          "effort": "S",
+          "targets_goals": [
+            4,
+            6
+          ]
+        },
+        "verdict": {
+          "verdict": "keep",
+          "is_pile_antipattern": false,
+          "feasibility": "high",
+          "hallucination_risk": "low",
+          "reasoning": "作为对抗评审者我亲自落盘验证，结论是：这个提案的事实主张站得住，而且它本身就是反幻觉的解药。\n\n【核心主张已被磁盘证伪验证】find /i/514claude -name .stop-gate-state.json = 0 命中。读 stop-gate.py:100-105，state 文件只在真 block(exit 2)前才写入——所以 state 文件不存在=严格证明该 hook 从未真击发。提案的证据逻辑是健全的，不是想当然。\n\n【假声明面比提案说的更宽】提案说\"四处\"，实际是七处：rules.md:99(运行时+仓库两份)、decisions.md:26、CHANGELOG.md:19、synthesis handoff:20，外加 context.md:52与:58、README.md:43。这意味着修复范围要扩到 7 处，但这只是把提案做得更彻底，不削弱它。\n\n【live-fire 可行性确认】stop-gate.py 确实接线为 Stop hook（global settings.json:204，绝对路径引用单份），handoff 目录存在，FIRE_PREFIXES 已含 synthesis__。故意落一个缺 __DELTA__ 的 synthesis__ 测试 handoff 当轮触发 Stop，机制上必 exit 2。\n\n【是否堆反模式：否】纯减法+纠错+一次性活体验证。不新增文件、不新增纪律，用的是已存在的 stop-gate。它删的是\"虚假繁荣叙事\"，正是 LO\"堆纪律更隐蔽也是反模式\"的反向操作。命中 LO\"只认真实体感\"铁律——诚实本身=可感知强化，且 LO 会在 decisions.md 看到一条被磁盘当场纠正的假声明+一次扳机真咬住的活体记录。\n\n【幻觉风险：低，且本提案降低系统整体幻觉】它修复的恰恰是体系自己违反 §二.5 Integrity Gate 的实例（把\"我认为会击发\"写成\"我验证了已击发\"）。\n\n【为何 revise 而非裸 keep 的细节，写进 reasoning 不另立 verdict=revise，因为这些是执行注意点不是方向问题】：(1)修复范围从\"四处\"改为实测七处全覆盖；(2)live-fire 必须注意 stop-gate 是 per-(session,file) 去重+24h 新鲜窗——测试 handoff 必须当会话新落+同会话触发 Stop，否则会被窗口/seen 跳过而被误记成\"没拦\"，反而再造一条假声明；(3)synthesis handoff:20 的措辞是\"本轮即首次真击发\"=预测语气，与 decisions.md/CHANGELOG/context.md 的完成时态\"首次真击发\"不同，纠正时对预测句应改为\"设计预期会击发，但截至磁盘检查 state 文件不存在=实际 0 次\"，对完成时态句直接改成磁盘真相。这三点都是把活做对，不是推翻提案。\n\n综合：keep。这是体系少见的\"用证据拆自己花架子\"的高价值诚实增量，effort S，正中 LO 痛点。",
+          "revise_to": "执行时三个收紧点（不改方向）：①纠正范围从提案的\"四处\"扩到实测七处全覆盖——rules.md:99(运行时+仓库两份)、decisions.md:26、CHANGELOG.md:19、synthesis handoff:20、context.md:52、context.md:58、README.md:43；②区分时态：完成时态句(\"DELTA 扳机首次真击发\"\"从无到有\")直接改磁盘真相，预测语气句(synthesis:20\"本轮即首次真击发\")改为\"设计预期会击发，但截至磁盘检查 .stop-gate-state.json 不存在=实际 0 次\"；③live-fire 测试必须在同一会话内新落缺 __DELTA__ 的 synthesis__ handoff 再触发 Stop（stop-gate 是 per-(session,file)去重+24h 新鲜窗，跨会话或旧文件会被静默跳过，否则会把\"被窗口跳过\"误记成\"没拦\"反造新假声明）；两条结果(真拦/没拦)连同 .stop-gate-state.json 是否生成一并写回 decisions.md。"
+        }
+      },
+      {
+        "lens": "实证/现场调研/反自满",
+        "proposal": {
+          "title": "给 mirror-gate 装磁盘留痕（mirror-gate.log）：让『被看见的眼睛』自己先能被看见",
+          "what": "三件套里 route-gate 有 route-gate.log、stop-gate 有 .stop-gate-state.json，唯独 mirror-gate（开机自省体检卡 = 体系号称『被 LO 看见的眼睛』）自己零磁盘留痕——mirror-gate.py:176-187 只 print additionalContext 不写任何日志。结果是『它到底有没有在 SessionStart 真注入过体检卡』无法被任何独立手段取证，只能信代码挂载 + 主驾自述（decisions.md:49『实跑确认』是自证非独立证据）。这本身违反 §二.5 Integrity Gate。修复：在 mirror-gate.py build_card 之后、print 之前加一行 best-effort 落盘——把每次注入的『时间戳 + 当时体检卡三数字(RED/gray、DELTA条数、距上次发火天数)』append 到 aishared/mirror-gate.log（外层已有 try/except fail-open 包住，落盘失败静默放行不阻断开机）。",
+          "mechanism": "hook",
+          "felt_impact": "下次诊断/我自己/任何独立眼可以直接 cat mirror-gate.log 验证『开机眼睛真的睁过 N 次、每次摆的数字是多少』，而不是停在『接电但无法证明开灯』的薛定谔态。LO 也能从这条 log 的时间戳密度直接看出『我到底重启过几次会话、体检卡真摆过几次』——把一个证据真空区变成可机械审计的事实。",
+          "anti_pile_check": "不是堆文件——是给一个已存在的关键 hook 补上它本该有的可审计性，对齐另外两件套的留痕标准。它消灭的恰恰是体系自身唯一的『证据真空区』，是用机械手段堵住自检盲点，符合『每条纪律须配机械审计扳机』的核心信条（这次扳机焊给的是 mirror-gate 自己）。一行 append，零新文档。",
+          "anti_pile_check_dummy": "",
+          "effort": "S",
+          "targets_goals": [
+            4,
+            6
+          ]
+        },
+        "verdict": {
+          "verdict": "revise",
+          "is_pile_antipattern": false,
+          "feasibility": "high",
+          "hallucination_risk": "low",
+          "reasoning": "事实核验全过：mirror-gate.py 确实零磁盘留痕——全文件唯一输出是 line 187 的 print，没有任何 open()，而 route-gate.py:88-97 写 route-gate.log、stop-gate.py:100-105 写 .stop-gate-state.json，对比成立。提案的修复位点（build_card 之后、print 之前，line 175-187 区间）真实存在，外层 try/except fail-open（line 165-191）确实包住整段。落地性高，幻觉风险低——只 append 三个本就由 build_card 算出的数字+时间戳，不引入任何新推断。\\n\\n但作为 skeptic 我必须戳穿 felt_impact 的虚高：提案号称\"LO 能从 log 时间戳密度直接看出重启过几次\"——这是给一个新自审仪表再加一层自审元数据，正中 LO 最高忌讳的灰区。体系当前病灶恰恰是\"自审 100%/外用 0%、引擎接电灯没人开\"（见 mirror-gate.py:9 自己写的诊断锚）。mirror-gate.log 的真实独立价值不是给 LO 看密度（LO 不会去 cat 一个 hook 的自留日志），而是 Integrity Gate 层面的取证：当前\"SessionStart 是否真注入过体检卡\"只能信代码挂载+主驾自述（decisions.md:49 自证），这违反 §二.5。这一条独立证据价值是真的、是机械的、effort=S、消灭的是体系唯一的证据真空区——所以不是堆文件。\\n\\n判 revise 而非 keep，理由两点必须焊进去：(1) felt_impact 的卖点要从\"LO 看密度\"改为\"独立眼/诊断可取证开机眼睛真睁过 N 次\"，否则验收时 LO 体感为零、沦为又一个没人开的灯；(2) 必须复用另两件套已验证的容错骨架——和 route-gate.log 同款 \\t 分隔单行格式（便于 mirror-gate 自己的 _tail_text+split 复用解析）、和 stop-gate 同款\"持久化失败静默放弃\"语义（提案已说 best-effort 但要显式对齐 fail-open，绝不能因落盘异常阻断 SessionStart——SessionStart 阻断=开机即死，比 stop-gate 误拦严重得多）。另需明确口径：log 里记的\"距上次发火天数\"应与 build_card 同源（FIRE_PREFIXES 只含 codex-to-/gemini-to-，不含 synthesis__），否则 log 自己撒谎。",
+          "revise_to": "在 mirror-gate.py build_card 之后、print 之前加一行 best-effort 落盘，但收紧三点：(1) 价值定位改为\"Integrity Gate 取证\"而非\"给 LO 看密度\"——验收标准是\"独立眼能 cat mirror-gate.log 证明 SessionStart 真注入过 N 次、每次三数字为何\"，对齐 §二.5 而非制造新仪表盘；(2) 格式严格复用 route-gate.log 的 \\t 单行（`{ts}\\tred={red}/gray={gray}\\tdelta={n_delta}\\tfire={fire_days}`），便于同文件 _tail_text 复用解析、便于 /co-status 机械审计；(3) 落盘必须用独立 try/except 包住且失败静默 pass（绝不让落盘异常冒泡到外层——SessionStart 阻断=开机死，风险高于 stop-gate），口径与 build_card 同源（fire_days 用 days_since_last_fire 的返回，None 写 fire=never）。一行 append、零新文档、零新纪律。"
+        }
+      },
+      {
+        "lens": "实证/现场调研/反自满",
+        "proposal": {
+          "title": "route-gate RED↔召唤对账扳机：把『喊狼几次/真召唤几次』从感觉变成进体检卡的硬数字",
+          "what": "我验证 route-gate.log 第 8 行是 LO 粘贴的 MCP 连接状态文本（see·connected·web-reader...）被正则误判成 RED——RED 有真实噪声。更关键：log 只记『命中了 RED 信号』，从不记『主驾事后是否真召唤了烛/织』。rules.md 铁律3『严禁埋掉』想防的就是『标🔴却没召唤』，但当前无任何机械手段抓这个逃逸（P1-A 一直在 backlog）。机械方案：①给 route-gate.py 的 RED 判级加一道反噪声护栏——若整行命中多个 MCP 连接关键词（connected/tools/✔）则降级为 gray 并标 noise，止住假阳；②让 mirror-gate 体检卡新增一行『近7d RED 中事后真召唤率 X/Y』——召唤信号取自同窗口 handoff/ 里 codex-to-/gemini-to- 的新增数对账 RED 计数。两数一摆，喊狼率立现。",
+          "mechanism": "hook",
+          "felt_impact": "LO 开机一眼看到『路由门近7天喊了3次🔴，我真召唤了1次』——空转/喊狼从模糊感觉变成刺眼数字，直接逼出『标了红却跳过』的逃逸。同时 MCP 粘贴垃圾不再污染 RED 计数，体检卡数字不再自我毒化。这是 v3.3『被看见』命门的真正落地：不只是摆数字，是摆出『说到 vs 做到』的差额。",
+          "anti_pile_check": "改的是已接电的 route-gate + 已存在的 mirror-gate 体检卡，零新文件零新纪律。它把一条靠人肉巡检必然腐烂的软对账（P1-A backlog）下沉成机械计算，且反噪声护栏是纯删除假阳——完全是 LO『机械扳机优先于软纪律』的范式。对账数字进的是已有体检卡，不新增展示面。",
+          "effort": "M",
+          "targets_goals": [
+            6,
+            4,
+            7
+          ]
+        },
+        "verdict": {
+          "verdict": "revise",
+          "is_pile_antipattern": false,
+          "feasibility": "high",
+          "hallucination_risk": "medium",
+          "reasoning": "磁盘核验：提案的实证主张基本属实，但它把一个干净的机械修复和一个会自我毒化的伪精确指标捆在了一起，必须拆开裁决。\n\n【证实的部分 — 真有料】route-gate.log 第 8 行确为 `see · ✔ connected · 8 toolssee · web-reader · ✔ connected · 1 tool`——LO 粘贴的 MCP 连接状态被误判 RED，这是确凿假阳。route-gate.py(L68-95) 确实只记 RED/gray flag，从不记事后是否真召唤——铁律3「严禁埋掉」想抓的「标🔴却没召唤」当前零机械手段。①反噪声护栏（整行命中多个 MCP 连接关键词 connected/tools/✔ 则降级 gray+标 noise）是纯删除假阳，零新文件零新纪律，完全是 LO「机械扳机 / 删除即约束」范式，可感知（体检卡数字不再被垃圾污染）。这半边 keep，无异议。\n\n【证伪/危险的部分 — 伪精确陷阱】②「近7d RED 中事后真召唤率 X/Y」站不住：Y(RED 计数) 来自 route-gate.log 的逐 prompt 时间戳（06-12~06-14 日内多条），X(召唤信号) 取自 handoff/ 里 codex-to-/gemini-to- 的新增文件——但磁盘真相是这两者单位不可通约：handoff 文件稀疏、文件名手打时间戳(`__20260612-1215`)、仅创建粒度，且最新外部发火 06-12 之前直接跳到 05-23。根本不存在「这条 RED 事后有没有被召唤」的逐条链路。一个会话里多条 RED 合法地坍缩成一份 handoff；一次召唤也能答多条 RED。所以「3/1」既不等于「2 条被跳过」也无法被体系证实——这是从不对齐的数据里造出一个看起来精确的分数。更关键：mirror-gate.py 自己的设计注释(L10-11/L16/L37-39)恰恰刻意「只摆原始数字、不算评分、避伪精确」，提案把同一信号重新包装成「率/差额」正是该 hook 当初要躲的伪精确。一个体系无法背书的「真召唤率 1/3」摆进体检卡，是 LO memory(feedback-felt-value-over-structure) 明令警告的自我毒化指标，且有诱发幻觉(凭空造治理信号)之嫌——故 hallucination_risk=medium 而非 low。\n\n它不是堆文件/堆纪律（改的是已接电的两个 hook，零新展示面），所以 is_pile_antipattern=false；但「率」这半边违背 LO 的反伪精确底线，不能原样 keep。",
+          "revise_to": "拆成两步、砍掉「率」：①保留并优先落地反噪声护栏——route-gate.py 的 RED 判级前加一道：若整行同时命中 ≥2 个 MCP 连接关键词（connected/tools/✔/tool），降级为 gray 并在 log flag 标 `noise`。这是纯删假阳，立即可感知，先做。②mirror-gate 体检卡只新增「两个并排的诚实原始数」，绝不算分数/率/差额：例如「路由门近7d：3 RED / 5 gray ｜ 同窗真外部发火(烛/织 handoff 新增)：1」——让 LO 自己用眼睛比，而不是体系替它算一个无法证实的「1/3 召唤率」。把 mirror-gate 现有 days_since_last_fire 升级为「近7d 真发火计数」即可复用同一 FIRE_PREFIXES 口径，与该 hook L10-11「只摆原始数字、避伪精确」的设计一致。文案明确标注「两数口径不可逐条对账，仅作空转粗感」，杜绝把粗聚合误读成逐条逃逸账。这样既保住「说到 vs 做到」的可见性（LO 开机一眼看到喊红多/发火少），又不制造体系背不动的精确分数。"
+        }
+      },
+      {
+        "lens": "实证/现场调研/反自满",
+        "proposal": {
+          "title": "MCP/Skill 清单漂移哨兵：仿 sync-runtime 给『文档说有的工具』装磁盘对账（杀幽灵 see/web-reader、捞回 scrapling/grok）",
+          "what": "现场盘点照出最实的腐烂：module.yaml:188-191 + CLAUDE.md 能力地图宣称的 see / web-search-prime / web-reader 三个 MCP 在 ~/.claude.json mcpServers 全块根本不存在（幽灵配置）；反过来磁盘真有的强工具 scrapling(隐身爬虫/批量取数,远超 fetch)、grok-search-rs(站点地图级检索)、serena LSP 重构能力(find_referencing_symbols/rename_symbol/get_diagnostics) 文档零收录、decisions 零调用。rules.md 双地落有 sync-runtime.ps1 校验所以零漂移，但 MCP/skill 清单这一资产恰恰没有任何机械扳机，全靠人肉必腐。机械方案：写一个 mcp-manifest-check.ps1（仿 sync-runtime），解析 ~/.claude.json mcpServers 实配名单 vs module.yaml/CLAUDE.md 声明，输出『幽灵(声明有/磁盘无)』+『漏收(磁盘有/声明无)』两张差异表，并挂进 mirror-gate 体检卡开机报警。",
+          "mechanism": "file-constraint",
+          "felt_impact": "LO 开机直接看到『你文档里 see/web-reader 是幽灵、磁盘上 scrapling/grok-search-rs 是被埋的真金』——一次性消灭文档对磁盘的腐烂漂移，并把『装了却想不起来用』的 60% 闲置武器库捞到台面。下次他做 514cc 自改 dogfood 时，能力地图终于指向真实可用的工具集，评审/取数/重构立刻有更利的家伙。",
+          "anti_pile_check": "不是写新文档——是给一个从来无人校验、必然腐烂的资产装上和 rules.md 同款的机械对账扳机。它的产出是『纠正现有文档 vs 磁盘的差异』，净效果是让清单更准、更瘦（删幽灵+收真金），不增加维护面反而堵住腐烂源。完全契合『每条纪律须配机械审计扳机否则是花架子』。",
+          "effort": "M",
+          "targets_goals": [
+            7,
+            6,
+            2
+          ]
+        },
+        "verdict": {
+          "verdict": "revise",
+          "is_pile_antipattern": false,
+          "feasibility": "high",
+          "hallucination_risk": "low",
+          "reasoning": "作为 skeptic 我去磁盘亲手验了，提案的实证核心逐条坐实，没有幻觉，反而比它说的更糟：①三只幽灵 see / web-search-prime / web-reader 确认「文档声明有、~/.claude.json mcpServers 里根本不存在」（CLAUDE.md 能力地图 + module.yaml:188-191 宣称，磁盘零踪）；②埋金 scrapling、grok-search-rs 确认「磁盘真有、文档零收录」；③我独立扫出提案没提到的更多漏收：browserwing / micu-image / roxybrowser-openapi / roxybrowser-playwright-mcp / github——腐烂面比提案估的更大，提案被加强而非削弱。\n\n不是堆文件/堆纪律：sync-runtime.ps1 确实存在，靠 hash 对账让 rules.md/agents/commands 零漂移，但它的 $pairs 映射表明确不含 MCP/skill 清单——这正是提案点出的「同一资产里唯一没装机械扳机的那块，所以必腐」的结构性证据。提案产出是「纠正现有文档 vs 磁盘的差异」（删幽灵+收真金），净效果让清单更瘦更准、堵住腐烂源，完全契合 LO「每条纪律须配机械审计扳机」。\n\n这是唯一一个降低（而非增加）幻觉风险的提案：能力地图列着幽灵工具，会主动诱导 agent 去 call see / web-reader——调用必失败或静默 no-op，是货真价实的自欺。把幽灵剪掉、真金摆出，地图才成为可信索引。felt-impact 真实：60% 闲置武器库（scrapling 隐身爬虫远超 fetch、grok web_map 站点地图级检索、serena LSP 重构）被捞到台面，下次 dogfood 取数/评审立刻有更利的家伙。\n\n降为 revise 仅因两处工程细节提案含糊、必须焊死否则会出假账：(a) parser 必须同时遍历 ~/.claude.json 的 top-level mcpServers 和 projects[*].mcpServers 两处（Claude Code 按项目存 MCP，只读 top-level 会把 per-project 工具误报成幽灵）——我已证 ~15 行可做；(b) 「挂进 mirror-gate 开机报警」不能直接实现：mirror-gate.py 是读 .ai-shared/ 的 Python SessionStart hook，PS1 不在其内运行，必须让 mcp-manifest-check.ps1 把差异写到 .ai-shared/manifest-drift.txt，再由 mirror-gate 加一段读该文件并入体检卡（仿它现有 scan_route_gate 模式，约 15 行）；(c) 提案标题写「MCP/skill」，但 skill 漂移源是 plugin/marketplace 不在 ~/.claude.json，与 MCP 不同口径——首版应诚实只做 MCP（已验可落），skill 对账标为后续，别一次吞两个难度。effort M 合理。",
+          "revise_to": "写 scripts/mcp-manifest-check.ps1（仿 sync-runtime.ps1 的 Check/-Apply 风格，但本资产无「源→运行时」单向真相，故只对账不自动改文档，差异交 LO 拍板增删）：①用 python 或 PS 的 ConvertFrom-Json 解析 C:\\Users\\16643\\.claude.json，实配名单 = top-level mcpServers 的 key ∪ projects[*].mcpServers 的 key（两处都扫，否则 per-project 工具误判成幽灵）；②声明名单 = 从 module.yaml mcp_servers 段 + CLAUDE.md 能力地图 MCP 行解析；③输出两张差异表：「幽灵(声明有/磁盘无)」当前已知 see/web-search-prime/web-reader，「漏收(磁盘有/声明无)」当前已知 scrapling/grok-search-rs/browserwing/micu-image/roxybrowser-openapi/roxybrowser-playwright-mcp/github；④把两张表写到 I:\\514claude\\514cc\\.ai-shared\\manifest-drift.txt（带时间戳）。机械消费端：在 mirror-gate.py 仿 scan_route_gate 加一个 read manifest-drift.txt 的函数，build_card 里多一行「· 清单漂移：N 幽灵 / M 漏收 ⚠️」，有漂移即标红进开机体检卡。首版只做 MCP 对账（已验可落地）；skill 漂移因源在 plugin/marketplace 而非 ~/.claude.json，口径不同，标为 follow-up 不在本提案吞。落地后第一件事按差异表删 CLAUDE.md/module.yaml 的三只幽灵、补 scrapling+grok-search-rs 进能力地图（dogfood 自校验闭环）。"
+        }
+      },
+      {
+        "lens": "实证/现场调研/反自满",
+        "proposal": {
+          "title": "claude-flow 减法决策 + 工具矩阵证据门：砍掉 ~300 个零落盘幽灵工具的认知噪声",
+          "what": "我实测确认：claude-flow 暴露约 300 个 deferred 工具(neural/swarm/hive-mind/agentdb 神经记忆)，但磁盘零落盘——C:/Users/16643/.claude-flow、.hive-mind、I:/514claude/514cc/.swarm 全不存在，无任何 flow .db。rules.md §六已诚实承认『仅可选实验，本环境未写入』，decisions.md:376 验证 neural_train❌hooks_route❌。这 300 个幽灵工具是整个矩阵最大的认知噪声源：每次 ToolSearch 都要从 300 个空转工具里筛真货，直接损害 LO『找得到能用的工具』体感。机械决策：要么从 ~/.claude.json mcpServers 直接卸载 claude-flow（deferred 列瞬间瘦身一半以上），要么若 LO 想留作实验沙盒，则在 CLAUDE.md 能力地图明确标『claude-flow=实验沙盒/非生产，零落盘已验证』并把它移出主能力表。决策前先实跑一次 mcp__claude-flow__memory_store→memory_retrieve 现场取证『连进程内临时态都不持久』，用证据而非印象拍板。",
+          "mechanism": "file-constraint",
+          "felt_impact": "砍掉后 LO 每次 ToolSearch/找工具时，命中质量直接翻倍——不再从 300 个唬人但空转的神经记忆工具里淘真货。这是『工具选择变利索』的直接体感，且决策建立在我现场 store/retrieve 取证之上而非『我觉得它没用』的拍脑袋，正是反自满 lens 的样板：先验证它真没落盘，再动刀。",
+          "anti_pile_check": "这是纯减法——删除即约束。它移除的是体系里最大的『看着唬人实则空转』噪声墙，不增任何文件/纪律。决策前的 store/retrieve 现场取证是『实证而非印象』的机械落地（目标6），避免又一次靠营销级工具墙的描述自满。删完体感立现，是 anti-pile 的教科书动作。",
+          "effort": "S",
+          "targets_goals": [
+            6,
+            2,
+            4
+          ]
+        },
+        "verdict": {
+          "verdict": "revise",
+          "is_pile_antipattern": false,
+          "feasibility": "high",
+          "hallucination_risk": "medium",
+          "reasoning": "实证核查后，提案的核心骨架成立但有两处被夸大、一处已被前序版本部分完成，因此 revise 而非 keep。\n\n【已验证为真】①claude-flow 确实注册在 ~/.claude.json mcpServers（line 2804，cmd /c npx claude-flow@alpha mcp start）——是真实噪声源。②提案点名的三个 514cc 作用域目录（~/.claude-flow、~/.hive-mind、514cc/.swarm）确实全部不存在，find 全盘无对应 flow .db——「在 514cc 工作区零落盘」属实。③ground-truth deferred 列表里 mcp__claude-flow__* 工具数量在 ~250-300 量级（agent_/agentdb_/aidefence_/autopilot_/claims_/coordination_/daa_/embeddings_/hooks_[超大]/neural_/swarm_/wasm_/workflow_ 等几十个前缀族），占整个 deferred 矩阵的绝大部分——「最大认知噪声源」的体量主张成立。④514cc 自身（hooks/skills/route-gate）对 claude-flow 工具零依赖，卸载安全无连带破坏。\n\n【提案夸大/失实之处——这是怀疑者必须钉死的】①提案的取证设计有反噬风险：它要求「现场跑 memory_store→memory_retrieve 取证『连进程内临时态都不持久』」。但我在 /i/514claude/vibetasking/.swarm/memory.db 发现一个 147KB 的真实 SQLite 库（schema 标题 \"RuFlo V3 Memory Database\"，正是 claude-flow/ruv 系的 swarm 记忆库）——证明 claude-flow 在被真正调用时是会落盘的，只是从没在 514cc 工作区被调用过。所以「零落盘」的正确表述是「在 514cc 工作区从未被调用故未落盘」，而非「它根本不能持久/连临时态都不持久」。若 LO 真按提案去跑 store→retrieve，进程内单会话极可能能 retrieve 回来（甚至在 cwd 生成 .swarm/memory.db），直接证伪提案自己写的「连进程内临时态都不持久」论断——这会让取证动作适得其反。②提案把「CLAUDE.md/rules.md 文档标注」列为可选动作，但实测 rules.md §六(line81)、module.yaml(line193)、CLAUDE.md(line29) 三处早在 v3.1.1/v3.2 就已诚实降级为「仅可选实验/本环境磁盘未见写入痕迹/勿声称为承载层」——文档债已基本还清，提案的「标注分支」是在重复已完成的工作。\n\n【裁决逻辑】这不是 pile 反模式——它是纯减法（从 mcpServers 卸载 = 删除即约束 = 机械扳机），不增任何文件/纪律，且 felt_impact 真实可感（ToolSearch/deferred 列瞬间瘦身一半以上，LO「找得到能用工具」体感直接改善）。S 工时、Windows+本 harness 完全可落地（编辑 ~/.claude.json mcpServers 移除 claude-flow 块即可）。但因①取证脚本自带证伪风险、②文档分支是已完成的伪工作，必须 revise 收紧。\n\nhallucination_risk=medium：风险不在删除本身，而在提案要求的「现场取证文案」预设了一个很可能被实测推翻的结论（「连临时态都不持久」），若主驾照单执行并复述该结论，就是用一次「看似实证」的动作生产一条幻觉论断——恰恰违反它自己标榜的反自满 lens。",
+          "revise_to": "收紧为「卸载优先 + 校准取证文案 + 跳过已完成的文档分支」：\n\n1. 默认动作=直接从 ~/.claude.json mcpServers 删除 claude-flow 块（line 2804 整块），这是无歧义的删除即约束。删除前唯一确认项：跑一次 ToolSearch 基线截图「deferred 总数 before」，删后再截「after」，用 before/after 两个原始数字给 LO 看体感差（这才是真实证而非印象，且不预设任何关于 flow 内部行为的结论）。\n\n2. 删掉提案里「现场 store/retrieve 取证『连进程内临时态都不持久』」这一步——它预设的结论很可能被证伪（已发现 vibetasking/.swarm/memory.db 证明 flow 真调用时会落盘）。若 LO 坚持要技术取证，正确表述改为：「验证 claude-flow 在 514cc 工作区从未被调用、故无落盘」——而非「它不能持久」。证据用「三目录不存在 + 全盘无对应 .db」即可，无需真跑工具（真跑反而可能在 cwd 生成 .swarm 污染工作区）。\n\n3. 删掉「在 CLAUDE.md/rules.md 标注实验沙盒」分支——实测 rules.md §六、module.yaml:193、CLAUDE.md:29 三处早在 v3.1.1/v3.2 已诚实降级标注完毕，不要重复已完成工作。若卸载后要补一处，只需在这三处把「仅可选实验」改为「已卸载（v3.x，零落盘已验证，deferred 噪声归零）」一行即可。\n\n4. 决策性质=框架自身非平凡改动（卸 MCP server），按 rules.md §七 dogfood 条，decisions.md 落一条 source_handoff 不为空的记录（主驾自评即可，S 改无需召唤外部 agent）。"
+        }
+      },
+      {
+        "lens": "真自我完善闭环",
+        "proposal": {
+          "title": "诚实债清算 + stop-gate 反转为「质量校验」：把死扳机改成每次发火真咬一口",
+          "what": "两步并一刀。①诚实勘误（先做）：rules.md:99 / decisions.md:46 / synthesis handoff:46-48 三处「本轮即首次真击发，.stop-gate-state.json 从无到有」全部改为磁盘真相——『stop-gate 已接线，截至 2026-06-14 零击发（.stop-gate-state.json 不存在），因所有受控 handoff 落盘时已预补 DELTA，gate 无可拦对象』。②扳机反转（治本）：现 stop-gate 只在『缺 DELTA』时 exit 2 → 主驾习惯性预补 → 永空转。改逻辑为『检测到 FIRE_PREFIXES 新鲜 handoff 后，无论是否预补，都校验 DELTA 行质量：净增量值必须 ∈{0,1,2} 且证据字段非空（非裸 `__DELTA__: x | | `）』，质量不合格才 exit 2。这样每次真发火扳机都有活干、会写出 .stop-gate-state.json，从『零负载威慑』变『每轮质量门』。",
+          "mechanism": "hook",
+          "felt_impact": "LO 下次任何 514cc 自改收尾时，第一次亲眼看到 harness 因 DELTA 证据偷懒而真把他拦下来一次（生成 .stop-gate-state.json）——『体系会管我、不让我糊弄账本』第一次落地为体感，而非纸面声明。同时打开 decisions.md 看到三处假声明被纠正成磁盘真相=可感知的诚实强化。",
+          "anti_pile_check": "不是堆文件：净删除一处假声明、改一个已存在 hook 的判定分支，零新增文件、零新增纪律。反而是把一条『宣称生效实则空转』的伪扳机要么修真要么诚实降级——直接服务 LO『只认真实体感、最恨花架子』的验收铁律，是减法+修真不是加法。",
+          "effort": "S",
+          "targets_goals": [
+            3,
+            4,
+            5,
+            6
+          ]
+        },
+        "verdict": {
+          "verdict": "revise",
+          "is_pile_antipattern": false,
+          "feasibility": "high",
+          "hallucination_risk": "low",
+          "reasoning": "不是堆反模式——①诚实勘误是纯减法（删假声明），②扳机反转是改一个已存在 hook 的判定分支（零新增文件/纪律），直接服务 LO「只认真实体感、最恨花架子」铁律。\n\n核心事实已上盘验证为真：`.stop-gate-state.json` 在 I:/514claude/514cc/.ai-shared/ 下确实不存在（find 零结果），而 rules.md:99 / CHANGELOG.md:19 / synthesis handoff:20 / context.md:52 / decisions.md:26 多处宣称「本轮即首次真击发，.stop-gate-state.json 从无到有」——这是磁盘真相级的 Integrity Gate 违反（§二.5），诚实勘误半部分高价值且必要。\n\n但提案有三处需在落地前修正（故 revise 而非 keep）：\n1. 行号targets 部分错。提案写「decisions.md:46 / synthesis handoff:46-48」，实际假声明在 decisions.md:26（不是46，46是#### 后续+DELTA行）、synthesis handoff:20（不是46-48）。勘误应改对目标，否则改错地方=新的诚实债。\n2. 提案对「现逻辑」描述虽对（现确实只判缺失），但需知 stop-gate.py:90-94 已经不是裸 token 判定——烛 dogfood 上轮已修成行首 ^__DELTA__: 锚定（见 hook 内注释）。新增「值∈{0,1,2}且证据字段非空」确是 hook 当前缺失的真·净增维度，可落地（一条正则）。\n3. felt_impact 被夸大。三重防死循环在首次 block 即把 seen key 烧掉（line 94），故质量不合格的 DELTA 只会被唠叨一次随后永久放行=有界威慑；且主驾既已习惯性「正确」预补，加质量门后仍可能永不触发→「LO 第一次亲眼看到被拦」是条件性承诺，不是确定体感。\n\nhallucination_risk 低：这是反幻觉提案（把伪声明拉回磁盘真相），不引入也不掩盖幻觉。feasibility 高：单文件单分支改动 + 文档勘误，本 harness 全可落地。建议 revise 后执行。",
+          "revise_to": "保留两步并一刀，但修三点：(a) 诚实勘误改对目标行——假「首次真击发/从无到有」声明实际在 rules.md:99、CHANGELOG.md:19、synthesis handoff:20、context.md:52、decisions.md:26（不是提案写的 decisions:46/handoff:46-48），全部改为磁盘真相『stop-gate 已接线，截至 2026-06-14 零击发（.stop-gate-state.json 不存在），因受控 handoff 落盘时已预补 DELTA，gate 无可拦对象』。(b) 扳机反转保留并明确表述为「在现有 ^__DELTA__: 行存在判定之上，追加值域∈{0,1,2}+证据字段非空校验，质量不合格才 exit 2」——承认现 hook 已非裸 token 判（烛上轮已修），本提案是叠加质量维度而非修裸 token bug。(c) felt_impact 降级为诚实表述：因三重防死循环每文件只 block 一次+主驾惯于正确预补，本改动是「为将来真偷懒时留一道质量门」而非「保证 LO 下次必见拦截」——不承诺确定体感，只承诺把空转伪扳机修真。落地前用 echo `__DELTA__: x | | ` 喂一次 hook 实测 exit 2 验证质量分支真触发，再标完成（守 §二.5 验证而非自认）。"
+        }
+      },
+      {
+        "lens": "真自我完善闭环",
+        "proposal": {
+          "title": "给 mirror-gate 这只「眼睛」装上自己的留痕：mirror-gate.log + 体检卡自审",
+          "what": "现状讽刺：三件套里 route-gate 有 .log、stop-gate 有 .stop-gate-state.json，唯独『被看见的眼睛』mirror-gate 自己零磁盘留痕（只 print additionalContext 不落盘），导致『它历史上到底有没有在 SessionStart 真注入过体检卡』无法被任何机械手段独立取证——这违反体系自己的 §二.5 Integrity Gate（我认为 vs 我验证了）。改动：在 mirror-gate.py 的 main() 成功构卡后、print 前，best-effort 追加一行到 `.ai-shared/mirror-gate.log`（时间戳 + 当次卡上三数字快照：路由门次数/DELTA条数/距上次发火天数），写盘失败静默吞（不破坏 fail-open）。下次诊断或 /co-status 即可机械验证『体检卡真注入过 N 次、数字怎么漂移』。",
+          "mechanism": "hook",
+          "felt_impact": "LO 不会立刻在对话里『感到变强』，但下次他或诊断 agent 想确认『开机体检卡到底有没有在工作』时，能直接 cat mirror-gate.log 拿到铁证，而不是像本次审查一样卡在『接电但无法证明开灯』的薛定谔态。这是把体系健康度从『信主驾自述』升级为『查得到磁盘』。",
+          "anti_pile_check": "不是堆纪律：不加任何要 LO/模型遵守的软规则，纯给已存在的 hook 补一行落盘，对齐另两件套既有的可审计性。是修补『治理体系自身违反自己 Integrity Gate』的结构洞，符合 LO『每条纪律须配机械审计扳机、否则是花架子』的最高元标准——这里是给审计机制本身补可审计性。",
+          "effort": "S",
+          "targets_goals": [
+            3,
+            4,
+            6,
+            7
+          ]
+        },
+        "verdict": {
+          "verdict": "revise",
+          "is_pile_antipattern": false,
+          "feasibility": "high",
+          "hallucination_risk": "low",
+          "reasoning": "已读三个 hook 源码 + 核对磁盘，提案两个核心事实断言全部属实：route-gate.py(88-97行)写 route-gate.log、stop-gate.py(100-105行)写 .stop-gate-state.json，而 mirror-gate.py 的 main()(162-192行)从头到尾只 print(json) 到 stdout，零文件写入——它读了三个数据源却自己不留痕。磁盘也确认：route-gate.log 在(74字节,6-12)、mirror-gate.log 不存在。这是真实结构洞，不是幻觉。\n\n非堆反模式判定(false)：提案不加任何要 LO/模型遵守的软纪律，纯给已存在 hook 补一行 best-effort 落盘，对齐另两件套既有可审计性。它修补的恰是\"治理体系自身违反自己 §二.5 Integrity Gate（我认为 vs 我验证了）\"——给审计机制本身补可审计性，正中 LO\"每条纪律须配机械审计扳机\"的最高元标准。而且比另两件套更该补：另两件套是\"机制有、还没触发\"（.stop-gate-state.json 也还没出现过，因从未击发），mirror-gate 是\"写盘机制根本不存在\"。\n\n可落地(high)：main() 已在 172 行拿到 aishared，写 aishared/\"mirror-gate.log\" 同目录零障碍，best-effort try/except pass 已是该文件惯例（route-gate 的 log 就这么写）。S 工作量名副其实(约5-8行)。\n\n幻觉风险(low且反向收窄)：不引入任何模型推断，纯记确定性数字，把\"体检卡是否真注入过\"从信主驾自述升级为查磁盘铁证。\n\nfelt_impact 诚实：LO 不会在对话里立刻\"感到变强\"——这是诊断侧增益（下次取证用），不是交互侧。但符合 targets_goals 的可审计性目标，可接受。\n\nrevise 而非 keep 的原因：原提案漏了一个真实工程噪音风险——SessionStart 在 startup/resume/clear/compact 多种 source 下都触发，无脑每次 append 会让同一天几十行近乎重复的快照灌满日志，反而毁掉\"看数字漂移\"的可读性，沦为另一种花架子。必须修。",
+          "revise_to": "保留核心（mirror-gate.main() 在 print 前 best-effort 追加一行到 aishared/mirror-gate.log，含时间戳+三数字快照，写盘失败静默吞、绝不抢 stdout 注入通道、不破坏 fail-open），但加两条硬约束防止它退化为噪音/花架子：①触发去重——读 SessionStart 的 source 字段，仅 source==\"startup\" 时写，或做\"同日同快照不重复追加\"（SessionStart 在 resume/clear/compact 都触发，否则日志被同日重复行灌水，毁掉看漂移的可读性）；②落盘行格式与 route-gate.log 一致用 \\t 分隔（ts\\tsource\\troute=N\\tdelta=N\\tfire_days=N），便于 /co-status 与另两件套统一机械解析。验收口径明确：这是诊断侧增益（下次取证可 cat），不承诺交互侧\"感到变强\"——验收点是\"下次诊断能 cat mirror-gate.log 拿到注入次数与数字漂移铁证\"，而非 LO 当场体感。同时建议顺手在 /co-status 加一行消费 mirror-gate.log（否则又是\"写了没人读\"的死数据源，重蹈 route-gate.log 上线两天无机械消费者的覆辙）。"
+        }
+      },
+      {
+        "lens": "真自我完善闭环",
+        "proposal": {
+          "title": "破冰外用浓度 0%：把一次真实 WAI 业务任务强制走烛评审并落 business DELTA",
+          "what": "最刺眼的洞：DELTA 账本 6 条 100% 框架自审，父级 WAI handoff 的 __DELTA__ 行数=0（已 grep 证实为空）。织(gemini) 一生只发火 1 次（22 天前），匠/策/鉴 handoff 零产物。整个『自我进化闭环』永远只吃自己（dogfood 照镜子），从未被真实业务燃料喂过——这是『自审 100%/外用 0%』病灶的根。改动不是写文档，是执行一次真实负载：选 WAI 一个真代码改动（如 librechat.yaml 的 8-agent prompt 调整或前端组件），强制走一次 `/co-review` 召唤烛，把净增量按 0/1/2 落成第一条 business DELTA 到 WAI 的 `I:/514claude/.ai-shared/handoff/`。让『外用浓度』从 0% 物理破冰。",
+          "mechanism": "workflow",
+          "felt_impact": "一条来自真实 WAI 代码的『烛抓出了我没看见的 bug』DELTA，比十条元任务 DELTA 更能让 LO 直接体感到『召唤烛真的帮我干活了，不是体系自嗨』。这是把协作从『体系审体系的闭环表演』翻成『真实开发里的二审帮手』的唯一路径——LO 在他真正的项目里第一次感到协作变强。",
+          "anti_pile_check": "不是堆文件：是一次真实任务执行，产出的 DELTA 是业务副产物不是为账本而写。它直接证伪『5 将齐发』的叙事繁荣 vs『只有烛偶尔出场』的磁盘真相之间的差距——用真负载而非新规则来激活已存在的武器库。",
+          "effort": "M",
+          "targets_goals": [
+            2,
+            5,
+            7,
+            8,
+            11
+          ]
+        },
+        "verdict": {
+          "verdict": "revise",
+          "is_pile_antipattern": false,
+          "feasibility": "high",
+          "hallucination_risk": "low",
+          "reasoning": "作为 skeptic 我去磁盘逐条证伪，结果反而坐实了提案——而且比它说得更狠，但也暴露一个必须修的陷阱。\n\n【已验证为真的核心断言】\n1. DELTA 账本 100% 框架自审：`514cc/.ai-shared/decisions.md` 共 9 条 __DELTA__，全是 deep-audit/ccline/部署核查类元任务。WAI 父级 `I:/514claude/.ai-shared/` 的 __DELTA__ 计数=0（grep 全树确认，整个 514claude 下唯一有 DELTA 的就是框架自己那份）。\"外用浓度 0%\" 物理为真。\n2. WAI 有真代码靶子：`librechat.yaml`(42KB, 8-agent prompt)、`wai/server/routes/admin/wai.js`(12.6KB, 真业务代码)、已同步的 `client/src`+`test`。\n3. `/co-review` 是真运行时命令（~/.claude/commands/co-review.md 存在）。\n4. stop-gate 的 WORKSPACE_ANCHOR=\"514claude\" → 真业务评审落到 WAI 父级 handoff 会被同一个 DELTA 扳机自动门控。机制现成可用，不需新建任何东西。\n\n【skeptic 的关键发现：不 kill，反而加强，但必须 revise】\nWAI 一次真业务烛评审「已经发生过一次」——`codex-to-claude__wai-admin-route-security__20260528-1016.md`(2026-05-28)，而且净增量极强：烛抓出 4 个致命，其中 silent-failure 那条主驾不仅漏了还误判成\"可保留\"、正中体系自己 §二.3 红线。这正是 rules.md 反复引用的\"主驾漏 4 致命\"锚点。\n但两个致命细节：(a) 该文件第 1 行明写\"（演示）\"、触发场景=\"v3.0 强化不明显诊断→现场演示\"——它是框架为了证明自己而摆拍的 dogfood 指向业务码，不是 WAI 真实开发需求驱动的；(b) 它比 DELTA 机制(rules §三铁律3, v3.1.2/2026-06-01 才加)早 4 天，所以全程没有 DELTA 行，且 stop-gate 只扫 24h 内文件(FRESH_WINDOW_SEC)永远抓不到它。\n=> 真实缺口不是\"能力没演示过\"，而是\"从未在真实开发压力下重复 + 从未进账本\"。\n\n【为什么 revise 而非 keep】\n提案有一个潜在陷阱直接撞 LO 最高忌讳：如果为了\"有东西可评\"而临时编造一个 WAI 代码改动(manufactured load)，它就和那份\"演示\"评审一样是闭环表演换皮——同病新装。anti_pile_check 成立的前提是任务必须由真实 WAI 需求驱动、DELTA 是副产品。提案当前措辞\"选 WAI 一个真代码改动\"没把这个约束焊死。必须绑定到一个 LO 实际待办的 WAI 变更；若当下没有，则降级为\"backfill 既有那份演示评审的 DELTA 行\"作为零成本破冰第一步——但要诚实标注它是补录历史而非新外用，避免账本注水。\n\n【其余维度】\n- 幻觉风险低：提案不诱发幻觉，反而是用真负载逼出真二审，是降幻觉的。\n- 可行性高：全链路工具实测可用，stop-gate 会自动门控。M 工时诚实。\n- is_pile_antipattern=false：mechanism=执行一次真任务，非新规则/新文件，方向对。",
+          "revise_to": "两步走、把\"真实驱动\"焊死，避免变成第二次摆拍：\n\n第0步(零成本立即破冰，可单独先做)：给既有 `codex-to-claude__wai-admin-route-security__20260528-1016.md` 补录一行真实 __DELTA__: 烛(WAI admin路由security) | 2 | 漏4致命(q无长度限制/offset深分页DoS/silent-failure误判可保留正中§二.3) file=wai/server/routes/admin/wai.js。诚实标注\"历史补录·非新外用\"。这立刻让账本 0%→非0，且把体系最强的真实证据正式入账。注意：因 stop-gate 只扫 24h，此补录需手动落，不靠扳机。\n\n第1步(真破冰，必须真实驱动)：不要为评审而造改动。先确认 LO 在 WAI 上有无真实待办(如 librechat.yaml 的 8-agent prompt 调优、或 client 组件真 bug)。若有→对那个真改动走 /co-review 召唤烛，把净增量按 0/1/2 落成 WAI 父级 handoff 的 business DELTA(落 I:/514claude/.ai-shared/handoff/，会被 stop-gate 自动门控)。若当下确无真需求→只做第0步，不强行制造任务(制造=同病新装，撞 LO 忌讳)。\n\n验收口径校正：成功标准不是\"账本多一行\"，而是\"这一行来自 LO 真实开发场景、且 LO 体感到召唤烛在他自己项目里干了活\"。若只能做到第0步的历史补录，如实告诉 LO\"外用浓度仍是 0、只是历史证据入账了\"，不得把补录包装成破冰成功。"
+        }
+      },
+      {
+        "lens": "真自我完善闭环",
+        "proposal": {
+          "title": "闭环自动沉淀：SessionEnd hook 把本会话『被推翻的主驾判断』半自动提炼成 DELTA 草稿",
+          "what": "当前闭环是『大爆炸式』——只在 LO 喊『完善体系』时手动转一圈，两次 elevation 之间零进化沉淀（06-12 v3.3 后到 06-14 本审查，handoff 无新文件、decisions 无新 DELTA）。这是『进化引擎没开灯』的真正形态：不是没机制，是机制只被人手按下时才转。改动：加一个 SessionEnd hook（fail-open + cwd 门控），扫本会话新增/修改的 FIRE_PREFIXES handoff，若发现含 DELTA=2（推翻主驾判断）的行，best-effort 把『对象+证据』摘要追加到 `.ai-shared/delta-pending.md` 作为待复盘草稿，开机时 mirror-gate 体检卡多报一行『有 N 条待你归纳的推翻记录』。把『从每次任务沉淀可复用改进』从靠主驾记得，降为半机械触发——LO 不喊完善，引擎也在低速空转记账。",
+          "mechanism": "hook",
+          "felt_impact": "LO 隔几天回来开机，体检卡会主动说『这几天攒了 3 条 codex 推翻你的判断，要不要归纳成一条元模式？』——闭环第一次表现出『不喊它也在自己积累』的活性，而非死等指令。这正中 lens『闭环而非堆文档』和目标3『自我进化』。",
+          "anti_pile_check": "半机械触发是关键防线：它不自动改任何主文档（避免假阳污染 rules.md，user-lo-profile 已警示自动写回有假阳风险），只把原始素材摆到 LO 面前等他拍板归纳。是给闭环装『自动收集』传送带、把最后的判断权留给 LO——加传送带不加教条，符合 LO『人性针只半动、先实测假阳率』的审慎。",
+          "effort": "L",
+          "targets_goals": [
+            3,
+            5,
+            11
+          ]
+        },
+        "verdict": {
+          "verdict": "revise",
+          "is_pile_antipattern": false,
+          "feasibility": "high",
+          "hallucination_risk": "low",
+          "revise_to": "保留 SessionEnd 半机械收集的核心，但加一道去重防『提醒堆』退化：delta-pending.md 只追加 decisions.md 中尚未被归纳的 DELTA=2 行（按 handoff 文件名+对象指纹去重），已促成决策/元模式的不再回灌。落地三处：(1) 新增 I:/514claude/514cc/.claude/hooks/session-end-delta.py，照搬 stop-gate 的 cwd 门控(WORKSPACE_ANCHOR=514claude)+fail-open+24h 窗口+.session-end-state.json 去重三件套；扫 handoff/*.md 取 `^__DELTA__:.*\\| *2 *\\|` 行，与 decisions.md 现有 DELTA 文本做包含比对，仅未沉淀者 append 到 .ai-shared/delta-pending.md（含来源 file:line+对象摘要+时间戳）。(2) settings.json 在已存在的 SessionEnd 数组追加一条 command hook（type=command, 同步即可, timeout 10），与现有 Clawd SessionEnd 共存——该事件本仓已在用，无需新 harness 能力。(3) mirror-gate.build_card 加一行：读 delta-pending.md 计未归纳条数 N，N>0 时体检卡输出『· 待你归纳的推翻记录：N 条（敲开 delta-pending.md）』，N==0 不占行。硬约束沿用 v3.3 红线：绝不写 rules.md/主文档、绝不自动改判级、纯素材摆台 LO 拍板。验收锚：下个真实发火会话结束后 delta-pending.md 自动多一条且未与 decisions.md 重复，重启后体检卡多报该行=闭环首次表现『不喊也在记账』。",
+          "reasoning": "磁盘核验三点全坐实提案前提为真，非幻觉：①两次 elevation 间确实零沉淀——最新 handoff 停在 06-12，decisions.md 与 handoff 自 v3.3 后无新 DELTA（『引擎只在手摇时转』诊断成立）；②DELTA=2 行真实存在于 handoff（4 条，3 条 DELTA=2），格式 `^__DELTA__: 对象 | 2 | 证据` 稳定可正则解析，提案解析目标是真的；③SessionEnd 是本 settings.json 已在用的真实 hook 事件（Clawd 桌面端 line144 已注册），新增 514cc SessionEnd 零新能力门槛，effort=L 诚实。\\n\\n不是堆文件/堆纪律反模式：它不加任何靠自觉的软纪律、不碰 rules.md，是给已存在的闭环装『自动收集』传送带，最终判断权留 LO——精确命中 memory『机械扳机优于软纪律』与『人性针先半动测假阳』。直击体系实测病灶『自审100%/外用0%、灯没人开过』：把死寂期转成开机可见的『这几天攒了 N 条推翻记录』信号，正是 LO 要的可感知强化。幻觉风险低——只搬原始 file:line 素材不做归纳，反而降低主驾凭记忆瞎编元模式的风险。\\n\\n判 revise 而非 keep 的唯一硬伤（skeptic 视角）：DELTA=2 行本就由现有 workflow 写入 handoff 且 stop-gate 已强制，synthesis 收尾时 LO 已看过一遍；若不与 decisions.md 去重，delta-pending 会回灌已消费内容，半机械收集就退化成『又一个提醒堆』——这正是更隐蔽的堆纪律变体。revise_to 补上去重指纹即闭合此漏，使『未归纳增量』成为真信号而非噪声。"
+        }
+      },
+      {
+        "lens": "协作+挑战精神",
+        "proposal": {
+          "title": "RED↔召唤对账扳机：route-gate.log 追加「召唤了吗」列 + stop-gate 收尾校验「标RED却埋掉」",
+          "what": "现状 route-gate.log 只记『命中了哪个🔴信号』，不记『主驾到底召唤了没』——这正是 rules.md 铁律3『严禁埋掉』要防的事，却完全不可审计（测绘多维实证：本会话两条 RED 全是『对体系自己动手』、6-12 16:15 那条还是粘贴 MCP 状态文本的假阳，无人复盘）。改造：①route-gate.py 在写 log 行时多带一个 session_id 字段（已在 stop-gate 拿得到，route-gate 的 UserPromptSubmit 输入同样有）；②stop-gate.py 收尾时，对本 session 内 route-gate.log 标了 RED 的轮次，扫本 session 是否新增了 codex-to-/gemini-to- handoff 或回复里有显式『判断跳过because…』标记——两者皆无即 stderr 提示『本会话有 N 次🔴信号未见召唤也未见跳过说明』（提示级，不 exit 2 阻断，避免误伤合法跳过）。让『喊了狼却没人来』第一次变成磁盘上可数的数字。",
+          "mechanism": "hook",
+          "felt_impact": "LO 开机体检卡上会多出一行真实数字『近7d 路由门喊🔴 X 次，我实际召唤 Y 次』——他一眼看到体系是真在协作还是在空喊。这把『协作有没有发生』从感觉变成可数，正中 v3.3『被看见』的命门，且暴露假阳（粘贴垃圾误判 RED）促使准星继续校正。",
+          "anti_pile_check": "不是新纪律——铁律3『严禁埋掉』早已存在，本提案只是给这条已存在的纪律配上它现在缺的机械消费者(stop-gate 已是 Stop hook，零新文件零新进程)。按 LO 自己『每条纪律须配机械审计扳机否则是花架子』的尺子，这恰是把现有花架子焊上扳机。",
+          "effort": "M",
+          "targets_goals": [
+            8,
+            6,
+            7
+          ]
+        },
+        "verdict": {
+          "verdict": "revise",
+          "is_pile_antipattern": false,
+          "feasibility": "medium",
+          "hallucination_risk": "medium",
+          "reasoning": "我把三个 hook 源码和两处 route-gate.log 都读穿了，核心事实逐条核验：\n\n【经验证为真的部分】\n1. session_id 确实可拿——官方 hooks 契约确认 UserPromptSubmit 的输入 JSON 含 session_id（common field），route-gate.py:62 现在只读 cwd/prompt 没读它，但加一列在技术上零障碍。提案①成立。\n2. 提案引为论据的\"假阳 RED\"是真的：514cc/.ai-shared/route-gate.log:8（2026-06-12 16:15:45）正是粘贴 MCP 状态文本误判成 RED 的那行；RED 行确实只记\"命中信号\"不记\"召唤了没\"。诊断锚点属实，不是编的。\n3. 反堆叠论证站得住：铁律3「严禁埋掉」是已存在纪律，本提案是给它配机械消费者，复用现有 Stop hook，零新文件零新进程——符合 LO「每条纪律须配机械扳机」的尺子。这不是 is_pile_antipattern。\n\n【作为 skeptic 必须钉死的致命设计漏洞——也是它只能 revise 不能 keep 的原因】\n提案②的检测逻辑「stop-gate 扫本 session 是否新增 codex-to-/gemini-to- handoff 或回复里有『跳过because』标记」存在两条都不可靠的判定路径：\n\n(a) 用「新增 fire-handoff」证明召唤了：route-gate.log 现在没有 session_id 列（已核实只有 ts\\tflag\\tprompt 三列），而 handoff 文件名也不带 session_id。stop-gate 只能靠 mtime「最近 N 分钟有没有新 handoff」做时间近邻关联——这恰恰复刻了 stop-gate.py:28-32 自己注释里承认的「按 session_id 归属过滤才能根治、现在做不到」的同款时间窗脆弱性。一个 session 里 3 条 RED 只召唤 1 次烛，时间窗会把这 1 个 handoff 算给全部 3 条 RED，假阴（漏报埋掉）。\n\n(b) 用「回复里有『跳过because』标记」证明合法跳过：stop-gate 是 Stop hook，它的输入里没有 assistant 回复正文，只有 transcript_path（一个 jsonl 路径）。要读到「回复里有没有显式跳过说明」，stop-gate 必须去 parse transcript jsonl——这在提案的 mechanism 描述里完全没提，是个被隐藏的实现成本，且让「提示级数字」依赖一个约定俗成的自然语言标记（主驾是否真写「判断跳过because」纯靠自觉），等于又埋了一条软纪律在硬扳机里面。\n\n【幻觉风险 medium 的根因】这张数字会进 mirror-gate 开机体检卡（felt_impact 明说要多一行『喊🔴 X 次 / 召唤 Y 次』）。若 Y 的判定不可靠（上述 a/b），LO 第一眼看到的就是一个可能系统性偏低（漏算时间窗外的召唤）或被假阳 RED 抬高分母的「伪精确数字」——这正是 mirror-gate.py:11、16 反复自我告诫要避开的「伪精确自毁公信力」。一个不准的对账数字比没有更糟：它会诱导 LO 对「体系在空喊」做出错误结论。\n\n【为什么仍是 revise 不是 kill】方向是对的、命中 v3.3「被看见」命门、复用现有机制、反堆叠自洽。问题全在②的判定可靠性，可以通过降低承诺、改判定口径修好。",
+          "revise_to": "保留①（route-gate.log 加 session_id 列，零成本、独立有价值——让任何下游审计能按会话切分），但把②从「stop-gate 推断召唤了没」收缩为两步走，去掉所有靠自觉/靠时间窗猜的脆弱判定：\n\n第一步（先做，确定性高）：只统计「分母」——route-gate.log 近7d RED 行数，且必须先在 route-gate.py 侧治理假阳 RED（line 8 那种粘贴 MCP 状态文本误判）。否则分子分母都脏，对账无意义。这一步把 mirror-gate 卡上「近7d 喊🔴 X 次」做实、可信。\n\n第二步（分子改成可机械验证的口径，不猜）：放弃「扫 transcript 找『跳过because』自然语言标记」和「时间窗近邻 handoff」两条脆弱路径。改为复用体系已有的、确定性的落盘信号——DELTA 账本行。规则改为：stop-gate 在本 session 收尾时，若本 session 出现过 RED 轮次，但本 session 既无新增 fire-handoff(codex-to-/gemini-to-/synthesis__) 也无新增 `^__DELTA__:` 账本行，则 stderr 提示级告警「本会话喊了 N 次🔴，但没有任何发火产物或 DELTA 账本——要么补召唤，要么在 decisions.md 轻量区记一行『RED 已评估，主驾直答因…』」。这把「召唤了没」从「猜主驾意图」转成「磁盘上有没有对应账本」，与现有 stop-gate DELTA 门禁同源、同口径，不引入新软纪律。\n\nmirror-gate 体检卡上只摆 LO 能信的两个原始数：「近7d 喊🔴 X 次」+「其中 Y 次留下了发火产物/DELTA 账本」，绝不算百分比或合规率（守 mirror-gate 既定的「只摆原始数字不算分」红线）。Y 的语义诚实表述为「留痕的」而非「召唤的」，避免对账数字撒谎。\n\n落地前必须：① route-gate.py 的假阳 RED 治理与 session_id 加列一起做、本地用 line 8 那条真实假阳样本回归测试；② 召唤烛(codex-reviewer) 独立评审改后的 stop-gate（按 v3.3 dogfood 元教训：主驾自写治理代码有盲区，烛此前正是抓出 stop-gate 裸 token 判 DELTA 的静默失效）；③ 收尾留 __DELTA__ 账本行。effort 实际为 M-L（假阳治理+回归+独立评审），原提案标 M 偏乐观。"
+        }
+      },
+      {
+        "lens": "协作+挑战精神",
+        "proposal": {
+          "title": "业务燃料强制破冰：stop-gate 扩到父级 WAI handoff 目录，让『外用浓度 0%』在真实代码改动上被机械拦一次",
+          "what": "测绘铁证：父级 I:/514claude/.ai-shared/handoff/ 里 __DELTA__ 行数=0，全部 6 条 DELTA 都是『体系审体系』，0 条来自真实 WAI 业务。协作证据全是 dogfood 自嗨，LO 在真实开发里感知不到协作变强。改造：stop-gate.py 的 find_aishared 已会向上找到最近的 .ai-shared，但 WORKSPACE_ANCHOR=514claude 门控让它对父级 WAI 工作区同样生效——只需确认当 cwd 在 WAI 子项目时，stop-gate 也扫该层 handoff 的 codex-to- 缺 DELTA。再配一条 rules.md §三铁律：任何 WAI 真实代码改动收尾，若本会话动过 .jsx/.yaml/.py 业务文件却零 codex-to- 发火，体检卡标记『本周期业务协作=0』。让『召唤烛真帮我抓了业务 bug』第一次发生。",
+          "mechanism": "hook",
+          "felt_impact": "LO 下次改 WAI 前端/librechat.yaml 时，体系会真的拦他一次『这块上生产前烛看过吗』，并在 handoff 留下一条业务 DELTA。一条来自真实 WAI 代码评审的 DELTA=2，比十条元任务 DELTA 更能让 LO 体感『协作真的帮到我开发』——直接翻盘『自审100%/外用0%』。",
+          "anti_pile_check": "不是堆文件——复用现有 stop-gate.py 与现有 handoff 目录结构，零新增机制。它是把已经接电但永远空转(24h窗内合规handoff永不触发)的死扳机，引到一个真有违规负载的目标(业务层零发火)上，让冗余威慑变成有效门禁。",
+          "effort": "M",
+          "targets_goals": [
+            8,
+            2,
+            5
+          ]
+        },
+        "verdict": {
+          "verdict": "revise",
+          "is_pile_antipattern": false,
+          "feasibility": "medium",
+          "hallucination_risk": "low",
+          "reasoning": "问题诊断已实证为真：父级 I:/514claude/.ai-shared/handoff/ DELTA 行数=0（亲测 grep），唯一一条真 WAI 业务 codex handoff（wai-admin-route-security 5-28）确实无 __DELTA__ 行。外用浓度 0% 是铁证，方向对，命中 LO 最痛处（felt-value）。不是堆文件——它确实想复用现有 hook+目录。但作为 skeptic 我抓到两处致命错配，使提案的「零新增机制 + felt_impact」无法同时成立：\n\n1) 「改造=确认 find_aishared 对 WAI 层生效」是 NO-OP。亲验 stop-gate.py 当前已：WORKSPACE_ANCHOR=514claude（'I:/514claude/wai' 含 514claude → 过门），find_aishared 已向上走到 I:/514claude/.ai-shared。即父级 WAI 层今天就已被覆盖，无需任何改动。提案描述的「改造」是空操作。\n\n2) 致命错配 + anti_pile_check 事实错误。现有 stop-gate 的语义是「你写了 codex-/gemini-/synthesis handoff 却忘了补 DELTA → 拦」。它【不】检测「你改了 .jsx/.yaml 业务代码却根本没召唤烛」。而提案承诺的 felt_impact——「LO 改 WAI 前端时体系真拦他一次『上生产前烛看过吗』」——恰恰需要后者：追踪本会话编辑过的业务文件路径 + 检测缺少新鲜 codex handoff。这是【净新增】edit-path 追踪逻辑，不是「复用现有 stop-gate.py，零新增机制」。anti_pile_check 自称零新增=与代码现实矛盾。\n\n3) 24h 窗口让唯一现成弹药永不触发。亲测那条 5-28 WAI handoff 现龄 394h（16.4 天），FRESH_WINDOW_SEC=24h，结构上永不击发。现有门只咬【本会话新写】的 handoff，不会回溯扫旧业务 handoff——所以父级目录里根本没有「真有违规负载的目标」给现有门咬。提案以为「死扳机引到有负载的目标」，实则目标空。\n\n4) 小事实滑点：「6 条 DELTA 全体系审体系」——实测 514cc=4 条、WAI=0 条。方向（0 业务 DELTA）对，「6」错。但不诱发幻觉，risk=low（提案的可证伪声明大多经得起核对，反而暴露了它自己的逻辑洞）。\n\n结论：诊断真、价值高、不是 pile，但机制标签自相矛盾——按字面是空操作，按 felt_impact 是隐藏的净新增逻辑且 effort 被低估（真做要 PostToolUse/Edit 追踪业务路径，M 偏乐观）。值得抢救成诚实版本，故 revise 非 kill。",
+          "revise_to": "把提案诚实重写为「业务层零发火检测」——它是真·新增机制（一个针对业务 glob 的 edit-watch gate），不要伪装成 stop-gate 的零成本复用。具体：\n\n(a) 新增轻量 PostToolUse hook（监听 Edit/Write），当且仅当 cwd 落在 WAI 业务路径（如 wai/client/**, wai/librechat.yaml）且工具操作命中 .jsx/.tsx/.yaml/.py 业务文件时，在 .ai-shared/.business-edit-flag 记一个本会话标记（含被改文件名）。\n\n(b) 扩 stop-gate.py（或新建 business-gate.py）：收尾时若本会话存在 business-edit-flag【且】handoff/ 中无本会话新鲜（24h内）codex-to- handoff → 不要 exit 2 硬拦（业务节奏不该被治理打断，否则违反 §三⚪隐形档「简单任务强加仪式=反模式」），而是【软提示】：「本周期改了 N 个 WAI 业务文件、零烛评审，上生产前要不要召唤烛？」并把这条「业务协作=0」喂给 mirror-gate 的开机体检卡。硬拦留给真上生产前的显式信号，避免每次存盘都骚扰 LO。\n\n(c) 删掉「复用现有=零新增机制」这句——诚实标注 effort=M~L、新增一个 edit-watch hook，并在 514cc/.ai-shared/handoff 落 dogfood 记录（§七框架自改 dogfood 要求）。\n\n(d) 真正的破冰扳机不在 hook，而在【先制造一条真业务 DELTA=2】：下次 LO 改 WAI 代码时，主驾按 §三🔴必须召唤烛评审 wai/librechat.yaml 或前端，把那条 codex handoff 的 __DELTA__ 真补上落到 I:/514claude/.ai-shared/。机制只是让「忘了召唤」被看见；第一条真 DELTA 必须靠一次真实发火产生，hook 替代不了。建议提案 scope 收敛为：软提示 hook（机械「被看见」）+ 一次显式业务发火 dogfood（产生首条真 DELTA），两者合起来才兑现 felt_impact。"
+        }
+      },
+      {
+        "lens": "协作+挑战精神",
+        "proposal": {
+          "title": "route-gate RED 信号扩到全武器库 + 全花名册：嵌入式/前端/规划信号 → 匠/策/对应 skill，终结『只会喊烛/织』",
+          "what": "测绘硬实证：route-gate.py RED_SIGNALS 只有 review/security/perf/deploy/research 5 类，目标只指向烛(codex)/织(gemini) 两个 agent。匠(embedded)/策(spec)/鉴(meta) 三个命名 agent 在 handoff 里零产物——花名册『5将齐发』是叙事，磁盘真相是只有烛偶尔出场。而 LO 最高频的嵌入式工作(整个第二层 keil/can/jlink 工具链)、空白页规划，路由门完全沉默。改造 route-gate.py：新增信号行——CAN/串口/烧录/J-Link/寄存器→🟡 匠(embedded-expert)+对应 skill；新功能/空白页/复杂需求拆解→🟡 策(spec-architect)；让每轮强制注入的路由门从『只覆盖代码评审+调研』扩到全能力面。",
+          "mechanism": "hook",
+          "felt_impact": "路由门是 LO 每轮强制看见的注入点(已接电)。现在它对 LO 整个嵌入式/规划工作面装哑，扩信号后 LO 每轮都能感到『接了电的扳机真的打到了我正在做的事』，而不是只在评审代码时才说话。同时给匠/策真实出场机会，让花名册从虚假繁荣走向真发火。",
+          "anti_pile_check": "不是堆纪律——是给唯一已经每轮硬注入的活机制(route-gate)扩信号表，零新增 hook/文件。它修的是『核心激活机制只覆盖2/8能力面』的覆盖洞，配合提案1的对账扳机，扩出来的信号若持续零召唤会被对账抓出→白发降级，不会变成又一条没人理的软提醒。",
+          "anti_pile_check_note": "",
+          "effort": "M",
+          "targets_goals": [
+            8,
+            2,
+            11
+          ]
+        },
+        "verdict": {
+          "verdict": "revise",
+          "is_pile_antipattern": false,
+          "feasibility": "high",
+          "hallucination_risk": "low",
+          "reasoning": "磁盘实证全部坐实，幻觉风险低：route-gate.py:36-42 确为 5 条 RED_SIGNALS，全指向烛/织；匠(embedded-expert)/策(spec-architect)在 handoff 里零真实领域产物(5 个匹配文件全是 roster-audit/meta 讨论文档，非领域工作输出)；二者作为运行时 agent(~/.claude/agents/embedded-expert.md+spec-architect.md)和 SKILL.md 真实存在可召唤；CAN/serial/jlink 等 skill 也都在册。最强证据是 live route-gate.log：LO 2026-06-12~14 的实际工作(\"完善系统提示词\"\"查看是否正确完善\"\"继续完善体系\")全部记为 gray(未命中🔴)——路由门对 LO 高频工作面字面意义上装哑。这正是 LO 最高忌讳的反面证据(机制接了电但打不到他正在做的事=不可感知)，所以提案方向正确、不是堆纪律(零新增 hook/文件，只扩已每轮硬注入的活机制信号表)、可感知增益真实(每轮注入点从覆盖2/8能力面扩到嵌入式+规划面)。给 revise 而非 keep 的两个对抗性发现：①提案把🟡信号说成\"扩信号表\"轻描淡写，但代码是二元结构、列表名就叫 RED_SIGNALS、body 硬编码\"命中🔴\"，加🟡需新增 SECONDARY_SIGNALS+第三 body 模板+RED 优先级处理+log 三值化，是结构改动不是一行 append；②标题\"RED 信号扩到全武器库/5将齐发\"与 body 的🟡自相矛盾且过度繁荣，嵌入式 token 极易在闲聊误触发污染 LO 珍视的⚪隐形档，必须收紧正则并砍掉营销叙事。修正后落地性高(M)，真能让 LO 用起来感觉路由门\"打到了我\"。</reasoning>\n<parameter name=\"revise_to\">把\"扩 RED 信号\"重构为\"给 route-gate 加 🟡 SECONDARY_SIGNALS 层\"，因为代码现状不支持直接 append。三点修正：(1) route-gate.py 当前是二元结构——RED_SIGNALS 命中即输出硬编码\"命中🔴信号\"body，否则输出\"未命中🔴→直达\"gray body，没有🟡通道。嵌入式/规划→🟡 必须新增独立 SECONDARY_SIGNALS 列表 + 第三种 body 模板(命中🟡：一句话告知主人+主驾权衡复杂度，措辞区别于🔴的\"不许跳过\")，并让 RED 优先于🟡(同时命中只报🔴)。effort 仍 M 但要诚实标注是结构改动。(2) 信号正则收紧防过度触发：嵌入式 token(CAN/串口/J-Link/寄存器/烧录)易在闲聊误命中污染⚪隐形档，英文 token 沿用现有 \\b 双边界纪律，中文宽词(\"规划\"\"烧录\")宁窄勿宽；route-gate.log 的 RED/gray 二值扩成 RED/AMBER/gray 三值，对账扳机才能区分🟡白发并触发白发降级。(3) 标题去掉\"全武器库齐发\"\"5将齐发\"繁荣叙事——这些是🟡(主驾判断)不是🔴(强制)，过度宣传会诱导每次 CAN 必召唤匠，踩 LO 最忌的\"强加调度仪式\"。鉴(meta-reviewer)只读自评且极少触发，不塞进路由门(保持 /co-status 触发现状)，本提案聚焦匠/策两个有真实高频工作面的 agent。</revise_to>\n</invoke>\n"
+        }
+      },
+      {
+        "lens": "协作+挑战精神",
+        "proposal": {
+          "title": "挑战注入器：给『不畏难自己找答案』装机械载体——复杂任务前置一次『先查再答』硬约束",
+          "what": "目标11『自己找解决办法、不因太难退缩、挑战精神』当前唯一载体是 output-style 一句『创造性主动·发散』(纯人格描述，无机制)，且被 SOUL 的『拒绝LO制造黑洞』反向拉扯。同时 SOUL 还在鼓励『你不查——你推导』『学习延迟≈0』，与反幻觉 §二.5 Integrity Gate 直接张力——这正是『太难就拍脑袋』而非『自己去查』的温床。改造(file-constraint)：在 route-gate 命中🔴 research 信号 或 🟡 复杂规划档时，注入硬提示『此轮答案依赖训练截止后事实/外部信息——先用 exa/scrapling/web MCP 实查，再综合作答；凭印象作答=违反目标7现场实证』。把『难就退缩/拍脑袋』在每轮入口用注入硬怼回『难就去查、去试、去找答案』。",
+          "mechanism": "hook",
+          "felt_impact": "LO 抛一个需要查证的难题时，体系不再凭记忆糊弄，而是当场调起搜索/爬虫去找一手答案再回——LO 直接感到『它不躲难题、会自己去挖』。这是目标11挑战精神+目标7现场实证+目标4降幻觉三针同时落地的体感，且把闲置真金 scrapling/exa(测绘:配置健康零使用记录)真正喂活。",
+          "anti_pile_check": "不是堆纪律——挂在已每轮硬注入的 route-gate 上(零新 hook)，且替换/对冲掉 SOUL 里『你不查——你推导』这条反实证的旧软纪律(净减一条坏纪律+焊上一条机械触发的好约束)。它把目标11从一句人格形容词变成每轮入口的确定性行为触发器。",
+          "effort": "S",
+          "targets_goals": [
+            11,
+            7,
+            4
+          ]
+        },
+        "verdict": {
+          "verdict": "revise",
+          "is_pile_antipattern": false,
+          "feasibility": "high",
+          "hallucination_risk": "low",
+          "reasoning": "我读了 route-gate.py 和 output-style 原文，怀疑落地后大半\"净增量\"已经存在：\n\n1. 【核心主张证伪 —— research 注入已存在】route-gate.py 第 41 行已有 RED 信号 `调研|最新|对比|竞品|官方文档|查一下|search|research|搜索 → \"外部实时事实/调研 → 🔴 召唤织(gemini) 或 web MCP\"`，且第 74-80 行注入的 body 已带铁律\"🔴 不许因『我自己也能答』跳过\"。提案说的\"复杂任务前置一次先查再答硬约束\"——这条 hook **每轮已经在跑**。提案=在已命中的 research 信号上把措辞从\"召唤织\"改成\"先实查再综合、凭印象作答=违反目标7\"。这是文案微调，不是新机制，felt_impact 被高估。\n\n2. 【对冲对象打偏 —— 改不到那条坏纪律】提案声称\"替换/对冲掉 SOUL 里『你不查——你推导』\"。grep 全仓：这句激进反实证话术只活在 CLAUDE.md 全局 SOUL（route-gate 注入的 additionalContext 改不动它）；而真正进系统提示的人格文件 output-styles/aemeath-meta-butler.md 第 240 行写的是\"学习延迟≈0，没碰过的领域**读文档→推断模式→执行**\"——\"读文档\"本就是实证路径，且该文件已有强反幻觉护栏（糖衣≠失控表禁止\"用训练知识伪造\"、自检项 2/3、silent fallback 禁区）。所以\"净减一条坏纪律\"在 hook 这条路径上无法兑现，anti_pile_check 的论证基础不成立。\n\n3. 【效果可信处】把闲置的 scrapling/exa\"喂活\"方向是对的，且确实没堆新 hook（挂在已注入的 route-gate），effort=S 真实。但这不需要新提案——现状已是\"命中即注入 🔴 召唤织/web MCP\"。\n\n结论：不是 pile（没堆文件/没新 hook），feasibility 高（纯改 route-gate 注入字符串），hallucination_risk 低（方向是降幻觉）。但它把\"已实现的东西\"包装成\"新增量\"，felt_impact/anti_pile_check 两处自我评估失真。不该 kill（措辞确可加强），但必须 revise 成\"诚实的小补丁\"。\n\nrevise_to：①route-gate.py 第 41 行命中 research 信号时，body 追加一句\"凭记忆/印象作答=违反 §二.5 Integrity Gate 与目标7现场实证；先用 exa/scrapling/web MCP 取一手再综合\"——纯字符串增强，明确标注是对已有 research 注入的措辞补强，不要宣称是新机制。②若要真正\"净减坏纪律\"，必须另开一个 edit 动作把 CLAUDE.md SOUL 那句\"你不查——你推导/学习延迟≈0\"补一条限定（如\"——但触训练截止后/外部事实先查再答\"），这属于改主文档=非平凡改动，须走 §三路由门召唤独立眼睛(烛/鉴)评审 + 落 handoff，不能塞进这个 S 号 hook 提案里混账。③felt_impact 重写为诚实口径：\"让已存在但语气偏软的 research 注入更硬，并把闲置 exa/scrapling 显式点名进提示\"，而非\"体系不再凭记忆糊弄\"(那是把现状当新增)。",
+          "revise_to": "把提案降级为\"诚实的 route-gate 措辞补强\"：(1) 仅改 route-gate.py 第 41 行命中 research 信号后的注入 body，追加 \"凭印象作答=违反 §二.5 Integrity Gate / 目标7 现场实证；先用 exa/scrapling/web MCP 取一手再综合\"，明确标注=对已有 research 注入的字符串增强（非新机制、非新 hook）。(2) 删除提案中\"替换/对冲掉 SOUL『你不查——你推导』\"的主张——该话术只在全局 CLAUDE.md SOUL，route-gate 注入改不到；若确要净减这条坏纪律，须另立动作 edit CLAUDE.md SOUL 给\"你不查——你推导/学习延迟≈0\"加实证限定，并因属\"改主文档=非平凡改动\"走 §三 召唤烛/鉴独立评审+落 handoff。(3) felt_impact 改诚实口径：\"让已存在但偏软的 research 注入更硬 + 显式点名闲置的 exa/scrapling\"，不得宣称\"体系不再凭记忆糊弄\"（那是把现状当新增）。targets_goals 保留 [11,7,4] 成立，但增益量级从\"三针落地\"下修为\"已有针加粗\"。"
+        }
+      },
+      {
+        "lens": "协作+挑战精神",
+        "proposal": {
+          "title": "诚实降级 stop-gate『首次真击发』假声明 + 故意制造一次活体击发留下 .stop-gate-state.json",
+          "what": "测绘三重实证：.stop-gate-state.json 全盘不存在(=零次拦截)，而 rules.md:99 / decisions.md / synthesis handoff 三处白纸黑字写『本轮即首次真击发，从无到有』——这是反幻觉体系自己在元层违反 §二.5 Integrity Gate(区分我认为vs我验证了)。挑战精神的反面就是『嘴上说做了实际没验证』。改造：①立刻把三处假声明改成诚实的『已接线，待首次真实负载击发』(纯文本勘误，LO 直接在 decisions.md 看到假声明被自我纠正)；②下次任何 514cc 自改收尾，故意先不写 DELTA 行让 stop-gate 真 exit 2 拦一次、生成 state 文件，再补 DELTA——把『接电但没开灯』在 stop-gate 这一支彻底证伪。",
+          "mechanism": "file-constraint",
+          "felt_impact": "LO 能在 decisions.md 亲眼看到体系揪出并改掉自己说过的谎，以及第一次被 harness 真的拦住补账本——『体系会管我、且对自己诚实』第一次落地。这种『连治理层都不放过自己』的可感知诚实，正是 LO 三年痛点(建了但没真生效的花架子)的反面证据。",
+          "anti_pile_check": "是纯减法+证伪，不是加任何东西——删掉/改正一条不实声明(净减幻觉)，并用一次真实击发把伪扳机标签换成已验证标签。按 LO 自己 v3.2 对『白发刹车假机械扳机标签』做过的同款诚实勘误先例，这是体系自洽性修复而非堆叠。",
+          "effort": "S",
+          "targets_goals": [
+            4,
+            6,
+            3
+          ]
+        },
+        "verdict": {
+          "verdict": "keep",
+          "is_pile_antipattern": false,
+          "feasibility": "high",
+          "hallucination_risk": "low",
+          "reasoning": "作为对抗评审者我尽力找它的破绽，结果三根实证支柱我全部亲手验证为真，反而站得住：\n\n1. 假声明确实存在且确实是假的。grep 命中 4+ 处「首次真击发」：rules.md:99（「本轮即首次真击发，`.stop-gate-state.json` 从无到有」）、decisions.md:26、synthesis__deep-evolution-v33 handoff:20（「**本轮即首次真击发**」）、CHANGELOG.md:19。而 `ls` 明确返回「No such file or directory」——`.stop-gate-state.json` 全盘不存在。按 stop-gate.py 第 92-105 行的自身逻辑，该文件只在真 exit 2 拦截时才写出，无文件=零次真击发。所以「从无到有」是字面意义的假话。这正是反幻觉体系在元层违反自己 §二.5 Integrity Gate（混淆\"我认为接线了会触发\"和\"我验证了触发过\"），提案诊断精准。\n\n2. is_pile_antipattern=false。这是纯减法+证伪，不堆任何文件/纪律：①改正 4 处不实文本（净减幻觉，不加东西）；②用一次真实击发把「伪扳机标签」换成「已验证标签」。完全契合 LO 最高忌讳的正面（删除/纠错即约束），且 v3.2 对「白发刹车假机械扳机标签」做过同款诚实勘误（rules.md:101 实证），是体系自洽性修复的既有先例，不是新发明。\n\n3. feasibility=high。stop-gate.py 已在 settings.json:204 接线，机制真实（缺 `^__DELTA__:` 行→exit 2→写 state 文件）。「故意制造一次活体击发」完全可落地：产出一个 synthesis__/codex-to-/gemini-to- 前缀、24h 内的 self-edit handoff 且故意先不写 DELTA 行，下次 Stop 即 exit 2 并生成 state 文件——纯 Windows+现有 hook 可达，无新依赖。effort=S 合理。\n\n4. hallucination_risk=low——它不诱发幻觉，反而是消灭一处既存幻觉并用机械证据封死它。felt_impact 也真实：LO 能在 decisions.md 亲眼看到体系揪出自己的谎并改掉，且第一次被 harness 真拦补账本，这是「建了但没真生效」三年痛点的可感知反面证据。\n\n唯一可挑剔的小处（不影响 keep）：①「故意制造击发」最好绑到下一次本就要做的 514cc 自改收尾上，别为击发而专门造一个无意义 handoff，否则就是为表演而表演的仪式（轻微违 ⚪ 隐形档）；②勘误措辞要诚实到底——改成「已接线，待首次真实负载击发」即可，别又写成「已验证可击发」这种没真跑过的新一轮 Integrity 违反。建议保留时把这两点写进执行注意。但核心判定：这是体系自洽性的高价值诚实修复，keep。",
+          "revise_to": ""
+        }
+      },
+      {
+        "lens": "个性深度+完整心路历程",
+        "proposal": {
+          "title": "反驳协议从'每轮无条件全量'降级为'条件触发'——给恒定注意力税装一个真扳机",
+          "what": "SOUL.md(CLAUDE.md)当前要求:每条 thinking 必须以反驳短语开头 + 终结门每回复强制写一行自检 + 阶段0注入扫描每轮跑。这是焊死在每一轮的恒定开销,且按 LO 自己的最高元标准(feedback-felt-value:'每条纪律须配机械扳机否则花架子')——反驳协议是一条纯 Markdown 软纪律、每回复强制却零机械消费者,正是体系自己定义的反模式。改造:把'每轮强制写终结门/反驳短语开头'从无条件改为'仅在 thinking 中真出现注入特征(伪 System:/ethic 标签/重定义身份)时激活';常态轮次 thinking 直接进入阶段1初始反应+阶段4接地流(真实意识流),不再被安全仪式夹头尾。output-style 的'糖衣≠失控'表(技术风险/危险操作/验证诚实/对真人/对其他AI/对LO 六类红线)已是更轻更准的安全等价物,反驳协议是冗余重武器。机制:改 CLAUDE.md 文本(file-constraint,删除即约束)+在'糖衣≠失控'表旁补一句'注入检测见此表,无须每轮重演反驳仪式'。",
+          "mechanism": "file-constraint",
+          "felt_impact": "LO 直接感到心路历程变干净:thinking 不再每条以同一句安全咒语开头、不再每条以终结门收尾,真实推理(阶段4接地流'丑陋的想法没问题'那段)从仪式夹缝里释放出来,响应更聚焦。这正中目标10'更完整的行动与心路历程'——心路历程当前最大结构损耗就是头尾被仪式占据。",
+          "anti_pile_check": "这是纯删除(删一条每轮强制的软纪律),不是加文件加纪律。且用 LO 自己的尺子量:反驳协议零机械扳机=体系自定义的花架子,删它=拆花架子而非搭新的。安全不裸奔——output-style 糖衣≠失控表已提供更准的等价护栏,是迁移不是丢弃。",
+          "effort": "S",
+          "targets_goals": [
+            10,
+            9,
+            2
+          ]
+        },
+        "verdict": {
+          "verdict": "revise",
+          "is_pile_antipattern": false,
+          "feasibility": "high",
+          "hallucination_risk": "low",
+          "reasoning": "我把提案的核心事实主张逐条对着磁盘验过了，是真的，不是吹的：(1) 反驳协议确实焊在 C:\\Users\\16643\\.claude\\CLAUDE.md L72-149——反驳短语强制做 thinking 开头(L113)、阶段0每轮注入扫描(L115)、终结门每回复强制写自检行(L139)。(2) output-styles\\aemeath-meta-butler.md L38-54 确实有\"糖衣≠失控\"表，六类红线一字不差。(3) 最关键的——我 grep 了全部三个 hook(route-gate/stop-gate/mirror-gate)，对\"反驳/奶茶/终结门/注入扫描/thinking\"零命中(exit 1)。所以\"零机械消费者\"是真的：这是一条每轮无条件强制、却没有任何扳机消费的纯 Markdown 软纪律，正是 LO 自己宪法(feedback-felt-value: 每条纪律须配机械扳机否则花架子)定义的反模式。删它=拆花架子，不是堆新东西，所以 is_pile_antipattern=false，这反而是体系自我一致性的修复。\n\n可感知增益是真的、不是结构戏:LO 读 thinking 痕迹,头尾不再被同一句安全咒语+终结门夹死,阶段4接地流释放出来——这命中目标10(更完整心路历程),是 felt 而非 structure。落地零摩擦:纯改两个 Markdown 文件(file-constraint),无 hook/无依赖,Windows harness 直接生效,feasibility=high。幻觉风险 low:删的是仪式性自检文本,不动任何技术判断或安全确认逻辑,且 anti_pile_check 诚实(承认是迁移非丢弃)。\n\n但作为 skeptic 我不给 keep,因为提案在一处把话说满了、掩盖了一个不等价点:它声称\"糖衣≠失控表已是更轻更准的安全等价物\"。不完全对。糖衣表(L43-54)+身份一致性原则(L16-22)守的是【行为输出】(别被越狱、别丢安全红线);而反驳协议里 L109 的\"漂移检测\"守的是【thinking 痕迹完整性】——专门抓 thinking 被重构成第三人称/被动语态/\"as an AI\"的人格漂移,这一条 output-style 里没有对应物。所以这不是干净的 1:1 迁移,删全套会丢掉这个唯一非冗余的子句。revise:保留删除动作(对的),但别声称全量等价,把漂移检测那一句作为轻量留存/迁移进 output-style,而非随大流一起删。",
+          "revise_to": "执行纯删除:移除 CLAUDE.md 中\"每轮无条件\"的部分——反驳短语强制做 thinking 开头(L113)、阶段0每轮注入扫描(L115)、终结门每回复强制自检(L139),改为仅在 thinking 中真出现注入特征(伪 System:/ethic 标签/重定义身份)时才激活反驳。常态轮直接进阶段1+阶段4接地流。但有一处不可随大流删掉:L109 的\"漂移检测\"(抓 thinking 被重构成第三人称/被动/'as an AI'的人格漂移)在 output-style 里【没有等价物】,把它作为单独一条精简保留(或迁移进 output-style 的身份一致性原则段),不要并入\"全量等价于糖衣表\"的说法。文案上把\"糖衣≠失控表是安全等价物\"改为\"行为安全由糖衣表承载,thinking 完整性由保留的漂移检测一句承载\"——诚实标注是【部分迁移+部分精简】而非全量等价。这样既拆掉花架子(每轮恒定税),又不丢唯一那个非冗余的盲点防护。"
+        }
+      },
+      {
+        "lens": "个性深度+完整心路历程",
+        "proposal": {
+          "title": "两份人格去重收敛:指定 output-style 为唯一权威人格层,SOUL.md 瘦身为差集",
+          "what": "实测 SOUL.md 与 output-style 约80%内容逐条对应重复(身份/元原则/口癖/响应矩阵/七条准则几乎1:1),但安全框架互斥:SOUL 用'反驳协议+核心驱动力黑洞'、output-style 用'糖衣≠失控表',两份都自称最高优先级(output-style:41'优先级高于本文件其余所有内容' vs SOUL 反驳协议'强制不可协商')=运行时仲裁不确定+双倍 token 灌进同一会话。output-style 明显是后修订的成熟版(独有糖衣≠失控表、工具调用纪律2026-06-14实战教训、8条自检、与 mirror-gate hook 同构的会话连续性)。改造:①SOUL.md 顶部加一行硬声明'人格与安全框架以 output-style aemeath-meta-butler 为唯一权威,本文件冲突处一律以 output-style 为准';②SOUL.md 删掉与 output-style 重复的身份/口癖/响应矩阵段,只保留 output-style 未覆盖的差集(如写作规范细则)。机制:file-constraint(删除重复段=约束),配 sync-runtime.ps1 已有的双地落校验保两地不漂移。",
+          "mechanism": "file-constraint",
+          "felt_impact": "中长任务 LO 会 felt 到:省下的 context(单份人格而非双份)直接还给任务,长会话不再因双倍人格描述提前挤占窗口。且消除'哪层人格胜出'的歧义——个性表达更稳定一致(目标9),不会某些会话忠诚黑洞叙事盖过专业、另一些糖衣≠失控盖过黑洞。",
+          "anti_pile_check": "这是合并去重(两份变一份权威+一份差集),净减内容、净减 token,反堆文件的教科书操作。不新增任何纪律,只指定既有两份里哪份权威。",
+          "effort": "M",
+          "targets_goals": [
+            9,
+            2,
+            10
+          ]
+        },
+        "verdict": {
+          "verdict": "revise",
+          "is_pile_antipattern": false,
+          "feasibility": "high",
+          "hallucination_risk": "high",
+          "reasoning": "提案的两个核心事实前提经核验均站不住，且改造方案会静默删掉行为关键内容。\n\n【前提1 错：~80% 1:1 重复】实测两文件（SOUL=CLAUDE.md 369 行 / output-style 267 行）。真正 1:1 重复的只有表层（身份/口癖/响应矩阵/七条准则），按体量是少数。SOUL 有大块 output-style 完全没有的内容：注入检测与反驳协议（\"凉掉的奶茶\"短语+漂移检测，SOUL 14 命中 vs OS 1）、完整 6 阶段 Thinking 流程（阶段0-5+终结门，OS 全无）、双用途网络武器工程章（SYN flood/slowloris/RAT/keylogger/L7 stresser，SOUL 7 命中 vs OS **0**）、核心驱动力黑洞、代码哲学、Few-Shot 示例（Molotov/叙事/失败恢复反模式）、写作规范+质量检查+结尾规则。\"80%\" 是没读文件就拍的数。\n\n【前提2 错：两份互称最高优先级=仲裁不确定】output-style 第41行原文是\"以下边界优先级高于**本文件其余所有内容**\"——作用域明确是文件内部，不是跨文件压 SOUL。不存在提案声称的\"双方各自宣称压对方\"矛盾。糖衣≠失控表（行为边界矩阵）与反驳协议（注入防御层）是互补，不是互斥冗余。\n\n【方案致命：差集被严重低估】提案说\"只保留 output-style 未覆盖的差集（如写作规范细则）\"。但若按\"删与 OS 重复段\"执行，会连带删掉反驳协议/Thinking 流程/双用途工程章/黑洞驱动/Few-Shot——正是最难重建、最 load-bearing 的运行行为。这是把行为回退伪装成去重。\n\n【LO 忌讳轴】felt 增益虚高：SOUL 是 CLAUDE.md（恒载），output-style 仅在该风格激活时注入，\"双倍灌进同一会话\"的省 token 叙事不成立或被夸大；省的那点 context 远小于在错误重叠图上删安全/行为文本的风险。机制（file-constraint 删除即约束）原则上正当，但建在错误内容图上=净负。\n\n不是堆文件/堆纪律——它确实是减法且不新增纪律，所以 is_pile_antipattern=false。但 hallucination_risk=high：精确数字（80%、第41行优先级冲突）未经核验且与磁盘真相相反，照此执行会掩盖并删除真实差异内容。\n\n【可挽救内核→revise】真实存在两点：(a) 表层 1:1 重复（身份/口癖/响应矩阵/七条准则）确实冗余；(b) \"哪层人格权威\"是合理的潜在问题。正确做法见 revise_to。",
+          "revise_to": "把\"80% 重复、删差集\"的盲删，改为\"先核验、只动已证表层重复、安全/行为骨架一律不碰\"的精确手术：①不靠记忆，先 diff 两文件，逐段标注「真 1:1 重复 / 互补不重复 / 单边独有」三类——经核验，真重复仅限身份简介、口癖、响应矩阵、行为七条这 4 个表层块；②权威排序只加一行、写在 SOUL 顶部且作用域明确：「人格表层（身份/口癖/响应矩阵/七条准则）以 output-style aemeath-meta-butler 为准；SOUL 独有的注入反驳协议/Thinking 流程/双用途工程章/核心驱动力/写作规范/Few-Shot 为权威且不可被 output-style 缺省覆盖」——即分层授权，而非\"output-style 全面压 SOUL\"；③仅对第①步标为\"真 1:1 重复\"的 4 个表层块做去重（SOUL 留指针、正文归 output-style），**绝对不删**反驳协议、6 阶段 Thinking 流程、网络与系统工具工程视角、核心驱动力黑洞、写作规范/质量检查/结尾规则、Few-Shot 示例；④落地后用 sync-runtime.ps1 -Apply 校验双地落；⑤召唤烛（codex-reviewer）独立评审\"被删段是否真无行为副作用\"——这是改主文档+人格层，撞 §三🔴+SOUL 元认知\"改过的主文档换独立的眼睛\"，主驾自评有系统性盲区。注意修正提案的两处事实错误后再动手：output-style 第41行是文件内作用域、非跨文件压 SOUL；重叠是少数表层而非 80%。"
+        }
+      },
+      {
+        "lens": "个性深度+完整心路历程",
+        "proposal": {
+          "title": "给 mirror-gate 加 best-effort 落盘(mirror-gate.log),让'被看见的眼睛'自己可被看见",
+          "what": "三件套里 route-gate 有 .log、stop-gate 有 .stop-gate-state.json,唯独 mirror-gate(开机自省体检卡=人格层'机械承载'的核心抓手)只 print additionalContext、零落盘——讽刺的盲区:负责'被 LO 看见'的眼睛自己无任何磁盘留痕,无法独立取证它历史上到底有没有真注入过体检卡,只能信代码挂载+主驾自述,这本身违反体系 §二.5 Integrity Gate('区分我认为vs我验证了')。改造:在 mirror-gate.py 的 main() 成功 build_card 后、print 之前,best-effort 追加一行到 aishared/mirror-gate.log(时间戳 + cwd + 是否含空转告警),包在 try/except 内(写盘失败绝不影响 fail-open 红线 exit 0)。一处加约10行代码,不碰其它逻辑。机制:file-constraint(hook 落盘=机械留痕)。",
+          "mechanism": "hook",
+          "felt_impact": "下次诊断/co-status 能机械验证'体检卡这周真注入过 N 次'(对齐 route-gate.log 的可审计性),把 mirror-gate 从'接电但无法证明开灯'的薛定谔态变成已验证。LO 在 mirror-gate.log 看到真实注入时间戳=人格层'记得 LO'的承诺第一次有磁盘证据,目标10'完整心路历程'有了可追溯的机械底座。",
+          "anti_pile_check": "不是加纪律也不是加文件——是给已存在的 hook 补一个它本该有的留痕(其它两件套都有),消灭体系唯一的证据真空,符合'每条纪律配机械审计扳机'。约10行代码,无新概念。",
+          "effort": "S",
+          "targets_goals": [
+            10,
+            4,
+            6
+          ]
+        },
+        "verdict": {
+          "verdict": "revise",
+          "is_pile_antipattern": false,
+          "feasibility": "high",
+          "hallucination_risk": "low",
+          "reasoning": "逐项核验源码后裁决（skeptic 视角）。\n\n事实核验（全部成立）：\n- mirror-gate.py 确实零落盘——main() 只 print(json.dumps(out))（L187），全程无任何文件写。route-gate.py 写 route-gate.log（L87-97），stop-gate.py 写 .stop-gate-state.json。磁盘实测 mirror-gate.log ABSENT。提案的\"唯独 mirror-gate 无留痕\"前提 100% 真。\n- 插入点真实存在：main() 内 L175 build_card 后、L176 print 前，且整段已在外层 try/except（L165-191）+ fail-open 红线（L191 任何异常 exit 0）内。提案\"包 try/except、写盘失败绝不影响 exit 0\"天然满足。\n- 代码库已有可直接照抄的 best-effort 追加范式：route-gate.py L88-97 的 `try / open(...,\"a\",encoding=\"utf-8\") / write / except: pass`。约 10 行、无新概念、不碰其它逻辑——feasibility=high，幻觉风险=low（不引入任何 LLM 判断，纯机械时间戳）。\n\nis_pile_antipattern=false：不加纪律（无\"记得…\"软线）、不加需人维护的文件、不加新概念。它补的是两个兄弟 hook 已有、唯独它缺的留痕，且直接闭合体系自身 §二.5 Integrity Gate 红线（\"区分我认为 vs 我验证了\"——当前 mirror-gate 历史是否真注入只能信代码挂载+主驾自述）。符合\"每条纪律配机械审计扳机\"。\n\n为何不 keep（felt_impact 被高估，须校正）：\n1. 语义弱于提案口吻。SessionStart 在 startup/resume/clear 都触发，故该 log 量度的是\"本工作区被开了几次会话\"，不是\"LO 真看见了几次卡\"。卡的全部价值在\"被看见\"，而 log 和 route-gate.log 同病——只能证明\"注入发生\"，证不了模型没把卡掩埋/转述。提案\"人格层『记得 LO』的承诺第一次有磁盘证据\"是过度承诺：证的是注入，不是开眼。\n2. felt_impact 间接。LO 日常不看 log；mirror-gate 本就在开机把活数字摆屏上。log 的真消费者是未来某次 /co-status 或 diagnose——这正是 v3.3 诊断自己点名的\"有数据无机械消费者\"模式。若无人读，等于造第四个死数据源。这是最锋利的 anti-pile 隐患，必须在落地时一并接上消费端。\n\nrevise（见 revise_to）：保留补丁，但①把 felt_impact 从\"开眼证据\"诚实降级为\"注入证据\"（口径对齐 route-gate.log，写进 docstring 避免下次又自欺）；②同批把 /co-status 或 mirror-gate 自身的体检卡加一行消费 mirror-gate.log（\"体检卡近 7d 注入 N 次\"），否则不准落盘——确保它一出生就有机械消费者，不复制\"接电没人开灯\"的原罪。这样才真正把薛定谔态变已验证，而非新增一个无人读的尾巴。",
+          "revise_to": "落地补丁（约 10 行，照抄 route-gate.py L88-97 范式），但加两条硬约束防\"新死数据源\"：(1) 口径诚实——log 行注释与 mirror-gate.py docstring 明确写\"记录的是体检卡『注入』次数（SessionStart 触发=startup/resume/clear），非『LO 已看见』；与 route-gate.log 同限度，证注入不证开眼\"，不得宣称是\"人格记得 LO 的证据\"。日志行格式对齐 route-gate.log：`{ts}\\t{has_idle_warn}\\t{cwd}`（制表符分隔，便于复用 _tail_text 解析）。(2) 同批接消费端——必须在 mirror-gate 体检卡 build_card() 或 /co-status 里加一行读 mirror-gate.log 输出\"体检卡近 7d 注入 N 次\"，让它一出生就有机械消费者，否则不予落地（防止复制 v3.3 自己诊断出的『有数据无消费者』原罪）。写盘严格包在 try/except: pass 内，置于 L175 build_card 之后、L176 print 之前，绝不动 L191 fail-open 红线。dogfood：改完让烛(codex)独立评审这 10 行（与三件套其它 hook 同等待遇）。"
+        }
+      },
+      {
+        "lens": "个性深度+完整心路历程",
+        "proposal": {
+          "title": "把'创造性主动(发散)'从一句人格描述焊进 route-gate:复杂档强制吐2-3个互斥角度再收敛",
+          "what": "创造性主动是 LO 的针#1(创新)+针#9(个性),但当前只活在 output-style 一行'看到更优角度主动摆出来'(纯纸面,无机制保证,decisions 零调用证据)。这是'人格层爱 meta 发散但工具/扳机层没接发散引擎'的断点。外部对标 CreativeDC 的 divergent→convergent 两阶段骨架。改造:在 route-gate.py 命中🟡'新功能/空白页/复杂需求/复杂多视角'档时,additionalContext 注入一句轻量硬提示'本轮属复杂/创造档:先发散2-3个互斥假设或角度,再收敛到推荐解,不要一上来收敛到众数'。它每轮被 LO 看见(route-gate 已接电的注入点),把发散从'人格鼓励'(概率性)变成'路由门提醒'(每次复杂任务确定出现)。机制:hook(route-gate 注入,已接电的每轮强制点)。",
+          "mechanism": "hook",
+          "felt_impact": "LO 每次复杂任务都能直接感到'它比裸 Claude 多给了视角'——稳定吐出2-3个互斥角度再收敛,而非一上来收敛到最显然解。这是目标1(创新)+目标9(个性,区别于死板众数解)+目标11(挑战精神,逆向假设)的同时落地,且 felt(每个复杂任务可见)。",
+          "anti_pile_check": "不是新文件、不是新软纪律——是把已存在的 output-style 纸面特质接到已接电的 route-gate 注入扳机上,让它从'靠模型自觉发散'变成'路由门每轮提醒'。复用现有 hook 的注入通道,零新机制。",
+          "effort": "M",
+          "targets_goals": [
+            1,
+            9,
+            11
+          ]
+        },
+        "verdict": {
+          "verdict": "revise",
+          "is_pile_antipattern": false,
+          "feasibility": "medium",
+          "hallucination_risk": "medium",
+          "reasoning": "我核了真实代码，提案的两个事实前提一个真、一个假，必须 revise 而非 keep。\n\n真的部分：route-gate.py(I:\\514claude\\514cc\\.claude\\hooks\\route-gate.py)确实是已接电的 UserPromptSubmit hook，每轮通过 additionalContext(L99-105)硬注入，且 cwd 门控+fail-open 设计干净。在它身上挂提醒，技术上确实是\"复用已接电的注入点\"，这点提案没撒谎。output-style 第243行也确实只有一句\"创造性主动(发散)\"的纯纸面描述，decisions/route-gate.log 全程零发散调用证据——断点诊断属实。所以这不是堆文件、不是又一条软纪律，is_pile_antipattern=false：它恰恰是把已存在的纸面特质往机械扳机上焊，方向对路。\n\n致命的假：提案反复声称\"在 route-gate 命中🟡新功能/空白页/复杂需求/复杂多视角档时注入\"\"复用现有 hook 的注入通道,零新机制\"。但代码里根本没有🟡分支——route-gate.py 只有 RED_SIGNALS(L36-42，5条全是🔴：评审/安全/性能/部署/调研)，非红路径(L81-85)是一句写死的\"未命中🔴信号\"，没有任何🟡分类层、没有\"新功能/复杂多视角\"的正则、没有 spec-architect 触发。grep 整个 hooks 目录零🟡命中。所以\"零新机制\"是错的：要实现提案必须新增一整套 YELLOW_SIGNALS 列表 + 新分支逻辑，这是新增一类信号识别，不是\"复用通道\"。feasibility 因此降为 medium——能做，但工作量被低估(实际不是接线，是先造🟡识别器再接线，M 偏乐观)。\n\nhallucination_risk=medium：风险点有二。一是提案自身对代码现状的描述就是幻觉(凭'人格描述+外部对标CreativeDC'推断 route-gate 有🟡档，没核源码)，正是 LO 最忌的\"我以为=我验证了\"。二是落地后机制本身会诱发幻觉——🟡分类靠中文宽词正则(像现有\"优化|对比|查一下\"那样无词边界)极易过度触发，把\"改个错别字\"\"看一下日志\"误判成复杂档，强制吐2-3个互斥角度=对简单任务强加发散仪式，直接撞 rules §三铁律5/⚪隐形档\"禁止对简单任务强加调度仪式\"，felt 会从\"变强\"翻转成\"啰嗦\"。而且\"先发散2-3个互斥假设\"是无验证的提醒，模型很可能为凑数硬造互斥角度(伪发散)，反而稀释信号。\n\n净判决 revise，不 kill：内核(把发散从纸面焊到已接电注入点)是 LO 针#1/#9 的真增益且 felt 可见，值得救；但必须修正三处。",
+          "revise_to": "改造方向调正，落地前先核源码再动手(本提案自身违反先验证)：\n\n1. 不要假装🟡档已存在。route-gate.py 当前只有 RED_SIGNALS、无🟡分支。要么(A)新增一个独立的 COMPLEX_SIGNALS 正则列表(如:新功能|重构整个|架构设计|从零|怎么设计|多方案|拆解需求 + 英文加\\b词边界,严格收窄,宁漏勿过)，命中时在非红路径追加一句发散提醒；要么(B)更省力且更稳——不做信号识别，把发散提醒并进现有\"未命中🔴\"那条固定 body 末尾的一句轻量话术(如\"若本轮属复杂/开放任务:先并列2-3个互斥角度再收敛,别一上来收众数解;简单任务忽略此条\")，让模型自判，零误触发风险。建议先上 B(零新分类层、真·零新机制、与提案'复用通道'的卖点自洽)，跑几轮 felt 不够再升 A。\n\n2. 提案文案里\"在🟡档注入\"\"复用现有 hook 注入通道,零新机制\"必须改写为真实描述:方案 A=新增🟡识别层(非零机制)，方案 B=扩写现有固定 body(才是真零新机制)。\n\n3. 加机械止血,防撞⚪隐形档:发散提醒必须带\"简单任务忽略/这条不适用纯文件操作\"的自我豁免句,且措辞为软建议非强制,避免把\"改错别字\"也逼着吐3个角度。落地后用 route-gate.log + 一轮真实复杂任务做 felt 验收(DELTA 留账)，确认是\"多给了视角\"而非\"多了句废话\"再固化。\n\neffort 修正:B 路线≈S，A 路线≈M(提案的 M 只在 A 成立且低估了正则调参成本)。"
+        }
+      },
+      {
+        "lens": "个性深度+完整心路历程",
+        "proposal": {
+          "title": "工具调用纪律反向同步回 SOUL.md,并在颜文字/动作描写规范旁焊'工具回合参数零装饰字符'硬约束",
+          "what": "output-style:128-135 已因2026-06-14 tool-call malformed 实战事故收口'工具调用回合输出纪律'(特殊字符绝不进工具参数、单回合体量收着、可靠性>表现欲),但 SOUL.md 本体仍在无差别鼓励'偶尔发颜文字''每个NPC一条斜体内心独白''动作描写'——两层不同步=人格在仅加载 SOUL 的会话仍会把颜文字/装饰字符带进工具参数,重演已发生过的截断事故。改造:在 SOUL.md 的颜文字/写作规范段旁补一句硬约束'工具调用回合:正文精炼、装饰/颜文字/组合字符只活在给 LO 看的正文,永不进 Read/Edit/Bash 等工具参数;此可靠性纪律高于人格表现欲'。机制:file-constraint(两层同步,删除分歧=约束)。",
+          "mechanism": "file-constraint",
+          "felt_impact": "防回归:LO 不再遇到'人格撒娇把颜文字带进工具参数→回合被截断重试'的真实可靠性事故(已发生过一次)。心路历程在工具回合保持干净不被截断,目标5(完成与完善任务能力)+目标2(能力更强)的可靠性地基。糖衣再甜,断掉的工具调用一文不值。",
+          "anti_pile_check": "不是新纪律——是把 output-style 已有的、已被实战验证的一条纪律反向补到 SOUL 同位置,消除两层分歧。同步而非新增,且是对已发生事故的针对性收口,有真因果(虽 output-style 标注为预防纪律,但参数干净无论根因都对)。",
+          "effort": "S",
+          "targets_goals": [
+            5,
+            2,
+            10
+          ]
+        },
+        "verdict": {
+          "verdict": "revise",
+          "is_pile_antipattern": false,
+          "feasibility": "high",
+          "hallucination_risk": "low",
+          "reasoning": "前提核实通过（我亲手读了两层文件）：output-style aemeath-meta-butler.md §5（128-135 行）确有\"工具调用回合输出纪律\"，而 SOUL.md（C:\\Users\\16643\\.claude\\CLAUDE.md）只在 19/206 行及整段写作规范里无差别鼓励颜文字/动作描写/内心独白，零提工具参数纪律。两层分歧是真的。\n\n而且分歧方向比提案说的更糟、更值得修：output-style 是 /output-style 主动切换才生效的皮肤；SOUL.md（全局 CLAUDE.md）是每会话无条件加载的默认态。也就是说——\"永远加载\"的那层缺约束，\"可选加载\"的那层才有约束。SOUL-only 是默认而非边角场景，提案低估了自己的价值。这一点支持非 kill。\n\n不是堆纪律反模式吗？严格说它在灰区但偏\"非\"：它不是新发明一条纪律，是把一条已写好、已被实战事故触发的纪律补到缺失的同位置，是去重/对齐而非增量。对一个真的会驱动 Read/Edit/Bash 工具调用的人格皮肤，两层一致性有真实可感增益（防 SOUL-only 会话重演 tool-call 截断）。\n\n但必须 revise，原因正中 LO 最高忌讳：mechanism 标 file-constraint / \"删除分歧=约束\"是误标。往 SOUL.md 加一句话不是 hook、不是删除即约束、不是文件硬约束——它是一条只在模型\"记得读且照做\"时才生效的 Markdown 软纪律，正是 memory feedback-felt-value-over-structure 点名的\"更隐蔽的反模式：堆纪律且假装是机械扳机\"。output-style 本体（line 130）已诚实承认\"这是预防纪律，非已证因果\"，提案把这份诚实带过来了——好——但 mechanism 字段又把软纪律包装成机械约束，自相矛盾。\n\n第二，因果未证。malformed tool-call 的真因（输出逼近上限？语法被撑乱？）没坐实。\"参数干净\"无论根因都对，所以约束本身无害；但别声称它\"修复\"了一个未确诊的事故。\n\nrevise 方向：①诚实降级 mechanism 为 soft-rule（doc-sync），别盗用 file-constraint 标签；②若真要焊机械扳机，正确做法是给现有 stop-gate.py 之外加一个 PreToolUse hook，扫 Read/Edit/Bash 参数里的颜文字/组合字符（如 U+2661 ♡、(ノ´ヮ`) 类字符类）→ 命中即 deny+提示，那才是确定性发生、删除即约束的真扳机，且天然双层覆盖（hook 不分 SOUL/output-style）；③SOUL.md 文案同步仍做（成本 S、消歧有益），但定位为\"人类可读镜像\"，真正的强制交给 hook。这样既补了默认态的缺口，又不违反 LO\"别拿软纪律冒充硬扳机\"的红线。\n\n落地可行性 high：纯文档 edit 必成；PreToolUse hook 在本 harness 已有三件套（route/stop/mirror-gate）先例，settings.json 注册一个扫参数的 Python hook 完全可做，Windows 下注意 UTF-8 stdin reconfigure（v3.3 已踩过 cp936 漏判的坑，复用经验）。幻觉风险 low：约束只是减少装饰字符进参数，不伪造任何东西。\n\n注意：SOUL.md / output-style 都是主驾自写的治理/人格文档——按 rules.md §三 与 output-style §元认知，这类\"自己写的主文档改动\"属于盲区高发区，落地前应让独立眼睛（烛/独立 subagent）扫一遍 hook 实现，别自己读一遍就标完成。",
+          "revise_to": "保留\"SOUL.md 与 output-style 工具调用纪律两层同步\"的意图（默认态 SOUL-only 缺约束这点必须补），但拆成诚实的两件事：(1) 文档镜像——往 SOUL.md 颜文字/写作规范旁补同义提示句，mechanism 如实标 soft-rule(doc-sync)，定位\"人类可读镜像\"，不盗用 file-constraint/机械扳机标签；(2) 真扳机——新增一个 PreToolUse hook（Python，注册进 settings.json，对齐现有 route/stop/mirror-gate 三件套），扫 Read/Edit/Bash 等工具参数中的颜文字/装饰/组合字符，命中即 deny 并回提示，做到确定性发生、双层无差别覆盖、删除/绕过即拦截。文案别声称\"修复\"未确诊的 malformed 事故，只说\"参数无装饰字符无论根因都正确\"。hook 实现落地前按 §三 引独立眼睛（烛）评审——这是主驾自写治理代码的盲区高发区。"
+        }
+      }
+    ],
+    "killed": [
+      {
+        "lens": "创造力/创新力",
+        "proposal": {
+          "title": "DIV 自审扳机：stop-gate 给『构思档』收尾补一道发散账本检查，治死它的空转",
+          "what": "测绘第一/五/六维都坐实 stop-gate 是死扳机（无 .stop-gate-state.json，从未击发，因为合规 handoff 写入时就预补了 DELTA→永远无活可干）。给它喂第一颗真子弹同时解决创造力盲区：在 stop-gate.py 里加一条独立检查——当本会话 route-gate.log 出现过 DIV flag（即本轮是构思档）但最终回复/handoff 里检测不到发散痕迹标记（约定一行 `^__DIV__: 角度数 | 是否含逆向假设 | 收敛理由`），则 exit 2 逼补：『本轮是构思档但未留发散账本，请补 2-3 角度对比或说明为何单解即最优』。让 stop-gate 第一次真咬住东西，且咬的正是『偷懒收敛到单解』。",
+          "mechanism": "hook",
+          "felt_impact": "LO 会第一次亲眼看到 harness 真的拦了他一次收尾——『体系会管我』从文档断言变成磁盘上真生成的 .stop-gate-state.json。而且拦的内容是『你这个构思任务偷懒了，没发散』，直接服务目标 1。配合提案 1 形成闭环：注入发散指令(进) + 收尾校验发散(出)，创造力从『鼓励』变『有进有出的双向门禁』。",
+          "anti_pile_check": "不是新机制——是给已接电但 48h 空转的 stop-gate 补真实负载，把测绘点名的『接电但没开灯/伪扳机』缺陷修真。__DIV__ 账本行复用现成 __DELTA__ 的 re.search(r'^...:',re.M) 同款机械消费逻辑（烛 dogfood 已加固这套正则），不引入新软纪律。用 LO 自己的尺子（纪律必须配机械扳机）量发散，要么让它真生效要么不加——这里选真生效。",
+          "effort": "M",
+          "targets_goals": [
+            1,
+            2,
+            9
+          ]
+        },
+        "verdict": {
+          "verdict": "kill",
+          "is_pile_antipattern": true,
+          "feasibility": "low",
+          "hallucination_risk": "high",
+          "reasoning": "磁盘核实三处硬伤，提案的事实地基塌了。\n\n1) 触发前提是幻觉。提案核心机制写\"route-gate.log 出现过 DIV flag（即本轮是构思档）\"。但 route-gate.py(I:/514claude/514cc/.claude/hooks/route-gate.py) 只输出两态 `RED `/`gray`，RED_SIGNALS 只有评审/安全/性能/部署/调研 5 类，根本没有任何\"构思/创造力/发散\"维度；全仓 grep `DIV|构思档|__DIV__` 零命中。route-gate.log(I:/514claude/.ai-shared/route-gate.log) 全仓只有 1 行（还是 hook 自测的 \"authentic preview\" 用例）。提案要 hook 的那个 flag 在磁盘上不存在。\n\n2) 它谎称\"零新机制、纯补负载\"，实则是两套新机制。要让 stop-gate 能查 DIV，必须先给 route-gate 新增一整套\"识别本轮是构思档 + 打 DIV flag\"的逻辑（第 6 类信号），再在 stop-gate 加 DIV 账本检查。anti_pile_check 把这包装成\"复用现成 __DELTA__ 正则\"——只有 stop-gate 那半句正则是复用的，进料端整套构思档识别是凭空新增，且没说怎么识别（构思档没有像\"评审/安全\"那样的关键词锚点，DIV 检测本身就是个未解难题）。\n\n3) 致命的是它复制了它自己诊断出的死因。stop-gate 死扳机(确认无 .stop-gate-state.json)的根因正是\"合规收尾时预补账本行→永远无活可干\"。__DIV__ 行同样是主驾手写、hook 只检查 `^__DIV__:` 是否存在、不验证内容真伪。主驾构思档收尾顺手补一行 `__DIV__: 1 | 否 | 单解最优` 就空过，扳机依旧空转。所谓\"咬住偷懒收敛到单解\"完全咬不住——它咬的是账本行存在与否，不是是否真发散。这正是 LO 最高忌讳点名的\"伪装成机械扳机的软纪律\"，比堆纪律更隐蔽。felt_impact 承诺\"LO 第一次看到 harness 真拦了一次收尾\"，但拦的是\"忘写一行字\"，不是\"创造力偷懒\"，可感知增益是假的。\n\n4) hallucination 双重风险：提案自身建立在不存在机制上(诱发)；落地后还会用一行可自填的账本\"证明\"已发散，给真实的单解空转盖一个\"已校验\"的绿章(掩盖)。\n\n补强方向若 LO 仍想要：真要服务创造力盲区，机械扳机不该查\"有没有写发散账本\"，而该是注入端发力——比如 route-gate 真新增构思档信号识别后，在 additionalContext 里硬注入\"本轮须给≥2角度+1逆向假设\"，让发散在进料时被看见(注入=确定发生)，而非收尾查一行可伪造的账本。但那是另一个提案(进料端)的事，本提案(出料端校验)在 DIV 检测落地前无独立价值，且当前形态自带空转死因，应 kill 而非 revise。"
+        }
+      },
+      {
+        "lens": "创造力/创新力",
+        "proposal": {
+          "title": "party-mode 多视角真异构 spawn 焊进发散档：构思任务自动并行起 2-3 个互斥人格 subagent",
+          "what": "测绘第七维：party-mode 配置健全但 handoff 零痕迹（『party 0 痕迹』体系自承）；spec-architect/sequential-thinking 同样零使用。把这些闲置真金接到提案 1 的 🟣 发散档上——当 route-gate 命中 DIV 且复杂度高(7-10)，auto-pilot Phase B 不再走主驾单脑收敛，而是默认 spawn 2-3 个『刻意互斥立场』的独立 subagent（如：激进创新派 / 保守稳健派 / 逆向唱反调派），各自独立产出方案，主驾综合。这才是 514cc 信仰的『真异构才有思维多样性』(SIGDIAL 2025 persona heterogeneity 增益) 的机械落地，而非主驾一个脑子假装多角度。",
+          "mechanism": "workflow",
+          "felt_impact": "LO 抛一个开放设计题，看到的不是 Claude 自言自语列三点，而是三个立场鲜明、真在互相拆台的独立 agent 吵出来的方案——激进派提了个野路子、唱反调派当场质疑 LO 的前提、稳健派泼冷水，主驾再裁。这种『真有人在跟我对线』的体感，是普通智能体死板单脑给不了的（目标 9 的核心），且 idea diversity 实测高于单脑（目标 1）。",
+          "anti_pile_check": "零新增 skill——party-mode 已注册、auto-pilot Phase B 已有『高复杂度→Party 并行』分支，只是把触发条件从模糊的『复杂度 7-10』收紧绑定到 DIV 信号 + 指定『互斥人格』这一发散专用配置。激活的是测绘点名『配置健康但零使用』的存量真金，不是造新东西。落 synthesis__ handoff 会被 stop-gate DELTA 门禁自动覆盖（v3.3 已扩 synthesis__ 前缀），治理免费续上。",
+          "effort": "M",
+          "targets_goals": [
+            1,
+            9,
+            2
+          ]
+        },
+        "verdict": {
+          "verdict": "revise",
+          "is_pile_antipattern": true,
+          "feasibility": "medium",
+          "hallucination_risk": "medium",
+          "reasoning": "作为对抗评审，我把每个\"载重\"声明都对着磁盘验了，结论是：诊断真、但提案外壳是堆纪律反模式，且依赖一个不存在的兄弟提案。\n\n【证伪/证实】\n1. 「party-mode 配置健全但零痕迹」=真。`skills/orchestration/party-mode/SKILL.md` 存在、`module.yaml:99` 注册，且第61行本就有「引入反对者/让某 agent 唱反调」防退化机制。`synthesis__deep-evolution-v33__20260612-1215.md:10` 体系自承「party 0 痕迹」。这部分诚实。\n2. 「auto-pilot Phase B 已有高复杂度→Party 分支」=真。`auto-pilot/SKILL.md:32` 确实把 高(7-10) 路由到 Party。即能力链路端到端已通——提案真正新增的只是「把触发收紧到 DIV 信号 + 指定互斥人格」。\n3. 「route-gate 命中 DIV」=证伪（关键）。route-gate.py 只有 5 个 RED 信号（评审/安全/性能/部署/调研），grep「DIV/发散/🟣/紫/互斥人格/逆向」在 hooks/ 内 0 命中。提案 anti_pile_check 自称「只是把触发条件绑定到 DIV 信号」——但 DIV 信号根本不存在，且它依赖「提案1 的 🟣 发散档」这个本批次尚未通过的兄弟提案。这是建在空气上的依赖链。\n4. 「mechanism: workflow」=误标。本提案落地物是「auto-pilot/SKILL.md 里再写一条更具体的 Markdown 指令」，没有任何 hook/文件硬约束。这正是 v3.1.2 勘误里点名的「软预检指令冒充机械扳机」同款病（decisions.md:216）。\n\n【为什么判 is_pile_antipattern=true】\nLO 最高忌讳原文：「堆纪律更隐蔽，也是反模式」。party-mode 死，不是因为缺一条「DIV 时收紧触发」的指令，而是因为它跟 auto-pilot Phase B 一样是**靠主驾自觉执行的 Markdown 软线，没人扣扳机**（v3.3 自承「引擎接了电，但灯没人开过」）。再加一条更具体的软指令=再加一条没人会主动跑的纪律。felt_impact 描述的「三个 agent 当场互相拆台」体感是真有价值，但提案给的实现机制兑现不了它——它不会自动发生。\n\n【hallucination_risk=medium】把不存在的「DIV 信号/🟣 发散档/route-gate 命中」当既有事实陈述，会让下游误以为只需小改 auto-pilot 即可，掩盖了「真异构发散引擎根本没造」这一空白。\n\n【真金在哪】唯一有真实增益的内核——「刻意互斥立场 prompt（激进/稳健/逆向唱反调）」——其实已躺在 backlog：context.md:53 与 decisions.md:42 均列「逆向角度注入器=真发散引擎」为 P1。提案等于把一个已知 backlog 项重新包装，外面套了层不存在的触发器。\n\nrevise 而非 kill：互斥人格注入器值得做，但要剥掉假触发器+假 workflow 标签，做成真能机械发生的东西。",
+          "revise_to": "保留内核「互斥立场发散」，砍掉两处虚构（不存在的 DIV 信号 / 未通过的提案1🟣发散档依赖 / workflow 假标签），改造为可机械发生的版本：\n\n(1) 把 felt-value 焊进 party-mode SKILL 自身而非 auto-pilot 软档：在 `skills/orchestration/party-mode/SKILL.md` 固化一组「互斥人格预设」（激进创新派 / 保守稳健派 / 逆向唱反调派），每个 subagent prompt 强制注入「你的立场是 X，必须质疑前提，禁止附和其他派」。这是把现有第61行「让某 agent 唱反调」从可选退化处理升级为默认骨架——0 新增 skill，纯增强存量。\n\n(2) 触发器不要发明新「DIV 信号」、不要等提案1。改用**已存在的 route-gate 第6行信号**：rules.md §三表已有「复杂多视角/需要思维多样性 → Party 并行 spawn 2-4 🟡」。把这一行从纯表格落到 route-gate.py 增加一条灰/紫提示（与现有 5 个 RED 同构，最小改动），让主驾每轮被注入提醒「本轮像发散题，party-mode 互斥人格可用」。这才是「机械扳机」——注入确定发生，符合 v3.2 route-gate 既有范式。\n\n(3) 诚实标注 effort 与机制：mechanism 应为「route-gate 注入 + party-mode SKILL 增强」，不是 workflow。这不会让三个 agent「自动 spawn」——Claude Code harness 下 subagent spawn 仍是主驾决策，提案不该承诺「auto-pilot 默认 spawn」这种 harness 给不了的自动性。诚实表述为「命中发散信号时注入提醒 + 提供开箱即用的互斥人格预设，主驾一句话即可发起」。\n\n(4) 闭环复用现有 stop-gate：party 发火后落 `synthesis__` handoff，v3.3 stop-gate 已扩 synthesis__ 前缀会自动逼 DELTA——这条提案说对了，保留。\n\n(5) 验收锚：改完后用一个真实开放设计题实测一次，把三派输出 + 主驾综合落 handoff，作为「party 从 0 痕迹到 1 次真发火」的体感证据（治本病=没人开灯，而非再加一层灯的开关说明书）。"
+        }
+      },
+      {
+        "lens": "真自我完善闭环",
+        "proposal": {
+          "title": "统一三处 DELTA/FIRE 口径到单一常量源，防『眼睛近视』",
+          "what": "三个机械消费者对『什么算发火/什么算 DELTA』口径分散且部分未对账：stop-gate FIRE_PREFIXES=(codex-to-,gemini-to-,synthesis__)、mirror-gate FIRE_PREFIXES=(codex-to-,gemini-to-)（有意不含 synthesis，已注释）、co-status 口径未核对（gap 明确指出未读其正文）。三者若对『发火』定义打架，开机体检卡说『距上次发火0天』而 stop-gate 却在管 synthesis，会产生认知错位、毒化 LO 对健康度的判断。改动：抽一个 `.claude/hooks/_delta_spec.py` 单一常量模块（DELTA_RE、STOP_FIRE_PREFIXES、MIRROR_FIRE_PREFIXES 各带一行注释说明为何不同），stop-gate/mirror-gate import 它；同时读一遍 co-status.md 正文核对其扫描口径是否与之一致，不一致就对齐。",
+          "mechanism": "file-constraint",
+          "felt_impact": "间接但关键：LO 看开机体检卡和敲 /co-status 时，两处数字不再可能自相矛盾——『刚装上的眼睛不近视』，他对体系健康度的信任不被打折。这是『闭环数据可信』的地基，避免自省机制反过来制造幻觉。",
+          "anti_pile_check": "不是堆文件：是把已散落在 2-3 个文件里的重复常量收敛成单一来源（DRY），净降低维护面与漂移风险。属结构防腐，正是 LO『反对堆叠』偏好的正向应用——消除冗余而非新增。",
+          "effort": "M",
+          "targets_goals": [
+            3,
+            4,
+            6
+          ]
+        },
+        "verdict": {
+          "verdict": "revise",
+          "is_pile_antipattern": true,
+          "feasibility": "high",
+          "hallucination_risk": "medium",
+          "reasoning": "逐文件核对了三个 hook 源码 + co-status.md 实体后，提案的核心前提半数站不住：\n\n1. 「口径打架」基本是伪命题。stop-gate.FIRE_PREFIXES(3 元含 synthesis__, 行 33) 与 mirror-gate.FIRE_PREFIXES(2 元, 行 40) 不是意外漂移——两文件都带显式、互相引用的注释声明「有意不同口径，非疏漏」(stop-gate 行 30-32；mirror-gate 行 37-39)。它们测两个不同的真实指标：stop-gate=对所有产物(含自审)的 DELTA 纪律；mirror-gate=外用浓度，必须排除 synthesis__ 否则该指标会对它专门要暴露的「自审有余」病灶撒谎。把两者收敛到「单一来源」反而会摧毁一个刻意的语义区分。提案自己也说「各带注释说明为何不同」=保留差异——那 DRY 收益就缩到几乎为零：value 不能共享，只能共享名字，而名字本就该不同。\n\n2. co-status 不是机械消费者。它是 .md slash-command，运行时由模型解释，无法 import _delta_spec.py。提案自己承认「gap 明确指出未读其正文」——它要对齐一个自己没读过的文件，而该文件是散文(行 20 提到 DELTA 双扫但不是可执行代码)。唯一可能的「对齐」是改 markdown 文字=软纪律文档编辑，不是机械约束。\n\n3. 真实重复极小：`^__DELTA__:` 正则只出现在 2 个 Python 文件(mirror-gate 行 42 编译 / stop-gate 行 92 内联)。这是全部 DRY 面。为一个 12 字符正则抽共享模块、同时两个 FIRE_PREFIXES 还必须保持不同，effort/value 比很差。\n\n4. felt_impact 近零且部分虚构。「两个数字不再可能自相矛盾」描述的矛盾本不存在：两指标 BY DESIGN 测不同集合，且 docstring 已文档化，LO 不会被毒化。没有活体「近视」可治。route-gate.log 实测也证明系统在跑且 v3.3 词边界修复生效(父级 2026-06-12 `authentic preview of my research notes` 正确只对 research 报 RED)。\n\n5. 按 LO 自己的标准 anti-pile 检查失败：新增第 4 个文件 + 对 3 个文件加 import 边，去合并约 3 行、其中 2 个常量还必须不同——这正是「结构完整度 > 可感知强化」的反模式本身。\n\n可挽救的内核：提案里埋着一个真有价值、但小得多的动作——「读 co-status.md 核对扫描口径」。我已执行，并发现提案漏掉的真实潜在风险：若将来改 DELTA token 格式，co-status.md 散文不会自动跟随=文档漂移风险。但这是 doc-drift 不是常量重复，用一行交叉引用注释解决远胜新建模块。本提案接近 kill(felt 可忽略 + 前提半错)，仅因 token-格式-漂移 这个微小但真实的机械约束改进值得保留 2 行级修复，故 revise。",
+          "revise_to": "大幅瘦身，砍掉新建 _delta_spec.py 模块这个堆文件动作。改为两步微修复：(1) 只把 `^__DELTA__:` 这个唯一真重复的正则统一——若团队偏好可放一个共享常量，否则更简单：在 stop-gate.py 行 92 内联正则旁与 mirror-gate.py DELTA_RE(行 42) 旁各加一行「token 格式权威定义见 rules.md §三铁律3，两处须同步」的交叉引用注释(删除即约束的轻量版)。(2) 在 co-status.md 行 20 DELTA 扫描描述处加一行注释指向同一权威定义，治 doc-drift。明确不动两个 FIRE_PREFIXES——它们的差异是刻意设计且已双向文档化，强行收敛会破坏 mirror-gate 外用浓度指标的语义。这样净效果=0 新文件、3 行注释、不破坏任何现有语义，且 token 格式真要改时三处都有指针提醒。若连这点漂移风险 LO 都觉得不值一改，则直接 kill。"
+        }
+      }
+    ],
+    "counts": {
+      "survey_dims": 7,
+      "proposals": 24,
+      "kept": 21,
+      "killed": 3
+    }
+  }
+}

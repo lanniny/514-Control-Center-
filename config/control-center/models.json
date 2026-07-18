@@ -1,0 +1,123 @@
+{
+  "$schema": "../../schemas/control-center/contracts.schema.json#/$defs/modelRegistry",
+  "version": 1,
+  "profiles": [
+    {
+      "id": "claude-fable",
+      "label": "Claude Fable",
+      "role": "primary-coordinator",
+      "provider": "anthropic",
+      "adapter": "claude-stream-json",
+      "command": "claude",
+      "model": "fable",
+      "systemPromptFile": "config/control-center/claude-coordinator.md",
+      "capabilities": ["planning", "orchestration", "requirements", "synthesis", "delegation"],
+      "defaultPermissionMode": "plan",
+      "quality": 0.96,
+      "speed": 0.68,
+      "costTier": 4,
+      "enabled": true,
+      "evidence": [
+        {"source": "local-cli", "detail": "Claude Code 2.1.210 --help exposes fable / claude-fable-5, stream-json, session-id and resume", "verifiedAt": "2026-07-15"},
+        {"source": "governance", "detail": "web-search capability intentionally NOT declared: claude-cli adapter launches with --tools \"\" --strict-mcp-config and no MCP config, so it cannot search in this runtime (main Claude Code session web MCP is a different runtime). current-research therefore fails closed when grok-search is down.", "verifiedAt": "2026-07-17"}
+      ]
+    },
+    {
+      "id": "codex-technical",
+      "label": "Codex 技术执行",
+      "role": "technical-executor",
+      "provider": "openai",
+      "adapter": "codex-app-server",
+      "command": "codex",
+      "model": null,
+      "capabilities": ["coding", "debugging", "review", "architecture", "testing", "execution"],
+      "defaultPermissionMode": "read-only",
+      "quality": 0.97,
+      "speed": 0.74,
+      "costTier": 4,
+      "enabled": true,
+      "evidence": [
+        {"source": "local-cli", "detail": "Standalone npm Codex CLI 0.144.1 is selected from the first PATH owner; Codex Desktop 0.144.2 is kept outside the child-process ownership domain", "verifiedAt": "2026-07-15"},
+        {"source": "generated-schema", "detail": ".workflow/ultracode/agent-control-plane-v1/references/codex-app-server-0.144.1 and codex-app-server-0.144.2", "verifiedAt": "2026-07-15"}
+      ]
+    },
+    {
+      "id": "gemini-research",
+      "label": "Gemini 情报与长上下文",
+      "role": "research-specialist",
+      "provider": "google",
+      "adapter": "gemini-stream-json-resume",
+      "command": "gemini",
+      "model": null,
+      "capabilities": ["long-context", "multimodal", "document-analysis", "research", "web-search", "synthesis"],
+      "defaultPermissionMode": "plan",
+      "quality": 0.88,
+      "speed": 0.72,
+      "costTier": 3,
+      "enabled": false,
+      "evidence": [
+        {"source": "local-cli", "detail": "Gemini CLI 0.50.0 exposes ACP, stream-json, session-id and resume", "verifiedAt": "2026-07-15"},
+        {"source": "governance", "detail": "Disabled per D-2026-07-16-005: research role fully migrated to grok-4.5 (514claude.xyz); Gemini CLI remains installed but idle, re-enable requires a new decision record", "verifiedAt": "2026-07-17"}
+      ]
+    },
+    {
+      "id": "grok-search",
+      "label": "Grok 时效搜索",
+      "role": "current-intelligence",
+      "provider": "xai-compatible",
+      "adapter": "codex-app-server-mcp",
+      "command": null,
+      "model": null,
+      "capabilities": ["current-research", "web-search", "fast-synthesis"],
+      "defaultPermissionMode": "read-only",
+      "quality": 0.84,
+      "speed": 0.93,
+      "costTier": 3,
+      "enabled": true,
+      "healthMode": "external",
+      "evidence": [
+        {"source": "repo-runtime", "detail": "grok-search-rs MCP is executed through Codex app-server mcpServerStatus/list + mcpServer/tool/call; no standalone Grok coding CLI is installed", "verifiedAt": "2026-07-15"},
+        {"source": "generated-schema", "detail": "Codex app-server 0.144.1 and 0.144.2 expose typed MCP inventory and direct tool-call requests", "verifiedAt": "2026-07-15"}
+      ]
+    },
+    {
+      "id": "grok-build",
+      "label": "Grok Build",
+      "role": "fast-executor",
+      "provider": "xai",
+      "adapter": "grok-build-headless",
+      "command": "grok",
+      "model": "grok45-514",
+      "capabilities": ["coding", "execution", "fast-synthesis"],
+      "defaultPermissionMode": "read-only",
+      "quality": 0.82,
+      "speed": 0.94,
+      "costTier": 3,
+      "enabled": true,
+      "evidence": [
+        {"source": "local-cli", "detail": "Grok Build 0.2.102 installed at ~/.grok/bin/grok.exe (official x.ai installer, 2026-07-17); headless -p smoke passed via custom model grok45-514 (514claude.xyz gateway + GROK_API_KEY env, no SuperGrok login required)", "verifiedAt": "2026-07-17"},
+        {"source": "official-docs", "detail": "Custom models via ~/.grok/config.toml [model.*] base_url/env_key; ACP via `grok agent stdio`; headless --output-format streaming-json", "url": "https://docs.x.ai/build/overview", "verifiedAt": "2026-07-17"},
+        {"source": "official-docs", "detail": "Grok 4.5 model capability is distinct from optional Web/X Search tool capability", "url": "https://docs.x.ai/developers/models", "verifiedAt": "2026-07-15"}
+      ]
+    },
+    {
+      "id": "pi-resident",
+      "label": "Pi 常驻代理",
+      "role": "resident-agent",
+      "provider": "multi-provider",
+      "adapter": "pi-rpc",
+      "command": "pi",
+      "model": null,
+      "capabilities": ["resident-session", "custom-tools", "extensions", "lightweight-execution", "provider-routing"],
+      "defaultPermissionMode": "read-only",
+      "quality": 0.8,
+      "speed": 0.86,
+      "costTier": 2,
+      "enabled": true,
+      "evidence": [
+        {"source": "local-cli", "detail": "Pi exposes persistent LF-delimited JSONL RPC, steering, follow-up and session resume", "verifiedAt": "2026-07-15"},
+        {"source": "official-repo", "url": "https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/rpc.md", "verifiedAt": "2026-07-15"}
+      ]
+    }
+  ]
+}

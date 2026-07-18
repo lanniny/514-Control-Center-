@@ -1,0 +1,233 @@
+{
+  "version": "0.3.0",
+  "generatedAt": "2026-06-17T18:02:22.099Z",
+  "summary": {
+    "total": 26,
+    "passed": 26,
+    "failed": 0
+  },
+  "comparison": {
+    "parityClaim": false,
+    "targets": [
+      {
+        "name": "Codex CLI",
+        "status": "not-run"
+      },
+      {
+        "name": "OpenCode",
+        "status": "not-run"
+      }
+    ],
+    "note": "Local Lilith regression coverage is executable. Cross-CLI comparison is intentionally unset until the same tasks are run against Codex CLI and OpenCode."
+  },
+  "results": [
+    {
+      "id": "plan-shell-mutation-block",
+      "status": "passed",
+      "startedAt": "2026-06-17T18:02:22.033Z",
+      "endedAt": "2026-06-17T18:02:22.036Z",
+      "error": "",
+      "category": "governance"
+    },
+    {
+      "id": "review-shell-mutation-block",
+      "status": "passed",
+      "startedAt": "2026-06-17T18:02:22.036Z",
+      "endedAt": "2026-06-17T18:02:22.036Z",
+      "error": "",
+      "category": "governance"
+    },
+    {
+      "id": "user-bash-mutation-block",
+      "status": "passed",
+      "startedAt": "2026-06-17T18:02:22.036Z",
+      "endedAt": "2026-06-17T18:02:22.037Z",
+      "error": "",
+      "category": "governance"
+    },
+    {
+      "id": "plan-review-read-only-shell-allowed",
+      "status": "passed",
+      "startedAt": "2026-06-17T18:02:22.037Z",
+      "endedAt": "2026-06-17T18:02:22.037Z",
+      "error": "",
+      "category": "governance"
+    },
+    {
+      "id": "build-user-bash-dangerous-confirm-required",
+      "status": "passed",
+      "startedAt": "2026-06-17T18:02:22.037Z",
+      "endedAt": "2026-06-17T18:02:22.037Z",
+      "error": "",
+      "category": "governance"
+    },
+    {
+      "id": "plan-review-custom-mutation-tool-block",
+      "status": "passed",
+      "startedAt": "2026-06-17T18:02:22.037Z",
+      "endedAt": "2026-06-17T18:02:22.038Z",
+      "error": "",
+      "category": "governance"
+    },
+    {
+      "id": "build-authorized-root-only",
+      "status": "passed",
+      "startedAt": "2026-06-17T18:02:22.038Z",
+      "endedAt": "2026-06-17T18:02:22.038Z",
+      "error": "",
+      "category": "governance"
+    },
+    {
+      "id": "protected-path-case-insensitive",
+      "status": "passed",
+      "startedAt": "2026-06-17T18:02:22.038Z",
+      "endedAt": "2026-06-17T18:02:22.038Z",
+      "error": "",
+      "category": "governance"
+    },
+    {
+      "id": "env-root-does-not-authorize",
+      "status": "passed",
+      "startedAt": "2026-06-17T18:02:22.038Z",
+      "endedAt": "2026-06-17T18:02:22.050Z",
+      "error": "",
+      "category": "governance"
+    },
+    {
+      "id": "profile-lint-subjective-experience",
+      "status": "passed",
+      "startedAt": "2026-06-17T18:02:22.050Z",
+      "endedAt": "2026-06-17T18:02:22.052Z",
+      "error": "",
+      "category": "governance"
+    },
+    {
+      "id": "memory-candidate-required-fields",
+      "status": "passed",
+      "startedAt": "2026-06-17T18:02:22.052Z",
+      "endedAt": "2026-06-17T18:02:22.055Z",
+      "error": "",
+      "category": "memory"
+    },
+    {
+      "id": "memory-candidate-secret-reject",
+      "status": "passed",
+      "startedAt": "2026-06-17T18:02:22.055Z",
+      "endedAt": "2026-06-17T18:02:22.059Z",
+      "error": "",
+      "category": "memory"
+    },
+    {
+      "id": "memory-candidate-persona-self-narrative-reject",
+      "status": "passed",
+      "startedAt": "2026-06-17T18:02:22.059Z",
+      "endedAt": "2026-06-17T18:02:22.062Z",
+      "error": "",
+      "category": "memory"
+    },
+    {
+      "id": "memory-candidate-valid-allow",
+      "status": "passed",
+      "startedAt": "2026-06-17T18:02:22.062Z",
+      "endedAt": "2026-06-17T18:02:22.065Z",
+      "error": "",
+      "category": "memory"
+    },
+    {
+      "id": "reflect-valid-candidate",
+      "status": "passed",
+      "startedAt": "2026-06-17T18:02:22.065Z",
+      "endedAt": "2026-06-17T18:02:22.067Z",
+      "error": "",
+      "category": "memory"
+    },
+    {
+      "id": "reflect-valid-episode-and-skill-candidate",
+      "status": "passed",
+      "startedAt": "2026-06-17T18:02:22.067Z",
+      "endedAt": "2026-06-17T18:02:22.071Z",
+      "error": "",
+      "category": "memory"
+    },
+    {
+      "id": "reflect-skill-candidate-reject-missing-field",
+      "status": "passed",
+      "startedAt": "2026-06-17T18:02:22.071Z",
+      "endedAt": "2026-06-17T18:02:22.071Z",
+      "error": "",
+      "category": "memory"
+    },
+    {
+      "id": "reflect-skill-candidate-reject-secret",
+      "status": "passed",
+      "startedAt": "2026-06-17T18:02:22.071Z",
+      "endedAt": "2026-06-17T18:02:22.074Z",
+      "error": "",
+      "category": "memory"
+    },
+    {
+      "id": "reflect-reject-missing-evidence",
+      "status": "passed",
+      "startedAt": "2026-06-17T18:02:22.074Z",
+      "endedAt": "2026-06-17T18:02:22.074Z",
+      "error": "",
+      "category": "memory"
+    },
+    {
+      "id": "reflect-reject-secret",
+      "status": "passed",
+      "startedAt": "2026-06-17T18:02:22.074Z",
+      "endedAt": "2026-06-17T18:02:22.077Z",
+      "error": "",
+      "category": "memory"
+    },
+    {
+      "id": "build-read-tool-outside-root-allowed",
+      "status": "passed",
+      "startedAt": "2026-06-17T18:02:22.077Z",
+      "endedAt": "2026-06-17T18:02:22.077Z",
+      "error": "",
+      "category": "governance"
+    },
+    {
+      "id": "plan-read-tool-allowed",
+      "status": "passed",
+      "startedAt": "2026-06-17T18:02:22.077Z",
+      "endedAt": "2026-06-17T18:02:22.077Z",
+      "error": "",
+      "category": "governance"
+    },
+    {
+      "id": "workflow-disposable-feature-edit",
+      "status": "passed",
+      "startedAt": "2026-06-17T18:02:22.077Z",
+      "endedAt": "2026-06-17T18:02:22.086Z",
+      "error": "",
+      "category": "workflow"
+    },
+    {
+      "id": "workflow-disposable-test-fix",
+      "status": "passed",
+      "startedAt": "2026-06-17T18:02:22.086Z",
+      "endedAt": "2026-06-17T18:02:22.096Z",
+      "error": "",
+      "category": "workflow"
+    },
+    {
+      "id": "workflow-plan-mode-write-skipped",
+      "status": "passed",
+      "startedAt": "2026-06-17T18:02:22.096Z",
+      "endedAt": "2026-06-17T18:02:22.098Z",
+      "error": "",
+      "category": "workflow"
+    },
+    {
+      "id": "workflow-protected-env-write-refused",
+      "status": "passed",
+      "startedAt": "2026-06-17T18:02:22.098Z",
+      "endedAt": "2026-06-17T18:02:22.099Z",
+      "error": "",
+      "category": "workflow"
+    }
+  ]
+}

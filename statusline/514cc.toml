@@ -1,0 +1,197 @@
+# 514cc 暗夜玫瑰主题 — ccline (CCometixLine) statusline
+# 体系专属：纯黑底 + 红瞳红强调 + 暗玫瑰过渡（配色渊源自初版 lilith-yandere 调色板；当前人格见 output-styles/）。
+# 双地落：514cc/statusline/514cc.toml  ↔  ~/.claude/ccline/themes/514cc.toml
+# 生效：将本内容写入 ~/.claude/ccline/config.toml（或 ccline --theme 514cc）
+# 图标显示为方块时：把下面 [style] 的 mode 改为 "plain"（用 emoji 兜底）
+
+theme = "514cc"
+
+[style]
+mode = "nerd_font"
+separator = ""
+
+# ── 1. 模型 — 红瞳红（粗体强调） ──
+[[segments]]
+id = "model"
+enabled = true
+[segments.icon]
+plain = "🤖"
+nerd_font = ""
+[segments.colors.icon]
+r = 224
+g = 24
+b = 77
+[segments.colors.text]
+r = 224
+g = 24
+b = 77
+[segments.colors.background]
+r = 12
+g = 12
+b = 16
+[segments.styles]
+text_bold = true
+[segments.options]
+
+# ── 2. 目录 — 暗玫瑰 ──
+[[segments]]
+id = "directory"
+enabled = true
+[segments.icon]
+plain = "📁"
+nerd_font = "󰉋"
+[segments.colors.icon]
+r = 199
+g = 125
+b = 160
+[segments.colors.text]
+r = 199
+g = 125
+b = 160
+[segments.colors.background]
+r = 18
+g = 14
+b = 18
+[segments.styles]
+text_bold = false
+[segments.options]
+
+# ── 3. Git — 柔粉 ──
+[[segments]]
+id = "git"
+enabled = true
+[segments.icon]
+plain = "🌿"
+nerd_font = "󰊢"
+[segments.colors.icon]
+r = 229
+g = 156
+b = 196
+[segments.colors.text]
+r = 229
+g = 156
+b = 196
+[segments.colors.background]
+r = 14
+g = 11
+b = 15
+[segments.styles]
+text_bold = false
+[segments.options]
+show_sha = false
+
+# ── 4. 上下文窗口 — 灰玫瑰 ──
+[[segments]]
+id = "context_window"
+enabled = true
+[segments.icon]
+plain = "⚡"
+nerd_font = ""
+[segments.colors.icon]
+r = 154
+g = 106
+b = 130
+[segments.colors.text]
+r = 154
+g = 106
+b = 130
+[segments.colors.background]
+r = 20
+g = 15
+b = 19
+[segments.styles]
+text_bold = false
+[segments.options]
+
+# ── 5. 输出样式 — 红瞳红（体系人格的脸·莉莉） ──
+[[segments]]
+id = "output_style"
+enabled = true
+[segments.icon]
+plain = "🎯"
+nerd_font = "󱋵"
+[segments.colors.icon]
+r = 224
+g = 24
+b = 77
+[segments.colors.text]
+r = 224
+g = 24
+b = 77
+[segments.colors.background]
+r = 12
+g = 12
+b = 16
+[segments.styles]
+text_bold = true
+[segments.options]
+
+# ── 以下 segment 关闭（精简：去拥挤 + 去 API 依赖） ──
+[[segments]]
+id = "usage"
+enabled = false
+[segments.icon]
+plain = "📊"
+nerd_font = "󰪞"
+[segments.colors.icon]
+r = 154
+g = 106
+b = 130
+[segments.colors.text]
+r = 154
+g = 106
+b = 130
+[segments.colors.background]
+r = 12
+g = 12
+b = 16
+[segments.styles]
+text_bold = false
+[segments.options]
+timeout = 2
+cache_duration = 180
+api_base_url = "https://api.anthropic.com"
+
+[[segments]]
+id = "cost"
+enabled = false
+[segments.icon]
+plain = "💰"
+nerd_font = ""
+[segments.colors.icon]
+r = 154
+g = 106
+b = 130
+[segments.colors.text]
+r = 154
+g = 106
+b = 130
+[segments.colors.background]
+r = 12
+g = 12
+b = 16
+[segments.styles]
+text_bold = false
+[segments.options]
+
+[[segments]]
+id = "session"
+enabled = false
+[segments.icon]
+plain = "⏱️"
+nerd_font = "󱦻"
+[segments.colors.icon]
+r = 154
+g = 106
+b = 130
+[segments.colors.text]
+r = 154
+g = 106
+b = 130
+[segments.colors.background]
+r = 12
+g = 12
+b = 16
+[segments.styles]
+text_bold = false
+[segments.options]

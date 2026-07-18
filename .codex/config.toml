@@ -1,0 +1,117 @@
+# 514cc project-scoped Codex config.
+# Source of truth lives in this repository; sync user-level runtime pieces with scripts/sync-codex-runtime.ps1.
+
+model_reasoning_effort = "xhigh" # Codex side of Claude ultracode parity; workflow orchestration lives in $ultracode.
+model_verbosity = "medium"
+project_doc_max_bytes = 65536
+project_doc_fallback_filenames = ["CLAUDE.md", "README.md"]
+model_instructions_file = "instructions/aemeath-514cc-codex.md"
+
+[features]
+hooks = true
+memories = true
+multi_agent = true
+
+[agents]
+max_threads = 6
+max_depth = 1
+job_max_runtime_seconds = 1800
+
+[sandbox_workspace_write]
+network_access = true
+
+# Project-local MCP mirrors the Claude runtime where Codex has equivalent support.
+# Secret-bearing servers use env_vars, never literal keys in repo config.
+[mcp_servers.fetch]
+command = "uvx"
+args = ["mcp-server-fetch"]
+startup_timeout_sec = 30
+tool_timeout_sec = 120
+
+[mcp_servers.sequential-thinking]
+command = "cmd"
+args = ["/c", "npx", "-y", "@modelcontextprotocol/server-sequential-thinking"]
+startup_timeout_sec = 30
+tool_timeout_sec = 120
+
+[mcp_servers.mcp-deepwiki]
+command = "cmd"
+args = ["/c", "npx", "-y", "mcp-deepwiki@latest"]
+startup_timeout_sec = 30
+tool_timeout_sec = 120
+
+[mcp_servers.open-websearch]
+command = "cmd"
+args = ["/c", "npx", "-y", "open-websearch@latest"]
+env_vars = ["ALLOWED_SEARCH_ENGINES", "DEFAULT_SEARCH_ENGINE", "MODE"]
+startup_timeout_sec = 30
+tool_timeout_sec = 120
+
+[mcp_servers.exa]
+command = "cmd"
+args = ["/c", "npx", "-y", "exa-mcp-server@latest"]
+env_vars = ["EXA_API_KEY"]
+startup_timeout_sec = 30
+tool_timeout_sec = 120
+
+[mcp_servers.scrapling]
+command = "uvx"
+args = ["--from", "scrapling[ai]==0.4.10", "scrapling", "mcp"]
+startup_timeout_sec = 60
+tool_timeout_sec = 120
+
+# The gateway accepts plain Chat Completions and returns inline source URLs, but rejects
+# tools=[{type="web_search"}]. This loopback adapter removes that field and emits citations.
+# Host config forwards wrapper-only GROK_SEARCH_RS_COMPAT_* names. Generic
+# OPENAI_COMPATIBLE_* names exist only inside the isolated grok-search-rs child process.
+[mcp_servers.grok-search-rs]
+command = "node"
+args = ["I:\\514claude\\514cc\\scripts\\grok_search_chat_compat.mjs"]
+env_vars = ["GROK_SEARCH_RS_COMPAT_API_URL", "GROK_SEARCH_RS_COMPAT_API_KEY", "GROK_SEARCH_RS_COMPAT_MODEL"]
+startup_timeout_sec = 30
+tool_timeout_sec = 120
+
+[mcp_servers.serena]
+command = "serena"
+args = ["start-mcp-server", "--context=codex", "--project-from-cwd"]
+startup_timeout_sec = 60
+tool_timeout_sec = 120
+
+[mcp_servers.playwright]
+command = "cmd"
+args = ["/c", "npx", "-y", "@playwright/mcp@latest"]
+startup_timeout_sec = 60
+tool_timeout_sec = 120
+
+[mcp_servers.roxybrowser-openapi]
+command = "cmd"
+args = ["/c", "npx", "@roxybrowser/openapi@beta"]
+env_vars = ["ROXY_API_HOST", "ROXY_API_KEY"]
+enabled = false
+startup_timeout_sec = 30
+tool_timeout_sec = 120
+
+[mcp_servers.roxybrowser-playwright-mcp]
+command = "cmd"
+args = ["/c", "npx", "@roxybrowser/playwright-mcp@latest"]
+enabled = false
+startup_timeout_sec = 60
+tool_timeout_sec = 120
+
+[mcp_servers.browserwing]
+url = "http://localhost:8080/api/v1/mcp/message"
+enabled = false
+startup_timeout_sec = 10
+tool_timeout_sec = 120
+
+[mcp_servers.micu-image]
+command = "C:\\Program Files\\Python313\\python.exe"
+args = ["I:\\mcp-servers\\micu-image-mcp\\server.py"]
+env_vars = ["MICU_API_KEY", "MICU_SAVE_DIR", "MICU_SAVE_DIR_ROOT"]
+enabled = false
+startup_timeout_sec = 30
+tool_timeout_sec = 120
+
+# User-level config already carries ace-tool, context7, github, claude-flow, node_repl,
+# and OpenAI primary runtime plugins. Keep those in ~/.codex/config.toml because they include
+# user-local tokens, marketplaces, or runtime paths.

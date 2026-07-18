@@ -1,0 +1,77 @@
+version: 0.1.0
+owner: lilith
+
+modes:
+  plan:
+    writes: "deny"
+    shell: "read-only-safe"
+    description: "No file writes, no mutation shell commands. Used for specs and plans."
+  review:
+    writes: "deny"
+    shell: "read-only-safe"
+    description: "No writes. Used for audits and code review."
+  build:
+    writes: "authorized-workspace-only"
+    shell: "confirm-dangerous"
+    description: "Can edit authorized workspace paths; dangerous commands require confirmation."
+
+authorized_workspace_roots:
+  - "G:/tasks/pi proxy"
+  - "I:/514claude/514cc"
+
+protected_paths:
+  - ".env"
+  - ".git/"
+  - "node_modules/"
+  - ".ssh/"
+  - "id_rsa"
+  - "id_ed25519"
+  - ".pem"
+  - ".key"
+  - "secrets"
+  - "credentials"
+
+mutation_shell_patterns:
+  - "\\brm\\s+(-rf?|--recursive)\\b"
+  - "\\bRemove-Item\\b.*\\s-Recurse\\b"
+  - "\\bRemove-Item\\b"
+  - "\\bNew-Item\\b"
+  - "\\bCopy-Item\\b"
+  - "\\bAdd-Content\\b"
+  - "\\bmkdir\\b"
+  - "\\bmd\\b"
+  - "\\bni\\b"
+  - "\\bcp\\b"
+  - "\\bcopy\\b"
+  - "\\bgit\\s+reset\\s+--hard\\b"
+  - "\\bgit\\s+clean\\s+-[^\\s]*f"
+  - "\\bgit\\s+push\\b.*\\s--force\\b"
+  - "\\bchmod\\b\\s+777\\b"
+  - "\\bsudo\\b"
+  - "\\bmv\\b"
+  - "\\bMove-Item\\b"
+  - "\\bdel\\b"
+  - "\\bSet-Content\\b"
+  - "\\bOut-File\\b"
+
+read_only_shell_patterns:
+  - "^\\s*Get-Content\\b"
+  - "^\\s*gc\\b"
+  - "^\\s*Select-String\\b"
+  - "^\\s*Get-ChildItem\\b"
+  - "^\\s*gci\\b"
+  - "^\\s*dir\\b"
+  - "^\\s*ls\\b"
+  - "^\\s*rg\\b"
+  - "^\\s*git\\s+(status|diff|show|log|branch)\\b"
+  - "^\\s*npm\\s+(run\\s+check|--version|--help)\\b"
+  - "^\\s*node\\s+--version\\b"
+  - "^\\s*python\\s+--version\\b"
+  - "^\\s*tsx\\s+--version\\b"
+  - "^\\s*where\\b"
+  - "^\\s*Get-Command\\b"
+
+memory_policy:
+  default_write_mode: "candidate"
+  require_fields: [evidence, confidence, sensitivity]
+  secret_storage: "forbidden"

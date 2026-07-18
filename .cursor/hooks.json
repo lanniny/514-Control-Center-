@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "command": "python I:/514claude/514cc/.claude/hooks/mirror-gate.py",
+        "timeout": 10
+      }
+    ],
+    "beforeSubmitPrompt": [
+      {
+        "command": "python I:/514claude/514cc/.claude/hooks/route-gate.py",
+        "timeout": 10
+      }
+    ],
+    "stop": [
+      {
+        "command": "python I:/514claude/514cc/.claude/hooks/stop-gate.py",
+        "timeout": 10
+      }
+    ]
+  }
+}

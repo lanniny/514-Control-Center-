@@ -1,0 +1,41 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python I:/514claude/514cc/.codex/hooks/mirror-gate-codex.py",
+            "timeout": 10,
+            "statusMessage": "514cc mirror gate"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python I:/514claude/514cc/.codex/hooks/route-gate-codex.py",
+            "timeout": 10,
+            "statusMessage": "514cc route gate"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python I:/514claude/514cc/.codex/hooks/stop-gate-codex.py",
+            "timeout": 10,
+            "statusMessage": "514cc stop gate"
+          }
+        ]
+      }
+    ]
+  }
+}

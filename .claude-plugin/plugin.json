@@ -1,0 +1,63 @@
+{
+  "name": "514cc",
+  "version": "3.3.0",
+  "description": "Skill 驱动的 AI 能力放大系统。5 命名 Agent（烛/织/匠/策/鉴）+ 14 SKILL.md + harness hook 硬扳机（路由门注入 + DELTA 门禁 + 开机自省体检卡）+ 三层 customize.toml + Codex CLI 一等公民 + 对抗式评审 + Party Mode。",
+  "type": "claude-code-plugin",
+  "license": "personal",
+
+  "components": {
+    "agents": {
+      "codex-reviewer": {
+        "name": "烛",
+        "title": "代码守夜人",
+        "source": "skills/review/codex-reviewer/SKILL.md",
+        "customize": "skills/review/codex-reviewer/customize.toml"
+      },
+      "grok-researcher": {
+        "name": "织",
+        "title": "情报编织者",
+        "source": "skills/research/grok-researcher/SKILL.md",
+        "customize": "skills/research/grok-researcher/customize.toml"
+      },
+      "embedded-expert": {
+        "name": "匠",
+        "title": "老匠人",
+        "source": "skills/domain/embedded-expert/SKILL.md",
+        "customize": "skills/domain/embedded-expert/customize.toml"
+      },
+      "spec-architect": {
+        "name": "策",
+        "title": "军师",
+        "source": "skills/domain/spec-architect/SKILL.md",
+        "customize": "skills/domain/spec-architect/customize.toml"
+      },
+      "meta-reviewer": {
+        "name": "鉴",
+        "title": "镜鉴",
+        "source": "skills/meta/meta-reviewer/SKILL.md",
+        "customize": "skills/meta/meta-reviewer/customize.toml"
+      }
+    },
+    "skills": [
+      "skills/orchestration/auto-pilot/SKILL.md",
+      "skills/orchestration/enhance/SKILL.md",
+      "skills/orchestration/party-mode/SKILL.md",
+      "skills/review/adversarial/SKILL.md",
+      "skills/research/web-intel/SKILL.md",
+      "skills/meta/help/SKILL.md",
+      "skills/utility/init/SKILL.md",
+      "skills/utility/status/SKILL.md",
+      "skills/utility/archive/SKILL.md"
+    ],
+    "guardrails": "guardrails/",
+    "customize": "customize/",
+    "module_config": "module.yaml",
+    "rules": "rules.md"
+  },
+
+  "dependencies": {
+    "claude-code": ">=2.1.0",
+    "codex-cli": ">=0.128.0",
+    "grok-api": ">=0.26.0 (optional)"
+  }
+}

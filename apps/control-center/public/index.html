@@ -1,0 +1,977 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#faf9f5" />
+    <title>514cc Control Center</title>
+    <script src="./theme.js"></script>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">跳到主要内容</a>
+
+    <svg class="icon-sprite" aria-hidden="true">
+      <symbol id="icon-overview" viewBox="0 0 24 24">
+        <rect width="7" height="9" x="3" y="3" rx="1" />
+        <rect width="7" height="5" x="14" y="3" rx="1" />
+        <rect width="7" height="9" x="14" y="12" rx="1" />
+        <rect width="7" height="5" x="3" y="16" rx="1" />
+      </symbol>
+      <symbol id="icon-workbench" viewBox="0 0 24 24">
+        <path d="M21 15a4 4 0 0 1-4 4H8l-5 3V7a4 4 0 0 1 4-4h10a4 4 0 0 1 4 4z" />
+        <path d="M8 8h8M8 12h5" />
+      </symbol>
+      <symbol id="icon-config" viewBox="0 0 24 24">
+        <path d="M12.2 2h-.4a2 2 0 0 0-2 2v.2a2 2 0 0 1-1 1.7l-.4.2a2 2 0 0 1-2 0l-.1-.1a2 2 0 0 0-2.7.7l-.2.4a2 2 0 0 0 .7 2.7l.1.1a2 2 0 0 1 1 1.7v.5a2 2 0 0 1-1 1.7l-.1.1a2 2 0 0 0-.7 2.7l.2.4a2 2 0 0 0 2.7.7l.1-.1a2 2 0 0 1 2 0l.4.2a2 2 0 0 1 1 1.7v.2a2 2 0 0 0 2 2h.4a2 2 0 0 0 2-2v-.2a2 2 0 0 1 1-1.7l.4-.2a2 2 0 0 1 2 0l.1.1a2 2 0 0 0 2.7-.7l.2-.4a2 2 0 0 0-.7-2.7l-.1-.1a2 2 0 0 1-1-1.7v-.5a2 2 0 0 1 1-1.7l.1-.1a2 2 0 0 0 .7-2.7l-.2-.4a2 2 0 0 0-2.7-.7l-.1.1a2 2 0 0 1-2 0l-.4-.2a2 2 0 0 1-1-1.7V4a2 2 0 0 0-2-2z" />
+        <circle cx="12" cy="12" r="3" />
+      </symbol>
+      <symbol id="icon-route" viewBox="0 0 24 24">
+        <circle cx="6" cy="19" r="3" />
+        <circle cx="18" cy="5" r="3" />
+        <path d="M6 16V8a3 3 0 0 1 3-3h6M9 19h6a3 3 0 0 0 3-3V8" />
+      </symbol>
+      <symbol id="icon-shield" viewBox="0 0 24 24">
+        <path d="M20 13c0 5-3.5 7.5-8 9-4.5-1.5-8-4-8-9V5l8-3 8 3z" />
+        <path d="m9 12 2 2 4-4" />
+      </symbol>
+      <symbol id="icon-refresh" viewBox="0 0 24 24">
+        <path d="M20 11a8 8 0 1 0-2.3 5.7L20 14" />
+        <path d="M20 4v7h-7" />
+      </symbol>
+      <symbol id="icon-play" viewBox="0 0 24 24">
+        <path d="m6 3 14 9-14 9z" />
+      </symbol>
+      <symbol id="icon-check" viewBox="0 0 24 24">
+        <path d="m20 6-11 11-5-5" />
+      </symbol>
+      <symbol id="icon-diff" viewBox="0 0 24 24">
+        <path d="M3 6h18M3 12h10M3 18h18" />
+        <path d="M17 9v6M14 12h6" />
+      </symbol>
+      <symbol id="icon-save" viewBox="0 0 24 24">
+        <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" />
+        <path d="M17 21v-8H7v8M7 3v5h8" />
+      </symbol>
+      <symbol id="icon-history" viewBox="0 0 24 24">
+        <path d="M3 12a9 9 0 1 0 3-6.7L3 8" />
+        <path d="M3 3v5h5M12 7v5l3 2" />
+      </symbol>
+      <symbol id="icon-search" viewBox="0 0 24 24">
+        <circle cx="11" cy="11" r="8" />
+        <path d="m21 21-4.3-4.3" />
+      </symbol>
+      <symbol id="icon-stop" viewBox="0 0 24 24">
+        <rect width="14" height="14" x="5" y="5" rx="1" />
+      </symbol>
+      <symbol id="icon-chevron" viewBox="0 0 24 24">
+        <path d="m9 18 6-6-6-6" />
+      </symbol>
+      <symbol id="icon-file" viewBox="0 0 24 24">
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+        <path d="M14 2v6h6M8 13h8M8 17h5" />
+      </symbol>
+      <symbol id="icon-lock" viewBox="0 0 24 24">
+        <rect width="18" height="11" x="3" y="11" rx="2" />
+        <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+      </symbol>
+      <symbol id="icon-copy" viewBox="0 0 24 24">
+        <rect width="14" height="14" x="8" y="8" rx="2" />
+        <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" />
+      </symbol>
+      <symbol id="icon-close" viewBox="0 0 24 24">
+        <path d="M18 6 6 18M6 6l12 12" />
+      </symbol>
+      <symbol id="icon-pulse" viewBox="0 0 24 24">
+        <path d="M3 12h4l2-7 4 14 2-7h6" />
+      </symbol>
+      <symbol id="icon-sessions" viewBox="0 0 24 24">
+        <path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3" />
+        <path d="M7 9h10M7 13h6" />
+      </symbol>
+      <symbol id="icon-sun" viewBox="0 0 24 24">
+        <circle cx="12" cy="12" r="4" />
+        <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
+      </symbol>
+      <symbol id="icon-moon" viewBox="0 0 24 24">
+        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
+      </symbol>
+    </svg>
+
+    <div class="app-shell">
+      <div class="nav-backdrop" id="nav-backdrop" hidden></div>
+      <aside class="sidebar" id="sidebar" aria-label="导航抽屉">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">514</div>
+          <div>
+            <strong>Control Center</strong>
+            <span>AEMEATH / 514cc</span>
+          </div>
+        </div>
+
+        <nav class="primary-nav" aria-label="主导航">
+          <button class="nav-item nav-primary is-active" type="button" data-view="workbench" aria-current="page">
+            <svg class="icon"><use href="#icon-workbench"></use></svg>
+            <span>协作台</span>
+          </button>
+
+          <div class="nav-group" role="group" aria-labelledby="nav-group-observe">
+            <p class="nav-group-label" id="nav-group-observe">观测</p>
+            <button class="nav-item" type="button" data-view="overview">
+              <svg class="icon"><use href="#icon-overview"></use></svg>
+              <span>系统总览</span>
+            </button>
+            <button class="nav-item" type="button" data-view="observability">
+              <svg class="icon"><use href="#icon-pulse"></use></svg>
+              <span>体系观测</span>
+            </button>
+            <button class="nav-item" type="button" data-view="sessions">
+              <svg class="icon"><use href="#icon-sessions"></use></svg>
+              <span>会话聚合</span>
+            </button>
+          </div>
+
+          <div class="nav-group" role="group" aria-labelledby="nav-group-config">
+            <p class="nav-group-label" id="nav-group-config">配置</p>
+            <button class="nav-item" type="button" data-view="config">
+              <svg class="icon"><use href="#icon-config"></use></svg>
+              <span>配置中心</span>
+            </button>
+            <button class="nav-item" type="button" data-view="router">
+              <svg class="icon"><use href="#icon-route"></use></svg>
+              <span>模型路由</span>
+            </button>
+            <button class="nav-item" type="button" data-view="security">
+              <svg class="icon"><use href="#icon-shield"></use></svg>
+              <span>安全诊断</span>
+            </button>
+          </div>
+        </nav>
+
+        <div class="sidebar-footer">
+          <div class="runtime-indicator">
+            <span class="status-dot is-pending" id="sidebar-status-dot"></span>
+            <div>
+              <strong id="sidebar-status-label">正在连接</strong>
+              <span id="sidebar-version">514cc runtime</span>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <header class="topbar">
+        <button class="icon-button mobile-menu-button" id="mobile-menu-button" type="button" title="打开导航" aria-label="打开导航" aria-expanded="false" aria-controls="sidebar">
+          <svg class="icon" viewBox="0 0 24 24"><path d="M3 6h18M3 12h18M3 18h18" /></svg>
+        </button>
+        <div class="topbar-brand">
+          <div class="brand-mark" aria-hidden="true">514</div>
+          <strong>Control Center</strong>
+        </div>
+        <nav class="topbar-nav" aria-label="主导航">
+          <button class="topnav-item is-active" type="button" data-view="workbench" aria-current="page" title="协作台" aria-label="协作台">
+            <svg class="icon"><use href="#icon-workbench"></use></svg><span>协作台</span>
+          </button>
+          <span class="topnav-divider" aria-hidden="true"></span>
+          <button class="topnav-item" type="button" data-view="overview" title="系统总览" aria-label="系统总览">
+            <svg class="icon"><use href="#icon-overview"></use></svg><span>系统总览</span>
+          </button>
+          <button class="topnav-item" type="button" data-view="observability" title="体系观测" aria-label="体系观测">
+            <svg class="icon"><use href="#icon-pulse"></use></svg><span>体系观测</span>
+          </button>
+          <button class="topnav-item" type="button" data-view="sessions" title="会话聚合" aria-label="会话聚合">
+            <svg class="icon"><use href="#icon-sessions"></use></svg><span>会话聚合</span>
+          </button>
+          <span class="topnav-divider" aria-hidden="true"></span>
+          <button class="topnav-item" type="button" data-view="config" title="配置中心" aria-label="配置中心">
+            <svg class="icon"><use href="#icon-config"></use></svg><span>配置中心</span>
+          </button>
+          <button class="topnav-item" type="button" data-view="router" title="模型路由" aria-label="模型路由">
+            <svg class="icon"><use href="#icon-route"></use></svg><span>模型路由</span>
+          </button>
+          <button class="topnav-item" type="button" data-view="security" title="安全诊断" aria-label="安全诊断">
+            <svg class="icon"><use href="#icon-shield"></use></svg><span>安全诊断</span>
+          </button>
+        </nav>
+        <div class="topbar-title sr-only" aria-live="polite">
+          <span class="eyebrow">514cc</span>
+          <strong id="current-view-title">协作台</strong>
+        </div>
+        <div class="topbar-actions">
+          <span class="connection-badge is-pending" id="api-connection-badge">
+            <span class="status-dot is-pending"></span>
+            <span>API 连接中</span>
+          </span>
+          <button class="icon-button" id="theme-toggle" type="button" title="切换为深色" aria-label="切换为深色">
+            <svg class="icon"><use href="#icon-moon"></use></svg>
+          </button>
+          <button class="icon-button" id="refresh-button" type="button" title="刷新当前数据" aria-label="刷新当前数据">
+            <svg class="icon"><use href="#icon-refresh"></use></svg>
+          </button>
+        </div>
+      </header>
+
+      <main class="main-content" id="main-content" tabindex="-1">
+        <section class="view" id="view-overview" data-view-panel="overview" aria-labelledby="overview-title" hidden>
+          <div class="page-heading">
+            <div>
+              <p class="eyebrow">运行态</p>
+              <h1 id="overview-title">系统总览</h1>
+              <p>协作运行时、配置真源与安全门禁的当前状态。</p>
+            </div>
+            <div class="heading-actions">
+              <button class="button secondary" type="button" data-view-jump="config">
+                <svg class="icon"><use href="#icon-config"></use></svg>
+                配置检查
+              </button>
+              <button class="button primary" type="button" data-view-jump="workbench">
+                <svg class="icon"><use href="#icon-play"></use></svg>
+                新建任务
+              </button>
+            </div>
+          </div>
+
+          <div class="metric-grid" aria-label="核心指标">
+            <article class="metric-card">
+              <span class="metric-label">运行组件</span>
+              <strong class="metric-value" id="metric-services">--</strong>
+              <span class="metric-detail" id="metric-services-detail">等待健康检查</span>
+            </article>
+            <article class="metric-card">
+              <span class="metric-label">活跃任务</span>
+              <strong class="metric-value" id="metric-runs">--</strong>
+              <span class="metric-detail" id="metric-runs-detail">暂无运行数据</span>
+            </article>
+            <article class="metric-card">
+              <span class="metric-label">配置源</span>
+              <strong class="metric-value" id="metric-sources">--</strong>
+              <span class="metric-detail" id="metric-sources-detail">等待配置索引</span>
+            </article>
+            <article class="metric-card">
+              <span class="metric-label">事件通道</span>
+              <strong class="metric-value metric-word" id="metric-events">连接中</strong>
+              <span class="metric-detail" id="metric-events-detail">SSE /api/events</span>
+            </article>
+          </div>
+
+          <div class="overview-grid">
+            <section class="content-section" aria-labelledby="health-title">
+              <div class="section-heading">
+                <div>
+                  <h2 id="health-title">组件健康</h2>
+                  <p id="health-updated">尚未完成检查</p>
+                </div>
+                <span class="status-label is-pending" id="health-summary">检查中</span>
+              </div>
+              <div class="health-list" id="health-list" aria-live="polite"></div>
+            </section>
+
+            <section class="content-section" aria-labelledby="active-runs-title">
+              <div class="section-heading">
+                <div>
+                  <h2 id="active-runs-title">最近任务</h2>
+                  <p>主脑与技术执行会话</p>
+                </div>
+                <button class="text-button" type="button" data-view-jump="workbench">查看协作台</button>
+              </div>
+              <div class="run-list" id="overview-run-list" aria-live="polite"></div>
+            </section>
+          </div>
+
+          <section class="content-section event-section" aria-labelledby="recent-events-title">
+            <div class="section-heading">
+              <div>
+                <h2 id="recent-events-title">最近事件</h2>
+                <p>标准化运行与配置事件</p>
+              </div>
+              <span class="mono subtle" id="event-sequence">seq --</span>
+            </div>
+            <div class="event-table-wrap">
+              <table class="data-table event-table">
+                <thead>
+                  <tr>
+                    <th>时间</th>
+                    <th>类型</th>
+                    <th>主体</th>
+                    <th>摘要</th>
+                  </tr>
+                </thead>
+                <tbody id="overview-event-body"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section class="view is-active" id="view-workbench" data-view-panel="workbench" aria-labelledby="workbench-title">
+          <div class="page-heading compact-heading">
+            <div>
+              <p class="eyebrow">多 Agent 编排</p>
+              <h1 id="workbench-title">协作台</h1>
+              <p>Claude 主脑统一规划，技术与研究会话经控制面受控执行。</p>
+            </div>
+            <span class="status-label is-neutral" id="workbench-run-status">未选择任务</span>
+          </div>
+
+          <div class="workbench-shell">
+            <aside class="run-rail" aria-label="团队、会话与项目">
+              <section class="rail-block rail-block-team" aria-labelledby="team-rail-title">
+                <div class="pane-heading">
+                  <h2 id="team-rail-title">团队</h2>
+                  <button class="rail-action" id="manage-teams-button" type="button" title="管理团队" aria-label="管理团队">
+                    <svg class="icon"><use href="#icon-config"></use></svg>
+                  </button>
+                </div>
+                <div class="team-picker" id="team-picker" aria-label="选择当前团队">
+                  <div class="empty-state compact-empty"><span>正在加载团队…</span></div>
+                </div>
+              </section>
+              <section class="rail-block rail-block-runs" aria-labelledby="run-rail-title">
+                <div class="pane-heading">
+                  <h2 id="run-rail-title">会话</h2>
+                  <button class="rail-action" id="new-session-button" type="button" title="新会话（选择项目地址）" aria-label="新会话，选择项目地址">
+                    <svg class="icon" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
+                  </button>
+                  <button class="rail-action" id="clear-runs-button" type="button" title="清除已结束任务" aria-label="清除已结束任务">
+                    <svg class="icon" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /></svg>
+                  </button>
+                  <span id="run-count">0</span>
+                </div>
+                <div class="run-rail-list" id="workbench-run-list"></div>
+              </section>
+              <section class="rail-block rail-block-projects" aria-labelledby="project-rail-title">
+                <div class="pane-heading">
+                  <h2 id="project-rail-title">项目</h2>
+                  <label class="rail-toggle" title="用各会话的首条输入做标题（默认关闭；内容经服务端脱敏）">
+                    <input type="checkbox" id="project-summaries-toggle" />
+                    <span>摘要</span>
+                  </label>
+                  <span id="project-count">0</span>
+                </div>
+                <div class="project-tree" id="workbench-project-tree">
+                  <div class="empty-state compact-empty"><span>正在扫描本地项目…</span></div>
+                </div>
+              </section>
+              <div class="rail-statusline" id="rail-statusline" aria-label="会话状态栏"></div>
+            </aside>
+
+            <section class="conversation-pane" aria-labelledby="conversation-title">
+              <div class="pane-heading conversation-heading">
+                <div>
+                  <h2 id="conversation-title">新任务</h2>
+                  <span id="conversation-meta">等待输入</span>
+                </div>
+                <button class="icon-button danger-quiet" id="cancel-run-button" type="button" title="取消当前任务" aria-label="取消当前任务" disabled>
+                  <svg class="icon"><use href="#icon-stop"></use></svg>
+                </button>
+              </div>
+
+              <div class="conversation-stream" id="conversation-stream" aria-live="polite">
+                <div class="empty-state compact-empty">
+                  <svg class="empty-icon"><use href="#icon-workbench"></use></svg>
+                  <strong>准备接收任务</strong>
+                  <span>任务创建后，路由、会话与工具事件会在此汇合。</span>
+                </div>
+              </div>
+
+              <!-- recovery 死路恢复条：run.recoveryNote + 确认按钮（内容与显隐由 app.js renderRecoveryBar 驱动） -->
+              <div class="recovery-bar" id="recovery-bar" hidden></div>
+
+              <form class="task-composer" id="task-form">
+                <div class="composer-shell">
+                  <div class="composer-hint">
+                    <button class="text-button" id="composer-new-task" type="button" hidden>+ 新任务</button>
+                    <button class="composer-cwd" id="composer-cwd" type="button" hidden title="会话项目地址（点击更换）"></button>
+                    <label id="composer-mode-hint" for="task-input">任务内容</label>
+                  </div>
+                  <textarea id="task-input" name="prompt" rows="2" placeholder="描述要规划、实现、审查或调研的目标" required></textarea>
+                  <div class="composer-footer">
+                    <fieldset class="segmented-control">
+                      <legend>风险等级</legend>
+                      <label><input type="radio" name="risk" value="low" /><span>低</span></label>
+                      <label><input type="radio" name="risk" value="medium" checked /><span>中</span></label>
+                      <label><input type="radio" name="risk" value="high" /><span>高</span></label>
+                    </fieldset>
+                    <fieldset class="segmented-control">
+                      <legend>权限模式</legend>
+                      <label><input type="radio" name="permissionMode" value="plan" checked /><span>Plan</span></label>
+                      <label><input type="radio" name="permissionMode" value="build" /><span>Build</span></label>
+                    </fieldset>
+                    <label class="check-control">
+                      <input type="checkbox" id="task-current-source" />
+                      <span>需要当前资料</span>
+                    </label>
+                    <span class="composer-spacer"></span>
+                    <label class="model-pick" id="followup-agent-pick" title="续聊消息发送给哪个团队成员" hidden>
+                      <span aria-hidden="true">发送给</span>
+                      <select id="followup-agent" aria-label="发送给"></select>
+                    </label>
+                    <label class="model-pick" id="task-model-pick" title="对应 CLI /model：本次会话 claude 主脑使用的模型">
+                      <span aria-hidden="true">/model</span>
+                      <select id="task-model" aria-label="选择模型">
+                        <option value="" selected>fable（默认）</option>
+                        <option value="opus">opus</option>
+                        <option value="sonnet">sonnet</option>
+                        <option value="haiku">haiku</option>
+                      </select>
+                    </label>
+                    <button class="send-button" id="submit-task-button" type="submit" title="发起协作" aria-label="发起协作">
+                      <svg class="icon" viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7" /></svg>
+                    </button>
+                  </div>
+                </div>
+              </form>
+            </section>
+
+            <aside class="context-rail" aria-label="任务上下文">
+              <section class="rail-section" aria-labelledby="route-reason-title">
+                <div class="pane-heading">
+                  <h2 id="route-reason-title">路由依据</h2>
+                </div>
+                <div class="route-decision" id="route-decision">
+                  <span class="route-model">尚未路由</span>
+                  <p>任务提交后显示候选模型、能力匹配和守卫条件。</p>
+                </div>
+              </section>
+              <section class="rail-section" aria-labelledby="session-topology-title">
+                <div class="pane-heading">
+                  <h2 id="session-topology-title">会话拓扑</h2>
+                </div>
+                <div class="topology" id="session-topology"></div>
+              </section>
+              <section class="rail-section event-rail" aria-labelledby="live-events-title">
+                <div class="pane-heading">
+                  <h2 id="live-events-title">实时事件</h2>
+                  <span class="event-live-state" id="event-live-state">连接中</span>
+                </div>
+                <ol class="timeline" id="workbench-event-list"></ol>
+              </section>
+            </aside>
+          </div>
+        </section>
+
+        <section class="view" id="view-config" data-view-panel="config" aria-labelledby="config-title" hidden>
+          <div class="page-heading compact-heading">
+            <div>
+              <p class="eyebrow">真源与运行时</p>
+              <h1 id="config-title">配置中心</h1>
+              <p>编辑全部 514cc 真源，并明确显示保存、热重载与运行时部署边界。</p>
+            </div>
+            <span class="status-label is-neutral" id="config-global-status">等待选择</span>
+          </div>
+
+          <div class="config-shell">
+            <aside class="source-pane" aria-labelledby="source-list-title">
+              <div class="pane-heading">
+                <h2 id="source-list-title">配置源</h2>
+                <span id="source-count">0</span>
+              </div>
+              <label class="search-field" for="source-filter">
+                <svg class="icon"><use href="#icon-search"></use></svg>
+                <input id="source-filter" type="search" placeholder="筛选路径或类型" autocomplete="off" />
+              </label>
+              <div class="source-list" id="source-list"></div>
+            </aside>
+
+            <section class="editor-pane" aria-labelledby="editor-title">
+              <div class="editor-toolbar">
+                <div class="editor-identity">
+                  <div class="file-icon"><svg class="icon"><use href="#icon-file"></use></svg></div>
+                  <div>
+                    <h2 id="editor-title">未选择配置</h2>
+                    <span class="mono" id="editor-path">--</span>
+                  </div>
+                </div>
+                <div class="editor-actions">
+                  <button class="button secondary" id="validate-config-button" type="button" disabled>
+                    <svg class="icon"><use href="#icon-check"></use></svg>
+                    校验
+                  </button>
+                  <button class="button secondary" id="plan-config-button" type="button" disabled>
+                    <svg class="icon"><use href="#icon-diff"></use></svg>
+                    预览变更
+                  </button>
+                  <button class="button primary" id="apply-config-button" type="button" disabled>
+                    <svg class="icon"><use href="#icon-save"></use></svg>
+                    保存
+                  </button>
+                </div>
+              </div>
+
+              <div class="config-meta" aria-label="配置元数据">
+                <span><b>格式</b><span id="config-format">--</span></span>
+                <span><b>范围</b><span id="config-scope">--</span></span>
+                <span><b>SHA-256</b><code id="config-sha">--</code></span>
+                <span><b>状态</b><span id="config-edit-state">未加载</span></span>
+              </div>
+
+              <div class="readonly-banner" id="readonly-banner" hidden>
+                <svg class="icon"><use href="#icon-lock"></use></svg>
+                <div>
+                  <strong id="readonly-title">此配置不可直接写入</strong>
+                  <span id="readonly-detail">运行时与 Secret 通过受控接口管理。</span>
+                </div>
+              </div>
+
+              <label class="editor-label" for="config-editor">原文</label>
+              <textarea class="code-editor" id="config-editor" spellcheck="false" aria-describedby="editor-diagnostics" disabled></textarea>
+              <div class="editor-statusbar" id="editor-diagnostics">
+                <span id="editor-cursor-status">0 行 · 0 字符</span>
+                <span id="editor-validation-status">尚未校验</span>
+              </div>
+            </section>
+
+            <aside class="version-pane" aria-labelledby="versions-title">
+              <div class="pane-heading">
+                <h2 id="versions-title">版本记录</h2>
+                <svg class="icon"><use href="#icon-history"></use></svg>
+              </div>
+              <div class="version-list" id="version-list"></div>
+              <section class="diff-inspector" aria-labelledby="diff-inspector-title">
+                <div class="pane-heading">
+                  <h2 id="diff-inspector-title">变更预览</h2>
+                  <span id="diff-summary">无变更</span>
+                </div>
+                <pre class="diff-output" id="diff-output">选择配置并修改原文后预览。</pre>
+              </section>
+            </aside>
+          </div>
+        </section>
+
+        <section class="view" id="view-router" data-view-panel="router" aria-labelledby="router-title" hidden>
+          <div class="page-heading compact-heading">
+            <div>
+              <p class="eyebrow">能力驱动调度</p>
+              <h1 id="router-title">模型路由</h1>
+              <p>基于任务类型、风险、实时资料需求和可用性生成可审计路由。</p>
+            </div>
+            <span class="status-label is-neutral" id="router-status">等待预览</span>
+          </div>
+
+          <div class="router-layout">
+            <form class="router-form" id="router-form">
+              <div class="section-heading">
+                <div>
+                  <h2>任务画像</h2>
+                  <p>路由预览不会启动 Agent</p>
+                </div>
+              </div>
+              <label for="router-prompt">任务</label>
+              <textarea id="router-prompt" rows="7" placeholder="输入需要路由的任务" required></textarea>
+              <div class="field-grid">
+                <label>
+                  <span>任务类型</span>
+                  <select id="router-kind">
+                    <option value="auto">自动判断</option>
+                    <option value="planning">规划</option>
+                    <option value="coding">实现</option>
+                    <option value="review">评审</option>
+                    <option value="current-research">当前资料</option>
+                    <option value="debugging">诊断</option>
+                  </select>
+                </label>
+                <label>
+                  <span>风险等级</span>
+                  <select id="router-risk">
+                    <option value="low">低</option>
+                    <option value="medium" selected>中</option>
+                    <option value="high">高</option>
+                  </select>
+                </label>
+              </div>
+              <label class="check-control standalone-check">
+                <input id="router-current-source" type="checkbox" />
+                <span>要求当前来源与引用</span>
+              </label>
+              <button class="button primary full-width" type="submit">
+                <svg class="icon"><use href="#icon-route"></use></svg>
+                生成路由预览
+              </button>
+            </form>
+
+            <section class="route-result" aria-labelledby="route-result-title">
+              <div class="section-heading">
+                <div>
+                  <h2 id="route-result-title">决策结果</h2>
+                  <p id="route-result-meta">尚无路由记录</p>
+                </div>
+              </div>
+              <div class="decision-primary" id="router-primary-decision">
+                <span class="agent-avatar">--</span>
+                <div>
+                  <span>主执行</span>
+                  <strong>等待任务画像</strong>
+                </div>
+              </div>
+              <dl class="decision-facts" id="router-decision-facts"></dl>
+              <div class="reason-list" id="router-reason-list"></div>
+              <div class="candidate-block">
+                <h3 class="candidate-title">候选评分</h3>
+                <div class="table-scroll">
+                  <table class="data-table candidate-table">
+                    <thead><tr><th>候选</th><th>综合得分</th><th>能力匹配</th><th>健康</th><th>结论</th></tr></thead>
+                    <tbody id="router-candidate-body"><tr><td colspan="5" class="subtle">生成路由预览后显示全部候选与排除原因。</td></tr></tbody>
+                  </table>
+                </div>
+              </div>
+            </section>
+          </div>
+
+          <section class="content-section model-section" aria-labelledby="model-registry-title">
+            <div class="section-heading">
+              <div>
+                <h2 id="model-registry-title">模型与适配器</h2>
+                <p>能力声明、当前可用性与最近验证</p>
+              </div>
+            </div>
+            <div class="table-scroll">
+              <table class="data-table model-table">
+                <thead>
+                  <tr>
+                    <th>角色</th>
+                    <th>适配器 / 模型</th>
+                    <th>优势</th>
+                    <th>可用性</th>
+                    <th>最近验证</th>
+                  </tr>
+                </thead>
+                <tbody id="model-table-body"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section class="view" id="view-security" data-view-panel="security" aria-labelledby="security-title" hidden>
+          <div class="page-heading compact-heading">
+            <div>
+              <p class="eyebrow">审批与可观测性</p>
+              <h1 id="security-title">安全诊断</h1>
+              <p>权限门禁、Secret 隔离、端点状态与运行日志。</p>
+            </div>
+            <span class="status-label is-pending" id="security-summary">检查中</span>
+          </div>
+
+          <div class="security-grid">
+            <section class="content-section" aria-labelledby="policy-title">
+              <div class="section-heading">
+                <div>
+                  <h2 id="policy-title">权限策略</h2>
+                  <p>当前控制面执行边界</p>
+                </div>
+              </div>
+              <div class="policy-list" id="policy-list"></div>
+            </section>
+            <section class="content-section" aria-labelledby="secret-title">
+              <div class="section-heading">
+                <div>
+                  <h2 id="secret-title">Secret 隔离</h2>
+                  <p>前端仅显示引用状态</p>
+                </div>
+              </div>
+              <div class="secret-list" id="secret-list"></div>
+            </section>
+          </div>
+
+          <section class="content-section approval-section" aria-labelledby="approvals-title">
+            <div class="section-heading">
+              <div>
+                <h2 id="approvals-title">待处理审批</h2>
+                <p>决定与动作哈希绑定，超时默认拒绝</p>
+              </div>
+              <span class="status-label is-neutral" id="approval-summary">0 项待处理</span>
+            </div>
+            <div class="approval-list" id="approval-list" aria-live="polite"></div>
+          </section>
+
+          <section class="content-section diagnostics-section" aria-labelledby="diagnostics-title">
+            <div class="section-heading">
+              <div>
+                <h2 id="diagnostics-title">端点诊断</h2>
+                <p id="diagnostics-updated">尚未探测</p>
+              </div>
+              <div class="heading-actions">
+                <button class="button secondary" id="reload-runtime-button" type="button">
+                  <svg class="icon"><use href="#icon-refresh"></use></svg>
+                  重载策略
+                </button>
+                <button class="button secondary" id="run-diagnostics-button" type="button">
+                  <svg class="icon"><use href="#icon-refresh"></use></svg>
+                  重新检查
+                </button>
+              </div>
+            </div>
+            <div class="table-scroll">
+              <table class="data-table diagnostics-table">
+                <thead>
+                  <tr>
+                    <th>接口</th>
+                    <th>方法</th>
+                    <th>状态</th>
+                    <th>耗时</th>
+                    <th>结果</th>
+                  </tr>
+                </thead>
+                <tbody id="diagnostics-table-body"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="content-section log-section" aria-labelledby="diagnostic-log-title">
+            <div class="section-heading">
+              <div>
+                <h2 id="diagnostic-log-title">诊断日志</h2>
+                <p>仅显示脱敏后的控制面事件</p>
+              </div>
+              <button class="icon-button" id="copy-log-button" type="button" title="复制诊断日志" aria-label="复制诊断日志">
+                <svg class="icon"><use href="#icon-copy"></use></svg>
+              </button>
+            </div>
+            <pre class="diagnostic-log" id="diagnostic-log">等待控制面事件。</pre>
+          </section>
+        </section>
+        <section class="view" id="view-observability" data-view-panel="observability" aria-labelledby="observability-title" hidden>
+          <div class="page-heading compact-heading">
+            <div>
+              <p class="eyebrow">治理数据面</p>
+              <h1 id="observability-title">体系观测</h1>
+              <p>路由门命中、DELTA 发火账本、handoff 交接与双地落漂移——体系被看见的地方。</p>
+            </div>
+            <button class="button secondary" id="obs-refresh-button" type="button">
+              <svg class="icon"><use href="#icon-refresh"></use></svg>
+              刷新数据
+            </button>
+          </div>
+
+          <div class="metric-grid" aria-label="治理指标">
+            <article class="metric-card">
+              <span class="metric-label">路由门 · 近 7 天</span>
+              <strong class="metric-value" id="obs-routegate-count">--</strong>
+              <span class="metric-detail" id="obs-routegate-detail">等待读取</span>
+            </article>
+            <article class="metric-card">
+              <span class="metric-label">DELTA 账本</span>
+              <strong class="metric-value" id="obs-delta-count">--</strong>
+              <span class="metric-detail" id="obs-delta-detail">0=白发 / 1=补强 / 2=推翻</span>
+            </article>
+            <article class="metric-card">
+              <span class="metric-label">距上次外部发火</span>
+              <strong class="metric-value" id="obs-fire-days">--</strong>
+              <span class="metric-detail" id="obs-fire-detail">codex-to- / grok-to-</span>
+            </article>
+            <article class="metric-card">
+              <span class="metric-label">双地落漂移</span>
+              <strong class="metric-value metric-word" id="obs-drift-status">未检查</strong>
+              <span class="metric-detail"><button class="text-button" id="obs-drift-button" type="button">运行漂移检查</button></span>
+            </article>
+          </div>
+
+          <div class="overview-grid">
+            <section class="content-section" aria-labelledby="obs-routegate-title">
+              <div class="section-heading">
+                <div>
+                  <h2 id="obs-routegate-title">路由门最近命中</h2>
+                  <p>route-gate.log（RED = 必须发火信号）</p>
+                </div>
+              </div>
+              <div class="table-scroll">
+                <table class="data-table">
+                  <thead><tr><th>时间</th><th>判级</th><th>信号</th><th>请求摘要</th></tr></thead>
+                  <tbody id="obs-routegate-body"><tr><td colspan="4" class="subtle">正在读取…</td></tr></tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="content-section" aria-labelledby="obs-delta-title">
+              <div class="section-heading">
+                <div>
+                  <h2 id="obs-delta-title">DELTA 发火账本</h2>
+                  <p>decisions.md + handoff 双扫（stop-gate 同口径）</p>
+                </div>
+              </div>
+              <div class="table-scroll">
+                <table class="data-table">
+                  <thead><tr><th>发火对象</th><th>净增量</th><th>证据</th></tr></thead>
+                  <tbody id="obs-delta-body"><tr><td colspan="3" class="subtle">正在读取…</td></tr></tbody>
+                </table>
+              </div>
+            </section>
+          </div>
+
+          <section class="content-section" aria-labelledby="obs-drift-detail-title">
+            <div class="section-heading">
+              <div>
+                <h2 id="obs-drift-detail-title">双地落漂移明细</h2>
+                <p>仓库源 ↔ 运行时逐对核验（sync-runtime.ps1 同口径）</p>
+              </div>
+            </div>
+            <div class="table-scroll">
+              <table class="data-table">
+                <thead><tr><th>配对</th><th>状态</th></tr></thead>
+                <tbody id="obs-drift-body"><tr><td colspan="2" class="subtle">点击上方「运行漂移检查」后显示逐对结果。</td></tr></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="content-section" aria-labelledby="obs-handoff-title">
+            <div class="section-heading">
+              <div>
+                <h2 id="obs-handoff-title">Handoff 交接件</h2>
+                <p id="obs-handoff-meta">点击行查看内容</p>
+              </div>
+            </div>
+            <div class="table-scroll">
+              <table class="data-table">
+                <thead><tr><th>文件</th><th>方向</th><th>大小</th><th>时间</th></tr></thead>
+                <tbody id="obs-handoff-body"><tr><td colspan="4" class="subtle">正在读取…</td></tr></tbody>
+              </table>
+            </div>
+            <pre class="diagnostic-log" id="obs-handoff-content" hidden></pre>
+          </section>
+        </section>
+
+        <section class="view" id="view-sessions" data-view-panel="sessions" aria-labelledby="sessions-title" hidden>
+          <div class="page-heading compact-heading">
+            <div>
+              <p class="eyebrow">跨 CLI 统一视图</p>
+              <h1 id="sessions-title">会话聚合</h1>
+              <p>Claude Code / Codex / 对话桥 / Grok Build 的本地历史会话，一处速览。</p>
+            </div>
+            <div class="heading-actions">
+              <label class="check-control">
+                <input type="checkbox" id="sessions-summaries-toggle" />
+                <span>显示摘要（含脱敏，默认关闭）</span>
+              </label>
+              <button class="button secondary" id="sessions-refresh-button" type="button">
+                <svg class="icon"><use href="#icon-refresh"></use></svg>
+                重新扫描
+              </button>
+            </div>
+          </div>
+          <div id="sessions-groups"></div>
+        </section>
+      </main>
+
+      <nav class="mobile-nav" aria-label="移动端导航">
+        <button class="mobile-nav-item is-active" type="button" data-view="workbench" aria-current="page">
+          <svg class="icon"><use href="#icon-workbench"></use></svg><span>协作</span>
+        </button>
+        <button class="mobile-nav-item" type="button" data-view="overview">
+          <svg class="icon"><use href="#icon-overview"></use></svg><span>总览</span>
+        </button>
+        <button class="mobile-nav-item" type="button" data-view="observability">
+          <svg class="icon"><use href="#icon-pulse"></use></svg><span>观测</span>
+        </button>
+        <button class="mobile-nav-item" type="button" data-view="sessions">
+          <svg class="icon"><use href="#icon-sessions"></use></svg><span>会话</span>
+        </button>
+        <button class="mobile-nav-item" type="button" data-view="config">
+          <svg class="icon"><use href="#icon-config"></use></svg><span>配置</span>
+        </button>
+      </nav>
+    </div>
+
+    <dialog class="action-dialog" id="action-dialog" aria-labelledby="dialog-title">
+      <form method="dialog">
+        <div class="dialog-heading">
+          <div>
+            <span class="eyebrow" id="dialog-eyebrow">确认操作</span>
+            <h2 id="dialog-title">确认应用配置</h2>
+          </div>
+          <button class="icon-button" value="cancel" aria-label="关闭对话框" title="关闭">
+            <svg class="icon"><use href="#icon-close"></use></svg>
+          </button>
+        </div>
+        <div class="dialog-body" id="dialog-body"></div>
+        <div class="dialog-actions">
+          <button class="button secondary" value="cancel">取消</button>
+          <button class="button primary" id="dialog-confirm-button" value="default">确认</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="action-dialog" id="session-dialog" aria-labelledby="session-dialog-title">
+      <form id="session-form">
+        <div class="dialog-heading">
+          <div>
+            <span class="eyebrow">新会话</span>
+            <h2 id="session-dialog-title">选择项目地址</h2>
+          </div>
+          <button class="icon-button" id="session-close-button" type="button" aria-label="关闭对话框" title="关闭">
+            <svg class="icon"><use href="#icon-close"></use></svg>
+          </button>
+        </div>
+        <div class="dialog-body session-form-body">
+          <label class="field">
+            <span>项目地址（会话的工作目录，必填）</span>
+            <div class="cwd-input-row">
+              <input id="session-cwd-input" list="project-paths" autocomplete="off" required
+                placeholder="I:\某个项目目录（可从已有项目选择）" />
+              <button class="button secondary" id="session-browse-button" type="button">浏览…</button>
+            </div>
+            <datalist id="project-paths"></datalist>
+          </label>
+          <p class="session-cwd-hint" id="session-cwd-hint">输入或选择目录：匹配下方已有项目则会话归属它；新地址将在首轮后自动创建为新项目。</p>
+        </div>
+        <div class="dialog-actions">
+          <button class="button secondary" id="session-cancel-button" type="button">取消</button>
+          <button class="button primary" type="submit">开始新会话</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="action-dialog team-dialog" id="team-dialog" aria-labelledby="team-dialog-title">
+      <form id="team-form">
+        <div class="dialog-heading">
+          <div>
+            <span class="eyebrow" id="team-dialog-eyebrow">团队配置</span>
+            <h2 id="team-dialog-title">编辑团队</h2>
+          </div>
+          <div class="dialog-heading-actions">
+            <button class="text-button" id="team-new-button" type="button">新建团队</button>
+            <button class="icon-button" id="team-close-button" type="button" aria-label="关闭对话框" title="关闭">
+              <svg class="icon"><use href="#icon-close"></use></svg>
+            </button>
+          </div>
+        </div>
+        <div class="dialog-body team-form-body">
+          <p class="team-builtin-note" id="team-builtin-note" hidden>
+            514cc 是内置默认团队，配置冻结不可修改——可「另存为新团队」后自定义。
+          </p>
+          <label class="field">
+            <span>名称</span>
+            <input id="team-name-input" maxlength="60" autocomplete="off" required />
+          </label>
+          <label class="field">
+            <span>描述</span>
+            <textarea id="team-description-input" rows="2" maxlength="4000"></textarea>
+          </label>
+          <label class="field">
+            <span>团队提示词（注入主脑规划轮）</span>
+            <textarea id="team-prompt-input" rows="3" maxlength="4000" placeholder="该团队的协作风格、优先级与边界约束"></textarea>
+          </label>
+          <fieldset class="field team-members-field">
+            <legend>成员与主脑（会话入口由主脑决定，默认 Claude；claude-fable 席位不可移除）</legend>
+            <div id="team-members-list" class="team-members-list"></div>
+          </fieldset>
+          <label class="field">
+            <span>团队 Skill（逗号分隔，声明性——供主脑派工参考）</span>
+            <input id="team-skills-input" autocomplete="off" placeholder="co-review, co-research, vibe" />
+          </label>
+          <label class="field">
+            <span>团队 MCP（逗号分隔，声明性）</span>
+            <input id="team-mcp-input" autocomplete="off" placeholder="serena, playwright, exa" />
+          </label>
+        </div>
+        <div class="dialog-actions">
+          <button class="button danger" id="team-delete-button" type="button">删除团队</button>
+          <span class="dialog-actions-spacer"></span>
+          <button class="button secondary" id="team-cancel-button" type="button">取消</button>
+          <button class="button primary" id="team-save-button" type="submit">保存</button>
+        </div>
+      </form>
+    </dialog>
+
+    <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

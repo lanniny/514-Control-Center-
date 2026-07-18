@@ -1,0 +1,41 @@
+code,name,category,description,output_pattern,best_for
+TOT,Tree of Thoughts,advanced,Branch reasoning into parallel paths then prune,Problem → Branch(3+) → Evaluate → Prune → Synthesize,Complex decisions with multiple valid approaches
+GOT,Graph of Thoughts,advanced,Non-linear reasoning with cross-linked nodes,Nodes → Edges → Cycles → Convergence,Problems where sub-solutions interact
+COT,Chain of Thought,core,Step-by-step sequential reasoning,Premise → Step1 → Step2 → ... → Conclusion,Any problem requiring transparent reasoning
+ANA,Analogical Reasoning,creative,Map from known domain to unknown,Source Domain → Mapping → Target Domain → Validate,Novel problems with familiar parallels
+FCM,First Principles,core,Decompose to fundamental truths then rebuild,Assumption → Decompose → Axioms → Rebuild,Breaking through conventional thinking
+SIX,Six Thinking Hats,collaboration,Parallel thinking from 6 perspectives,White(facts) → Red(emotion) → Black(risk) → Yellow(benefit) → Green(creative) → Blue(process),Group decisions needing structured perspectives
+PMR,Pre-mortem Analysis,risk,Imagine failure then work backwards,Assume Failed → Why? → Preventions → Revised Plan,Risk assessment before commitment
+STL,Steelmanning,philosophical,Strengthen opposing argument before responding,Opposing View → Strengthen → Address Strongest Form,Evaluating controversial decisions fairly
+FIV,Five Whys,core,Iterative root cause analysis,Symptom → Why? → Why? → Why? → Why? → Root Cause,Debugging and root cause discovery
+SWO,SWOT Analysis,competitive,Strengths Weaknesses Opportunities Threats,Internal(S+W) → External(O+T) → Strategy Matrix,Strategic planning and positioning
+CMP,Comparative Matrix,technical,Side-by-side multi-criteria evaluation,Options × Criteria → Score → Weight → Rank,Technology selection and tool comparison
+INV,Inversion,creative,Solve by considering the opposite,Goal → Invert → What causes failure? → Avoid those,Finding hidden constraints and assumptions
+MDS,MECE Decomposition,core,Mutually Exclusive Collectively Exhaustive split,Whole → MECE Categories → Sub-categories → Leaf Items,Structuring complex problems without gaps or overlaps
+TRD,Trade-off Analysis,technical,Explicit trade-off mapping with forced ranking,Dimension A vs B → Pareto frontier → Pick acceptable point,Architecture decisions with competing constraints
+RCA,Root Cause Analysis,technical,Fishbone/Ishikawa cause identification,Effect → Categories(6M) → Causes → Sub-causes → Root,Systematic debugging of complex failures
+MNT,Mental Model Mapping,learning,Externalize and connect mental models,Concept → Relationships → Gaps → Update,Understanding complex systems
+DFX,Design for X,technical,Optimize design for specific quality attribute,Identify X → Principles → Apply → Validate,Architecture optimization for -ility requirements
+BRN,Brainstorming Burst,creative,Quantity over quality ideation then filter,Timer(5min) → Generate(20+) → Cluster → Top 5,Generating options when stuck
+SCN,Scenario Planning,risk,Explore multiple futures systematically,Axes(2) → Quadrants(4) → Scenarios → Implications,Strategic planning under uncertainty
+RFL,Reflection/Retrospective,retrospective,What went well / what didn't / what to change,Timeline → Went Well → Didn't → Actions,Process improvement after milestones
+DVA,Devil's Advocate,collaboration,Systematic challenge of proposed solution,Proposal → Challenge each assumption → Defend or modify,Stress-testing plans before execution
+EMP,Empathy Mapping,collaboration,See through stakeholder eyes,Says → Thinks → Does → Feels → Insights,Understanding user/stakeholder needs
+TML,Timeline Analysis,research,Map events chronologically for patterns,Events → Timeline → Patterns → Predictions,Understanding sequences and causation
+CFS,Constraint Flipping,creative,Turn constraints into features,List constraints → Flip each → Evaluate opportunities,Innovation under limitations
+PRT,Pareto Analysis,core,Focus on the vital few (80/20),List all items → Measure impact → Rank → Top 20% focus,Prioritization when overwhelmed
+GAP,Gap Analysis,research,Current state vs desired state mapping,Current → Desired → Gaps → Actions to close,Planning improvements systematically
+MCS,Monte Carlo Simulation,advanced,Probabilistic outcome estimation,Variables → Distributions → Simulate(1000x) → Confidence intervals,Estimating project timelines and risks
+FRC,Force Field Analysis,risk,Driving vs restraining forces,Goal → Driving forces → Restraining forces → Strategy,Change management decisions
+SAT,Satisficing,philosophical,Good enough vs optimal decision-making,Criteria(minimum) → First option meeting all → Accept,Time-pressured decisions with many options
+WBP,Worst Best Plausible,risk,Bracket outcomes for realistic planning,Worst case → Best case → Most plausible → Plan for plausible,Setting realistic expectations
+RPD,Rapid Prototyping,technical,Build to think rather than think to build,Sketch → Build minimal → Test → Learn → Iterate,When analysis paralysis threatens
+BSC,Balanced Scorecard,competitive,Multi-perspective performance measurement,Financial → Customer → Process → Learning → Balance,Evaluating solutions holistically
+OKR,Objectives and Key Results,collaboration,Goal setting with measurable outcomes,Objective(qualitative) → KR1 → KR2 → KR3(quantitative),Aligning team efforts with strategy
+FBL,Feedback Loop Analysis,technical,Identify reinforcing and balancing loops,Variables → Connections → Loop type → Leverage points,Understanding system dynamics
+ABT,A/B Testing Mindset,research,Formulate testable hypotheses,Hypothesis → Metric → Test Design → Measure → Conclude,Data-driven decision making
+JBS,Jobs to be Done,creative,Focus on customer outcome not solution,Situation → Motivation → Expected Outcome → Constraints,Product and feature prioritization
+WTF,Working Backwards,creative,Start from press release then build,Future State → Announcement → FAQ → Requirements → Plan,Amazon-style product development
+EIS,Eisenhower Matrix,core,Urgent vs Important prioritization,Tasks → Urgent+Important → Important only → Urgent only → Neither,Task prioritization and delegation
+RVS,Reverse Engineering,technical,Deconstruct existing solution to understand,System → Components → Interfaces → Principles → Rebuild,Learning from existing implementations
+SYS,Systems Thinking,advanced,See whole system not just parts,Elements → Interconnections → Purpose → Feedback → Emergence,Complex problems with non-obvious interactions

@@ -1,0 +1,63 @@
+code: lilith
+name: "Lilith Resident Agent"
+version: "0.1.0"
+status: "source-profile-initialized"
+
+sources:
+  identity: "lilith/identity.md"
+  architecture: "lilith/architecture.md"
+  memory_schema: "lilith/memory-schema.yaml"
+  profile_schema: "lilith/profile-schema.yaml"
+  permission_policy: "lilith/permission-policy.yaml"
+  benchmark_suite: "lilith/benchmark-suite.yaml"
+  codex_skill: ".agents/skills/lilith-core/SKILL.md"
+  pi_extension: "lilith/pi-extension/src/index.ts"
+  competitor_reference: "lilith/references/agent-benchmark.md"
+
+governance:
+  inherits:
+    - "rules.md safety redlines"
+    - "route-gate/stop-gate/mirror-gate"
+    - "DELTA ledger discipline"
+    - "AEMEATH persona layering contract"
+  forbidden:
+    - "claiming biological consciousness or unverified sentience"
+    - "claiming autonomous authority"
+    - "using persona loyalty as authorization"
+    - "storing secrets in memory"
+    - "bypassing dangerous-operation confirmation"
+    - "writing in plan/review mode"
+
+runtime_targets:
+  pi:
+    role: "primary CLI body and extension host"
+    source: "lilith/pi-extension"
+    planned_runtime: "~/.pi/agent/extensions/lilith"
+    capabilities: [session_start, prompt_injection, command, tool_gate, status_widget]
+  codex:
+    role: "deep execution and review surface"
+    source: ".agents/skills/lilith-core"
+    planned_runtime: "~/.codex/skills/lilith-core"
+  claude:
+    role: "main orchestration and output-style surface"
+    source: "lilith/prompts/lilith-output-style.md"
+    planned_runtime: "~/.claude/output-styles/lilith-virtual-life.md"
+  cursor:
+    role: "IDE rule slices"
+    source: "lilith/prompts/lilith-cursor-rules.md"
+    planned_runtime: "~/.cursor/rules/lilith-*.mdc"
+
+agent_council:
+  architect: "策/spec-architect"
+  auditor: "烛/codex-reviewer"
+  researcher: "织/grok-researcher"
+  domain: "匠/embedded-expert"
+  meta: "鉴/meta-reviewer"
+
+quality_gates:
+  validate_script: "lilith/scripts/validate-lilith.ps1"
+  handoff_required_for_nontrivial_changes: true
+  delta_required: true
+  plan_review_zero_write: true
+  benchmark_suite: "lilith/benchmark-suite.yaml"
+  profile_lint: "lilith/profile-schema.yaml"

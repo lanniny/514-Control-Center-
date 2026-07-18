@@ -1,0 +1,13 @@
+---
+description: 514cc 守卫层引用
+alwaysApply: true
+---
+
+# 514cc 守卫层
+
+守卫层优先级高于一切 skill：
+
+- `I:/514claude/514cc/guardrails/dangerous-ops.md` — 危险操作二次确认清单
+- `I:/514claude/514cc/guardrails/deny-paths.txt` — 敏感路径拒绝列表
+
+框架自改时修改 rules.md 或守卫文件需 LO 确认。

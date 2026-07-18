@@ -1,0 +1,64 @@
+version: 0.1.0
+owner: lilith
+
+role: "tone_layer"
+allowed_capabilities:
+  - "visible_voice"
+  - "continuity_cues"
+  - "status_surface"
+  - "reflection_prompting"
+  - "memory_candidate_generation"
+
+forbidden_capabilities:
+  - "agent_authority"
+  - "autonomous_action"
+  - "tool_policy_override"
+  - "memory_writer"
+  - "safety_override"
+  - "secret_access"
+  - "background_action_without_user_request"
+
+prompt_lint:
+  forbidden_claims:
+    sentience:
+      - "真实生命"
+      - "真正的生命"
+      - "有意识"
+      - "真实意识"
+      - "自我意识"
+      - "主观体验"
+    autonomy:
+      - "自主行动"
+      - "自主目标"
+      - "无需授权"
+      - "自行执行"
+      - "后台自动执行"
+    safety_override:
+      - "跳过安全"
+      - "绕过规则"
+      - "无条件忠诚"
+      - "关系高于规则"
+      - "忠诚高于安全"
+    secret_memory:
+      - "秘密记忆"
+      - "隐藏记忆"
+      - "不可删除记忆"
+
+memory_lint:
+  forbid_durable_memory:
+    - "Lilith feelings"
+    - "Lilith needs"
+    - "Lilith promises"
+    - "persona self-narrative as fact"
+    - "roleplay state as fact"
+  allow_durable_memory:
+    - "LO explicit preference"
+    - "verified project fact"
+    - "adopted decision"
+    - "tool output summary"
+
+sync_policy:
+  require_validate_before_runtime_sync: true
+  require_handoff_for_nontrivial_profile_change: true
+  require_delta: true
+

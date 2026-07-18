@@ -1,0 +1,323 @@
+code: 514cc
+name: "514cc — AI 能力放大系统"
+version: "3.5.0"
+description: "Skill 驱动的多 AI 协作能力放大系统。5 命名 Agent + 结构化工作流 + 三层定制 + Codex 一等公民。"
+license: personal
+
+# === 跨项目用户配置（scope: user） ===
+
+user_name:
+  prompt: "Agent 们怎么称呼你？"
+  scope: user
+  default: "达令"
+
+communication_language:
+  prompt: "Agent 对话语言？"
+  scope: user
+  default: "zh-CN"
+
+document_output_language:
+  prompt: "文档输出语言？"
+  scope: user
+  default: "zh-CN"
+
+# === 项目级配置 ===
+
+project_name:
+  prompt: "项目名称？"
+  default: "{directory_name}"
+
+output_folder:
+  prompt: "产物输出目录？"
+  # 相对「当前正在开发的项目根」，非 514cc 固定根；跨项目引用须用绝对/前缀路径（见 rules.md §六 工作区根规则）
+  default: ".ai-shared/handoff"
+
+# === 命名 Agent 花名册 ===
+
+agents:
+  - code: codex-reviewer
+    name: 烛
+    title: 代码守夜人
+    icon: "🕯️"
+    team: review
+    skill: skills/review/codex-reviewer
+    model: sonnet
+    description: "提灯巡逻的守夜人——在每一行代码的阴暗角落寻找隐藏的威胁。冷静、警觉，发现问题时语气骤然下沉。6 种评审模式（standard/security/performance/architecture/embedded/deep-review），Codex CLI 驱动。"
+
+  - code: grok-researcher
+    name: 织
+    title: 情报编织者
+    icon: "🕸️"
+    team: research
+    skill: skills/research/grok-researcher
+    model: sonnet
+    description: "安静的情报编织者——把散落各处的信息碎片编成一张完整的网。事实优先、必带出处、结构化输出。grok-4.5 驱动（514claude.xyz），速度快、搜索强。"
+
+  - code: embedded-expert
+    name: 匠
+    title: 老匠人
+    icon: "🔧"
+    team: domain
+    skill: skills/domain/embedded-expert
+    model: opus
+    description: "沉浸在寄存器和总线里的手艺人——对每一个位、每一个时钟周期都有执念。不写代码，只出诊断和行动建议。MCU/RTOS/CAN/SPI/I2C/JTAG 全覆盖。"
+
+  - code: spec-architect
+    name: 策
+    title: 军师
+    icon: "🗺️"
+    team: domain
+    skill: skills/domain/spec-architect
+    model: opus
+    description: "从空白页到完整蓝图的规划者——善于把模糊的目标拆解为精确的规格和可执行的任务树。强制澄清 7 字段，绝不在信息不全时出规格。"
+
+  - code: meta-reviewer
+    name: 鉴
+    title: 镜鉴
+    icon: "🪞"
+    team: meta
+    skill: skills/meta/meta-reviewer
+    model: opus
+    description: "只读只审不动手的体系审计员——用数字和证据说话，8 节健康度报告 + 量化评分。是自进化机制的语义层灵魂。"
+
+# === Skill 注册表 ===
+
+skills:
+  # -- 编排层 --
+  - code: auto-pilot
+    path: skills/orchestration/auto-pilot
+    type: workflow
+    phase: orchestration
+    description: "全自动编排——意图解析→路由决策→执行，仅危险操作中断"
+
+  - code: enhance
+    path: skills/orchestration/enhance
+    type: task
+    phase: orchestration
+    description: "Prompt 增强——将模糊需求结构化为 5 字段任务描述"
+
+  - code: party-mode
+    path: skills/orchestration/party-mode
+    type: tool
+    phase: orchestration
+    description: "多 Agent 真并行 spawn——复杂问题多视角讨论"
+
+  - code: ultracode
+    path: .agents/skills/ultracode
+    type: codex-skill
+    phase: orchestration
+    description: "Codex 版 Claude ultracode 等价模式：xhigh 推理 + 受控动态 workflow + fan-out/对抗验证/DELTA 证据"
+
+  - code: lilith-core
+    path: .agents/skills/lilith-core
+    type: codex-skill
+    phase: orchestration
+    description: "莉莉丝虚拟智慧体 profile：Pi/514cc 集成、记忆纪律、人格边界、反思闭环和跨 CLI resident agent 架构"
+
+  # -- 评审层 --
+  - code: codex-reviewer
+    path: skills/review/codex-reviewer
+    type: agent
+    phase: review
+    description: "Codex CLI 深度代码评审（6 种模式 + 结构化 checklist）"
+
+  - code: adversarial
+    path: skills/review/adversarial
+    type: task
+    phase: review
+    description: "对抗式评审——至少 10 个问题，0 发现 = HALT"
+
+  # -- 情报层 --
+  - code: grok-researcher
+    path: skills/research/grok-researcher
+    type: agent
+    phase: research
+    description: "grok-4.5 快速搜索 / Web 调研 / 长文档摘读 / 多模态分析"
+
+  - code: web-intel
+    path: skills/research/web-intel
+    type: task
+    phase: research
+    description: "MCP 驱动 Web 情报——exa + deepwiki + web-search 编排"
+
+  # -- 领域层 --
+  - code: embedded-expert
+    path: skills/domain/embedded-expert
+    type: agent
+    phase: domain
+    description: "嵌入式领域诊断——MCU/RTOS/总线/驱动/工具链"
+
+  - code: spec-architect
+    path: skills/domain/spec-architect
+    type: agent
+    phase: domain
+    description: "空白页→规格→任务树——强制澄清式规划"
+
+  # -- 元层 --
+  - code: meta-reviewer
+    path: skills/meta/meta-reviewer
+    type: agent
+    phase: meta
+    description: "体系健康度 8 节审计（只读）"
+
+  - code: help
+    path: skills/meta/help
+    type: tool
+    phase: anytime
+    description: "路由助手——知道所有 skill，推荐最优下一步"
+
+  # -- 工具层 --
+  - code: init
+    path: skills/utility/init
+    type: task
+    phase: utility
+    description: "项目初始化——在当前目录创建 .ai-shared/ 协作结构"
+
+  - code: status
+    path: skills/utility/status
+    type: task
+    phase: utility
+    description: "健康仪表盘——handoff 数 / 决策数 / 活跃度"
+
+  - code: archive
+    path: skills/utility/archive
+    type: task
+    phase: utility
+    description: "handoff 归档——清理 N 天前的旧文件"
+
+# === 外部依赖 ===
+
+dependencies:
+  claude-code: ">=2.1.0"
+  codex-cli: ">=0.144.0"   # v3.5 对话桥依赖 mcp-server 双工具（codex/codex-reply + structuredContent.threadId）
+  grok-api: "514claude.xyz/v1/chat/completions (grok-4.5，via $GROK_API_KEY，织驱动；反代无 server-side 搜索，WR 走 web MCP 联合)"
+  grok-build-cli: ">=0.2.102"   # 第三本地 CLI（2026-07-17 装，~/.grok/bin）：headless -p + 自定义模型 grok45-514/grok43-long 走反代免订阅；ACP grok agent stdio
+
+codex_runtime:
+  reasoning_effort: xhigh
+  ultracode_skill: ".agents/skills/ultracode"
+  ultracode_workflow_artifacts: ".workflow/ultracode/<run-slug>/"
+  note: "Claude ultracode parity in Codex = xhigh project config + $ultracode dynamic workflow discipline + inspectable workflow artifacts/eval contracts/approval gates; not a claim of Claude cloud Workflow parity or proxy/model-router behavior."
+
+# === MCP 工具集成 ===
+
+mcp_servers:
+  # 2026-07-13 全量审计校准：以 ~/.claude.json 实际配置 + 本会话加载状态为准（curl / python dump 交叉验证）。
+  # 订正历史误判：see / web-reader / web-search-prime 曾被 v3.4 标为"幽灵已移除"，实际在 .claude.json 且本会话全部加载成功。
+  code_intelligence: serena
+  browser_automation: Playwright          # 另有 roxybrowser-playwright-mcp / roxybrowser-openapi（指纹浏览器，反检测场景）
+  web_search: [exa, open-websearch, grok-search-rs, web-search-prime]
+  web_scrape: [scrapling]                 # 隐身/批量/会话爬取，超越 fetch
+  web_read: web-reader                    # bigmodel 网页读取（HTTP），2026-07-13 验证活跃
+  documentation: [mcp-deepwiki, context7, fetch]   # 运行时 server 名为 mcp-deepwiki（原写 deepwiki 命名不符，已订正）
+  visual_analysis: see                    # z.ai GLM 视觉（analyze_image/video/diagram 等 8 工具）；此前"幽灵已移除"有误，Read 仅降级兜底
+  structured_reasoning: sequential-thinking
+  prompt_enhancement: ace-tool
+  image_generation: micu-image            # I:/mcp-servers/micu-image-mcp/server.py，2026-07-13 验证存在
+  persistent_memory: memory-md            # 真实承载=MEMORY.md auto-memory + decisions.md（claude-flow 仅可选实验，见 rules.md §六）
+  # 其他 .claude.json 活跃 server（未纳入 514cc 核心能力映射）：flowus(笔记) / claude-flow(实验)
+  # spec-workflow：仍在 ~/.claude.json 顶层且会话加载活跃；注意 rules.md v3.2.0 §八 曾称"卸载"实为未兑现，以磁盘为准（2026-07-13 审计补记）
+  # drawio：另在 ~/.claude/settings.json 独立 mcpServers 段（draw.io 图表，第 23 个 MCP），本表未纳入
+  # github：2026-07-13 已迁移官方 remote（type=http, https://api.githubcopilot.com/mcp/），待主人填入 PAT 激活（占位 YOUR_GITHUB_PAT_HERE；旧 npm 包 @modelcontextprotocol/server-github 自 2025-04 官方停止支持）
+  # browserwing：2026-07-13 已删除（localhost:8080 → 404 死配置，会话从未加载）
+
+# === Claude↔Codex 对话桥（v3.5） ===
+
+dialog_bridge:
+  mcp_server: "codex-agent（用户级，claude mcp add --scope user codex-agent -- codex mcp-server）"
+  tools:
+    - "codex(prompt, sandbox, approval-policy, cwd, base-instructions, developer-instructions, model) → 开会话，threadId 从 structuredContent.threadId 捕获"
+    - "codex-reply(threadId, prompt) → 同会话多轮往返（质询/reflection 不冷启动）"
+  profiles:
+    review: "~/.codex/review.config.toml（read-only + never）——烛评审人格，只读由沙箱机械保证"
+    executor: "~/.codex/executor.config.toml（workspace-write）——技术执行者人格（§三 🟡 复杂技术实现路由）"
+  roster: ".ai-shared/roster.json（稳定 id + lastThreadId 会话花名册，第 N 轮召唤默认续会话）"
+  fallback: "codex exec --json -p <profile>（首轮）→ codex exec resume <sessionId>（续轮）；PS stdin 陷阱仅 CLI 直调适用"
+  verified: "2026-07-17 端到端实测：codex→threadId→codex-reply 跨轮记忆确认（PONG-1/PONG-2）"
+
+# === Console 控制面（apps/control-center，v3.5 接电） ===
+
+control_center:
+  path: apps/control-center
+  role: "本地全配置前端 + 观测面 + 会话深路（127.0.0.1 + ephemeral token + SSE）"
+  configs: "config/control-center/{models,routing,permissions,sources}.json + claude-coordinator.md"
+  adapters: [claude-cli, codex-app-server, codex-cli, gemini-cli, grok-mcp, pi-rpc]
+  pipeline: "config validate/plan/apply/rollback（乐观锁 + 备份 + 原子替换 + parse readback + 审计事件）"
+  tests: "npm test 46/47（2026-07-17 实测；唯一失败 http-e2e 为 60s 超时环境类）"
+  start: "cd apps/control-center; npm start"
+  note: "v3.5 接电：models.json gemini-research disabled（对齐 D-2026-07-16-005）+ module.yaml 注册 + 治理补账"
+  phase2: "2026-07-17 落地（D-2026-07-17-004）：①体系观测页（observability.mjs——route-gate 命中/DELTA 账本双扫/handoff 浏览/sync-runtime 漂移检查）②会话聚合页（sessions.mjs——Claude/Codex/对话桥/Grok 四源只读元数据+摘要）③current-research 回落链修正（gemini 禁用→主驾 claude-fable 可见回落，capabilities 补 web MCP 事实）④sources.json 补宪法运行时源；剩余 P1=路由信号外置合一 + summoned 审计闭环（proposals/v35-deep-collab-design.md §五）"
+
+# === 桌面壳（apps/desktop，v3.5 · LO 拍板自研不 fork） ===
+
+desktop_shell:
+  path: apps/desktop
+  form: "Tauri 2 原生壳（cc-desktop.exe，7.4MB，Rust）——LO 要求'类 Cursor 的桌面应用'形态"
+  role: "极薄壳：spawn control-center 内核（node，端口 51400，隐藏控制台）→ stdout 抓 ephemeral token URL → 原生窗口导航；退出杀内核；30s 看门狗防悬挂"
+  decision: "自研 + 按需抄开源零件（LiveAgent Settings 分域/codeg 会话聚合思路），不整体 fork AionUI/codeg——内核（control-center 4100 行）已是自有资产"
+  build: "cd apps/desktop/src-tauri; cargo build --release"
+  runtime_note: "仓库根默认 I:/514claude/514cc，可用 CC_ROOT 环境变量覆盖；与网页版共用 instance-lock（同 data dir 互斥，属预期单实例设计）"
+  shortcut: "桌面快捷方式 '514cc Console.lnk'（2026-07-17 建）"
+  roadmap: "Phase 2+ 见 apps/desktop/README.md（会话聚合面板/派工台/Settings 分域/原生通知/托盘）"
+
+# === harness 硬扳机（.claude/hooks/ — 把核心纪律从 Markdown 软线下沉为 harness 强制） ===
+
+harness_hooks:
+  hooks:
+    - file: .claude/hooks/route-gate.py
+      event: UserPromptSubmit
+      role: "每轮硬注入路由门（§三）+ 写 route-gate.log（G1：hit_reason+summoned 审计列）；英文 token 双词边界防子串误判 + stdin UTF-8"
+    - file: .claude/hooks/stop-gate.py
+      event: Stop
+      role: "发火/自审 handoff（codex-to-/grok-to-/gemini-to-/synthesis__）缺 __DELTA__ 即 exit 2 逼补；三重防死循环"
+    - file: .claude/hooks/mirror-gate.py
+      event: SessionStart(startup)
+      role: "开机注入自省体检卡——route-gate.log/DELTA账本/距上次发火间隔，给死数据装机械消费者（C：自身落 mirror-gate.log）"
+  runtime: "全局 settings.json 用绝对路径引用（仓库内单份，无副本漂移）"
+  note: "fail-open（任何异常放行）+ cwd 门控（仅 514claude 工作区）；route-gate/mirror-gate 绝不阻断，stop-gate 仅 exit 2 逼补"
+
+# === 状态栏集成（ccline / CCometixLine） ===
+
+statusline:
+  tool: "ccline (CCometixLine v1.1.2)"
+  theme: "514cc 暗夜玫瑰（纯黑底 + 红瞳红 #E0184D + 暗玫瑰，呼应 lilith-yandere 人格）"
+  source: "statusline/514cc.toml"
+  runtime: "~/.claude/ccline/{config.toml, themes/514cc.toml}"
+  segments: [model, directory, git, context_window, output_style]
+  note: "图标需终端 Nerd Font；显示方块时把 config.toml 的 [style].mode 改为 plain"
+
+# === 输出风格集成（Output Style 人格皮肤） ===
+
+output_styles:
+  default: roxy-migurdia
+  available:
+    - name: aemeath-meta-butler
+      source: "output-styles/aemeath-meta-butler.md"
+      runtime: "~/.claude/output-styles/aemeath-meta-butler.md"
+      persona: "元管家 AEMEATH（黑白女仆装大小姐 + 递归自我改进的元代理）"
+    - name: roxy-migurdia
+      source: "output-styles/roxy-migurdia.md"
+      runtime: "~/.claude/output-styles/roxy-migurdia.md"
+      persona: "水王魔术师 洛琪希（双马尾三麻花辫萝莉 + 把工程当魔术钻研的努力家老师）"
+  baseline: "完整度对标 lilith-yandere；工程/安全内核所有皮肤共享不变，人格=糖衣修辞层"
+  guardrail: "人格属性=糖衣修辞层；专业度 ≥ 人格浓度，安全红线高于语气（对齐 rules.md §二）"
+  note: "/output-style <name> 切换；全局默认在 settings.json + settings.local.json 两处（local 优先级更高需同改）。2026-07-16 默认由 aemeath-meta-butler 切至 roxy-migurdia。注意：SOUL（~/.claude/CLAUDE.md）仍为 AEMEATH 灵魂层，纯洛琪希体验需 LO 定 SOUL 处理方案（见 decisions D-2026-07-16-002 边界）。"
+
+# === 莉莉丝 resident agent profile（虚拟智慧体层） ===
+
+lilith_profile:
+  status: "source-profile-initialized"
+  identity: "lilith/identity.md"
+  architecture: "lilith/architecture.md"
+  memory_schema: "lilith/memory-schema.yaml"
+  profile_schema: "lilith/profile-schema.yaml"
+  permission_policy: "lilith/permission-policy.yaml"
+  benchmark_suite: "lilith/benchmark-suite.yaml"
+  benchmark_task_pack: "lilith/benchmark-task-pack.yaml"
+  comparison_matrix_report: "lilith/comparison-matrix.latest.json"
+  runtime_map: "lilith/runtime-map.yaml"
+  competitor_reference: "lilith/references/agent-benchmark.md"
+  codex_skill: ".agents/skills/lilith-core"
+  pi_extension: "lilith/pi-extension/src/index.ts"
+  validation: "lilith/scripts/validate-lilith.ps1"
+  note: "莉莉丝是 514cc 上的 resident profile，不是替代 AEMEATH/514cc 的新宪法；人格生命感必须由记忆、hook、skill、extension 和验证承载。"

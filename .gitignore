@@ -1,0 +1,27 @@
+.ace-tool/
+.ai-shared/control-center/
+apps/control-center/.control-center-token
+
+# 构建产物与依赖
+node_modules/
+apps/desktop/src-tauri/target/
+apps/desktop/dist/
+
+# 本地工具状态与缓存
+.serena/
+.spec-workflow/
+.workflow/
+.playwright-mcp/
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+
+# 运行时备份与测试残留
+.ai-shared/backups/
+apps/control-center/.qa-output/
+apps/control-center/.test-*/
+*.log
+
+# 根级临时验证截图
+/*.png
+.ai-shared/tmp/
+__pycache__/

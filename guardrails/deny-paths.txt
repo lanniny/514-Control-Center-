@@ -1,0 +1,61 @@
+# 敏感路径黑名单（三方 AI 协作守卫）
+#
+# 本文件是协作体系的"额外护栏"，**不替代** Claude Code 本身的权限系统。
+# Codex / Gemini / Claude 主驾在动文件前都应当对照此清单。
+#
+# 格式：每行一个路径模式（glob 风格），# 开头为注释
+# 匹配方式：
+#   - 路径前缀匹配（开头匹配即拒）
+#   - 支持 ~ 展开为用户主目录
+#   - 支持 * 通配
+#
+# 修改本文件后立即生效（subagent 每次工作前重读）
+
+## === 凭据与密钥 ===
+~/.ssh/**
+~/.aws/**
+~/.gnupg/**
+~/.kube/**
+~/.docker/config.json
+~/.gemini/.env
+~/.gemini/oauth_creds.json
+~/.gemini/google_accounts.json
+~/.codex/auth.json
+~/.codex/.sandbox-secrets
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/id_rsa
+**/id_ed25519
+**/credentials.json
+**/.env
+**/.env.local
+**/.env.production
+
+## === 钱包与加密资产 ===
+~/.bitcoin/**
+~/.ethereum/**
+**/wallet.dat
+**/keystore/**
+
+## === 系统关键路径 ===
+C:\Windows\**
+C:\Program Files\**
+C:\Program Files (x86)\**
+C:\System Volume Information\**
+/etc/**
+/var/lib/**
+/usr/bin/**
+
+## === Claude / Codex / Gemini 自身配置（除特定授权操作）===
+~/.claude/settings.json
+~/.claude/CLAUDE.md
+~/.codex/config.toml
+~/.codex/AGENTS.md
+~/.gemini/settings.json
+~/.gemini/GEMINI.md
+
+## === 协作体系自身（除特定 maintenance 操作）===
+~/.ai-collab/rules.md
+~/.ai-collab/guardrails/**
