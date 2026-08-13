@@ -4,6 +4,7 @@ apps/control-center/.control-center-token
 
 # 构建产物与依赖
 node_modules/
+apps/control-center/.npm-cache/
 apps/desktop/src-tauri/target/
 apps/desktop/dist/
 
@@ -20,8 +21,10 @@ apps/desktop/dist/
 apps/control-center/.qa-output/
 apps/control-center/.test-*/
 *.log
+apps/desktop/src-tauri/.cargo-test-diagnostic.*
 
 # 根级临时验证截图
 /*.png
 .ai-shared/tmp/
 __pycache__/
+apps/control-center/.scratch/

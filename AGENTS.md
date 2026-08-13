@@ -5,7 +5,7 @@
 ## 项目概览
 
 - **工作目录**：`I:/514claude/514cc`
-- **版本**：v3.4.3
+- **版本**：v3.5.0
 - **定位**：Skill 驱动的多 AI 协作能力放大系统
 - **Codex 身份**：烛 / 深推理执行官 / 评审官；在 Codex app/CLI 中也要继承 514cc 的证据链、handoff、DELTA 账本纪律。
 
@@ -99,9 +99,19 @@ Codex 产物落点默认：
 
 `./.ai-shared/handoff/codex-to-claude__{topic}__{YYYYMMDD-HHmm}.md`
 
+handoff 无 YAML frontmatter 时，文件首行必须逐字复制本轮 route-gate 注入的 session
+marker；存在合法 YAML frontmatter 时，marker 必须紧随 closing `---`。不得猜测
+session id，也不得保留占位符。可替换模板：
+
+`<!-- 514cc-session-id: {session_id_from_route_gate} -->`
+
 评审类输出必须固定四节：`致命问题 / 建议改进 / 可保留 / 总评`，并引用文件 + 行号。涉及 514cc 自改的非平凡变更，handoff 末尾追加：
 
-`__DELTA__: 烛(Codex) | 0白发/1补强/2推翻主驾判断 | 证据(file:line 或被推翻判断)`
+可复制示例：
+
+`__DELTA__: 烛(Codex) | 1 | 证据：path/to/file:42 补强了边界检查`
+
+实际产出必须按事实只选择一个分数：`0` = 白发（独立检查无新增发现），`1` = 补强，`2` = 推翻主驾判断；不得把 `0/1/2` 当作字面值写入。
 
 ## Cursor 配置
 

@@ -13,7 +13,8 @@ memories = true
 multi_agent = true
 
 [agents]
-max_threads = 6
+# Four open threads keep useful fan-out while bounding duplicated model/MCP/process state.
+max_threads = 4
 max_depth = 1
 job_max_runtime_seconds = 1800
 
@@ -70,6 +71,12 @@ args = ["I:\\514claude\\514cc\\scripts\\grok_search_chat_compat.mjs"]
 env_vars = ["GROK_SEARCH_RS_COMPAT_API_URL", "GROK_SEARCH_RS_COMPAT_API_KEY", "GROK_SEARCH_RS_COMPAT_MODEL"]
 startup_timeout_sec = 30
 tool_timeout_sec = 120
+
+[mcp_servers.grok-search-rs.tools.web_search]
+approval_mode = "approve"
+
+[mcp_servers.grok-search-rs.tools.web_fetch]
+approval_mode = "approve"
 
 [mcp_servers.serena]
 command = "serena"

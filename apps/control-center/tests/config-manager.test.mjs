@@ -76,6 +76,40 @@ test("registry paths cannot escape repository root", async (t) => {
   await assert.rejects(() => new ConfigManager({ repoRoot, dataRoot: resolve(repoRoot, ".data"), registryPath, eventStore: { emit: async () => {} } }).init(), { code: "PATH_BOUNDARY" });
 });
 
+test("sourceIdForPath matches only exact absolute paths with host case semantics", async (t) => {
+  const root = await mkdtemp(resolve(appRoot, ".test-source-id-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repoRoot = resolve(root, "repo");
+  const repoPath = resolve(repoRoot, ".codex/config.toml");
+  const runtimePath = resolve(root, "home/.codex/config.toml");
+  await mkdir(resolve(repoRoot, ".codex"), { recursive: true });
+  await mkdir(resolve(root, "home/.codex"), { recursive: true });
+  await writeFile(repoPath, "model = \"repo\"\n");
+  await writeFile(runtimePath, "model = \"runtime\"\n");
+  const registryPath = resolve(root, "sources.json");
+  await writeFile(registryPath, JSON.stringify({
+    version: 1,
+    explicit: [{ id: "core.codex-config", path: ".codex/config.toml", label: "Repo Codex", kind: "toml", scope: "repo" }],
+    discover: [],
+    runtime: [{ id: "runtime.codex-config", path: runtimePath, label: "Runtime Codex", kind: "toml", scope: "runtime" }],
+  }));
+  const manager = await new ConfigManager({
+    repoRoot,
+    dataRoot: resolve(repoRoot, ".data"),
+    registryPath,
+    eventStore: { emit: async () => {} },
+  }).init();
+
+  assert.equal(manager.sourceIdForPath(repoPath), "core.codex-config");
+  assert.equal(manager.sourceIdForPath(runtimePath), "runtime.codex-config");
+  assert.equal(manager.sourceIdForPath(".codex/config.toml"), null, "relative suffixes are not identities");
+  assert.equal(manager.sourceIdForPath(resolve(root, "other/.codex/config.toml")), null, "same suffix must not match");
+  assert.equal(manager.sourceIdForPath(runtimePath.toUpperCase()), process.platform === "win32" ? "runtime.codex-config" : null);
+  if (process.platform === "win32") {
+    assert.equal(manager.sourceIdForPath(runtimePath.replaceAll("\\", "/")), "runtime.codex-config");
+  }
+});
+
 test("concurrent applies on the same base serialize and one fails stale", async (t) => {
   const fx = await fixture();
   t.after(() => rm(fx.root, { recursive: true, force: true }));
@@ -217,6 +251,65 @@ test("post-commit activation is reported without turning a committed write into 
   });
   assert.equal(result.activation.status, "reloaded");
   assert.equal(result.activation.generation, 2);
+});
+
+test("commit guards span file write and live activation before releasing", async (t) => {
+  const fx = await fixture();
+  t.after(() => rm(fx.root, { recursive: true, force: true }));
+  const releases = [];
+  let released = false;
+  fx.manager.beforeCommit = async () => ({
+    release: async (context) => {
+      released = true;
+      releases.push(context);
+    },
+  });
+  fx.manager.onCommitted = async () => {
+    assert.equal(released, false, "catalog transition guard must remain held through activation");
+    return { status: "restart-required", reason: "busy" };
+  };
+  const initial = await fx.manager.read("test.settings");
+  const candidate = '{"enabled":false}\n';
+  const plan = await fx.manager.plan("test.settings", candidate, initial.sha256);
+  const result = await fx.manager.apply("test.settings", {
+    content: candidate,
+    baseSha256: initial.sha256,
+    planId: plan.planId,
+    confirmation: "test.settings",
+  });
+  assert.equal(result.activation.status, "restart-required");
+  assert.equal(released, true);
+  assert.deepEqual(releases, [{ committed: true, activation: result.activation }]);
+});
+
+test("commit guards release on plan mismatch and no-op transactions", async (t) => {
+  const fx = await fixture();
+  t.after(() => rm(fx.root, { recursive: true, force: true }));
+  const releases = [];
+  fx.manager.beforeCommit = async () => ({ release: async (context) => releases.push(context) });
+  const initial = await fx.manager.read("test.settings");
+  const changedPlan = await fx.manager.plan("test.settings", '{"enabled":false}\n', initial.sha256);
+  await assert.rejects(
+    () => fx.manager.apply("test.settings", {
+      content: '{"enabled":false,"mismatch":true}\n',
+      baseSha256: initial.sha256,
+      planId: changedPlan.planId,
+      confirmation: "test.settings",
+    }),
+    { code: "PLAN_MISMATCH" },
+  );
+  const noOpPlan = await fx.manager.plan("test.settings", initial.content, initial.sha256);
+  const noOp = await fx.manager.apply("test.settings", {
+    content: initial.content,
+    baseSha256: initial.sha256,
+    planId: noOpPlan.planId,
+    confirmation: "test.settings",
+  });
+  assert.equal(noOp.changed, false);
+  assert.deepEqual(releases, [
+    { committed: false, activation: null },
+    { committed: false, activation: null },
+  ]);
 });
 
 test("versionContent returns the exact stored text for rollback preview", async (t) => {

@@ -2,8 +2,44 @@ import { randomUUID } from "node:crypto";
 import { runProcess } from "../process-runner.mjs";
 import { createLfCollector, publicClaudeEvent } from "./stream-utils.mjs";
 
+export function buildClaudeArgs({
+  sessionId = null,
+  nativeSessionId,
+  requestedModel,
+  permissionMode = "plan",
+  maxBudgetUsd = 2,
+  effort = null,
+  settingsFile = null,
+  systemPromptFile = null,
+}) {
+  const nativePermissionMode = permissionMode === "workspace-write" ? "acceptEdits" : "plan";
+  const args = [
+    "-p",
+    "--strict-mcp-config",
+    "--disable-slash-commands",
+    "--no-chrome",
+    "--output-format",
+    "stream-json",
+    "--verbose",
+    "--permission-mode",
+    nativePermissionMode,
+    "--max-budget-usd",
+    String(maxBudgetUsd),
+  ];
+  const model = typeof requestedModel === "string" ? requestedModel.trim() : "";
+  if (model) args.push("--model", model);
+  if (effort) args.push("--effort", effort);
+  if (settingsFile) args.push("--settings", settingsFile);
+  if (systemPromptFile) args.push("--system-prompt-file", systemPromptFile);
+  if (sessionId) args.push("--resume", sessionId);
+  else args.push("--session-id", nativeSessionId);
+  return args;
+}
+
 export class ClaudeCliAdapter {
-  constructor({ command = "claude", model = "fable", systemPromptFile = null, settingsFile = null, eventStore, cwd }) {
+  supportsPerTurnCwd = true; // 每 turn spawn，cwd 参数真实生效——worktree 隔离可托付（烛 v3.6 致命7）
+
+  constructor({ command = "claude", model = "fable", systemPromptFile = null, settingsFile = null, eventStore, cwd, runProcessImpl = runProcess }) {
     this.id = "claude-stream-json";
     this.command = command;
     this.model = model;
@@ -11,41 +47,40 @@ export class ClaudeCliAdapter {
     this.settingsFile = settingsFile;
     this.eventStore = eventStore;
     this.cwd = cwd;
+    this.runProcessImpl = runProcessImpl; // v41：远程 run 注入 SSH 桥（默认本机 runProcess）
   }
 
-  async send({ sessionId, prompt, runId, signal, permissionMode = "plan", maxBudgetUsd = 2, timeoutMs = 15 * 60_000, model = null, effort = null, cwd = null, onSessionStarted, onTurnSubmitting }) {
+  // 异构 resume 契约：只声明本 provider 的原生恢复命令，禁止跨 CLI 静默 resume
+  canResume(sessionId) {
+    return Boolean(sessionId);
+  }
+
+  resumeCommand(sessionId) {
+    return sessionId ? `claude -r ${sessionId}` : null;
+  }
+
+  async send({ sessionId, prompt, runId, agentId = "claude-fable", signal, permissionMode = "plan", maxBudgetUsd = 2, timeoutMs = 15 * 60_000, model = null, effort = null, cwd = null, onSessionStarted, onTurnSubmitting }) {
     const nativeSessionId = sessionId || randomUUID();
     const clientUserMessageId = randomUUID();
     const effectiveRequestedModel = model || this.model; // /model 会话级覆盖（orchestrator 已白名单校验）
     const effectiveCwd = cwd || this.cwd; // 会话项目地址：CLI 在此目录跑，原生会话自动归属对应项目
-    // 真实 CLI 对话：不再禁用工具（--tools ""），主脑像正常 claude CLI 一样读文件/跑命令。
+    // 真实 CLI 对话：不再禁用工具（--tools ""）；运行席位按当前 permissionMode 使用实际 CLI 工具能力。
     // 权限走 CLI 原生模式：plan/read-only=只读探索；workspace-write（经审批的 build 轮）=acceptEdits。
     // 保留 --strict-mcp-config：headless 下用户级 MCP 无法交互认证，加载即挂起（明示的能力边界）。
     // 不用 --bare：它把认证限死为 ANTHROPIC_API_KEY（OAuth/keychain 永不读取），登录态用户必然
     // "Not logged in"。hooks 隔离改由 settingsFile 的 disableAllHooks 承担——OAuth 可用 + 全局
     // route/stop/mirror-gate 不注入子进程（2026-07-18 双向实测：无 --bare 登录态直接可用；
     // disableAllHooks 后体检卡不再混入输出）。
-    const nativePermissionMode = permissionMode === "workspace-write" ? "acceptEdits" : "plan";
-    const args = [
-      "-p",
-      "--strict-mcp-config",
-      "--disable-slash-commands",
-      "--no-chrome",
-      "--model",
-      effectiveRequestedModel,
-      "--output-format",
-      "stream-json",
-      "--verbose",
-      "--permission-mode",
-      nativePermissionMode,
-      "--max-budget-usd",
-      String(maxBudgetUsd),
-    ];
-    if (effort) args.push("--effort", effort); // /effort 会话级覆盖（orchestrator 已白名单五档校验，含 ultracode）
-    if (this.settingsFile) args.push("--settings", this.settingsFile);
-    if (this.systemPromptFile) args.push("--system-prompt-file", this.systemPromptFile);
-    if (sessionId) args.push("--resume", sessionId);
-    else args.push("--session-id", nativeSessionId);
+    const args = buildClaudeArgs({
+      sessionId,
+      nativeSessionId,
+      requestedModel: effectiveRequestedModel,
+      permissionMode,
+      maxBudgetUsd,
+      effort,
+      settingsFile: this.settingsFile,
+      systemPromptFile: this.systemPromptFile,
+    });
 
     let finalText = "";
     let resolvedSessionId = nativeSessionId;
@@ -81,15 +116,15 @@ export class ClaudeCliAdapter {
           this.eventStore.emit(normalized.type, normalized, {
             runId,
             sessionId: resolvedSessionId,
-            agentId: "claude-fable",
+            agentId,
           }),
         );
       },
-      (error) => pendingEvents.push(this.eventStore.emit("adapter.parse_error", { adapter: this.id, message: error.message }, { runId, agentId: "claude-fable" })),
+      (error) => pendingEvents.push(this.eventStore.emit("adapter.parse_error", { adapter: this.id, message: error.message }, { runId, agentId })),
     );
     await onSessionStarted?.({ sessionId: nativeSessionId, protocol: "stream-json-resume" });
     await onTurnSubmitting?.({ sessionId: nativeSessionId, protocol: "stream-json-resume", clientUserMessageId });
-    const result = await runProcess(this.command, args, {
+    const result = await this.runProcessImpl(this.command, args, {
       cwd: effectiveCwd,
       input: prompt,
       timeoutMs,

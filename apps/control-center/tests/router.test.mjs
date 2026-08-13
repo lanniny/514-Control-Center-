@@ -37,18 +37,26 @@ test("high-risk routing requires a healthy cross-provider verifier", async () =>
   const router = new ModelRouter({ profiles: models.profiles, policy, healthService: health() });
   const route = await router.preview({ taskType: "coding", prompt: "实现配置事务", risk: "high" });
   assert.equal(route.selected.id, "codex-technical");
-  assert.equal(route.independent.id, "claude-fable");
   assert.equal(route.independentRequired, true);
+  // 复核席位随席位表与路由权重浮动（当前为 swift-responder）——
+  // 不变量：必须存在、非主路、且供应商与主路不同（mustDifferFromPrimary）。
+  assert.ok(route.independent, "高风险路由必须带独立复核席位");
+  assert.notEqual(route.independent.id, route.selected.id);
+  const byId = new Map(models.profiles.map((profile) => [profile.id, profile]));
+  assert.notEqual(byId.get(route.independent.id)?.provider, byId.get(route.selected.id)?.provider);
 });
 
 test("high-risk routing fails closed when no independent provider is healthy", async () => {
+  // 除主路外全员离线（随席位表自适应）——独立复核无处可选时必须 fail-closed
+  const allOthersOffline = Object.fromEntries(
+    models.profiles
+      .filter((profile) => profile.id !== "codex-technical")
+      .map((profile) => [profile.id, { status: "offline", available: false, reason: "offline" }]),
+  );
   const router = new ModelRouter({
     profiles: models.profiles,
     policy,
-    healthService: health({
-      "claude-fable": { status: "offline", available: false, reason: "offline" },
-      "gemini-research": { status: "offline", available: false, reason: "offline" },
-    }),
+    healthService: health(allOthersOffline),
   });
   await assert.rejects(() => router.preview({ taskType: "coding", prompt: "实现配置事务", risk: "high" }), { code: "NO_INDEPENDENT_ROUTE" });
 });

@@ -1,10 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ApprovalBroker } from "../src/approval-broker.mjs";
-import { acquireInstanceLock } from "../src/instance-lock.mjs";
+import { acquireInstanceLock, lockOwnerIsActive } from "../src/instance-lock.mjs";
 
 const appRoot = fileURLToPath(new URL("..", import.meta.url));
 const eventStore = { emit: async () => {} };
@@ -59,6 +59,38 @@ test("an approval is not released until its decision is durably audited", async 
   assert.deepEqual(await responsePromise, { decision: "accept" });
 });
 
+test("approval broker stays approval-only and returns the build approval identity", async () => {
+  const events = [];
+  const broker = new ApprovalBroker({
+    eventStore: {
+      async emit(type, data) {
+        events.push({ type, data });
+      },
+    },
+    ttlMs: 5_000,
+  });
+  const responsePromise = broker.request({ method: "item/fileChange/requestApproval", params: { path: "src/a.mjs" } });
+  await new Promise((resolveImmediate) => setImmediate(resolveImmediate));
+  const [pending] = broker.list();
+  const resolved = await broker.resolve(pending.id, { decision: "approve", actionSha256: pending.actionSha256 });
+  assert.equal("lease" in resolved, false);
+  assert.equal(events.some((item) => item.type.startsWith("capability.lease_")), false);
+  assert.deepEqual(await responsePromise, { decision: "accept" });
+
+  const buildResponsePromise = broker.request({
+    method: "control/runBuild/requestApproval",
+    params: { runId: "run-1", workspace: "C:/repo" },
+  }, { runId: "run-1" });
+  await new Promise((resolveImmediate) => setImmediate(resolveImmediate));
+  const buildApproval = broker.list()[0];
+  const buildResolved = await broker.resolve(buildApproval.id, {
+    decision: "approve",
+    actionSha256: buildApproval.actionSha256,
+  });
+  assert.equal(buildResolved.id, buildApproval.id);
+  assert.deepEqual(await buildResponsePromise, { decision: "accept", approvalId: buildApproval.id });
+});
+
 test("instance lock is exclusive for a repository control root", async (t) => {
   const root = await mkdtemp(resolve(appRoot, ".test-lock-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -67,4 +99,47 @@ test("instance lock is exclusive for a repository control root", async (t) => {
   await first.release();
   const second = await acquireInstanceLock(root, { repoRoot: "C:/repo" });
   await second.release();
+});
+
+test("instance lock rejects PID reuse instead of trusting liveness alone", async () => {
+  const owner = {
+    pid: process.pid,
+    image: "node.exe",
+    startedAt: "2026-07-23T00:00:00.000Z",
+  };
+
+  assert.equal(await lockOwnerIsActive(owner, {
+    platform: "win32",
+    identityProbe: async () => ({
+      image: "node.exe",
+      createdAt: "2026-07-23T00:00:03.000Z",
+    }),
+  }), false);
+  assert.equal(await lockOwnerIsActive(owner, {
+    platform: "win32",
+    identityProbe: async () => ({
+      image: "node.exe",
+      createdAt: "2026-07-22T23:59:59.000Z",
+    }),
+  }), true);
+  assert.equal(await lockOwnerIsActive(owner, {
+    platform: "win32",
+    identityProbe: async () => undefined,
+  }), true);
+});
+
+test("instance lock replaces a stale owner selected by the ownership probe", async (t) => {
+  const root = await mkdtemp(resolve(appRoot, ".test-lock-stale-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(resolve(root, "control-center.lock"), `${JSON.stringify({
+    pid: process.pid,
+    image: "node.exe",
+    startedAt: "2026-07-23T00:00:00.000Z",
+  })}\n`, "utf8");
+
+  const lock = await acquireInstanceLock(root, { repoRoot: "C:/repo" }, {
+    ownerIsActive: async () => false,
+  });
+  assert.equal(lock.owner.pid, process.pid);
+  await lock.release();
 });

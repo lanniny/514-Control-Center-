@@ -13,7 +13,14 @@
     }
   },
   "bundle": {
-    "active": false,
+    "active": true,
     "icon": ["icons/icon.ico", "icons/icon.png"]
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["ccswitch"]
+      }
+    }
   }
 }

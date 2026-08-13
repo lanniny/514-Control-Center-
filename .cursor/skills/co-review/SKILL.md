@@ -111,11 +111,16 @@ $out = '' | codex exec -p review --skip-git-repo-check $cmd 2>&1 | Out-String
 
 ### 4. 输出验证 + 落盘
 
-**4a. 格式验证**：检查输出含 `## 致命问题`。缺失时加强格式约束重试 1 次。仍失败则原样落盘 + 标注 `自由格式: true`。
+**4a. 格式验证**：检查输出含 `## 致命问题`；handoff 无 YAML frontmatter 时，文件
+首行必须逐字复制本轮 route-gate 注入的 `<!-- 514cc-session-id: ... -->`；存在合法
+YAML frontmatter 时，marker 必须紧随 closing `---`。不得猜测或保留占位符；所有
+DELTA 账本行都必须满足严格三段式和单数字分数。缺失时加强格式约束重试 1 次。仍失败则原样落盘 +
+标注 `自由格式: true`，并如实说明 session 归属无法确认。
 
 **4b. 落盘路径**：`.ai-shared/handoff/codex-to-claude__{topic}__{YYYYMMDD-HHmm}.md`
 
 ```markdown
+<!-- 514cc-session-id: {session_id_from_route_gate} -->
 # Codex 评审：{topic}
 
 - **评审模式**：{mode}
@@ -138,8 +143,12 @@ $out = '' | codex exec -p review --skip-git-repo-check $cmd 2>&1 | Out-String
 ### 风险信号
 
 __VERDICT__: APPROVED | CHANGES_REQUESTED | REJECTED_FUNDAMENTAL
-__DELTA__: {评审对象} | {0=无新发现 / 1=补强主驾 / 2=推翻主驾判断} | {证据：致命#X 或被推翻的原判断 file:line}
+__DELTA__: 烛(Codex) | 1 | 证据：file:line 说明新增发现
 ```
+
+上行是语法合法示例。必须按事实替换证据，并且只选择单个数字：`0`=无新发现，
+`1`=补强主驾，`2`=推翻主驾判断；不得填写 `0/1/2`、`{0/1/2}`、`1补强`、
+`2推翻` 等占位或带标签值。多个 agent 各留一条 DELTA 时，每一条都必须合法。
 
 ### 5. 返回主驾
 简报 ≤ 250 字：评审目标 + handoff 路径 + 致命/建议/可保留数 + `__VERDICT__` + `__DELTA__`（净增量 0/1/2，主驾据此回填 rules.md §三铁律3 账本）。

@@ -3,32 +3,32 @@
 // 双地落漂移）接到 Console 前端——"体系被 LO 看见"的面板层。
 // 口径对齐既有 hook：route-gate.log TSV 5 列（route-gate.py:159）、DELTA 行
 // ^__DELTA__:（mirror-gate.py DELTA_RE）、外部发火前缀（mirror-gate FIRE_PREFIXES）。
-import { spawn } from "node:child_process";
-import { open, readFile, readdir, realpath, stat } from "node:fs/promises";
+import { createReadStream } from "node:fs";
+import { readFile, readdir, realpath, stat } from "node:fs/promises";
 import { basename, join, sep } from "node:path";
-import { childProcessEnv } from "./process-runner.mjs";
+import { createInterface } from "node:readline";
+import { childProcessEnv, spawnCommand } from "./process-runner.mjs";
 
 const DELTA_LINE = /^__DELTA__:\s*(.+)\s*$/;
 const FIRE_PREFIXES = ["codex-to-", "gemini-to-", "grok-to-"];
-const TAIL_BYTES = 256 * 1024;
 
-async function tailText(path, maxBytes = TAIL_BYTES) {
-  const handle = await open(path, "r");
+async function* logLines(path) {
+  const input = createReadStream(path, { encoding: "utf8" });
+  const lines = createInterface({ input, crlfDelay: Infinity });
   try {
-    const { size } = await handle.stat();
-    const start = Math.max(0, size - maxBytes);
-    const buffer = Buffer.alloc(size - start);
-    await handle.read(buffer, 0, buffer.length, start);
-    const text = buffer.toString("utf8");
-    // 尾读从文件中段起时首行必然截断——显式丢弃（烛 R-P2 建议），不依赖下游解析容错
-    if (start > 0) {
-      const firstBreak = text.indexOf("\n");
-      return firstBreak === -1 ? "" : text.slice(firstBreak + 1);
-    }
-    return text;
+    for await (const line of lines) yield line;
   } finally {
-    await handle.close();
+    lines.close();
+    input.destroy();
   }
+}
+
+function summonedState(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  if (["yes", "true", "1", "y"].includes(normalized)) return "yes";
+  if (["no", "false", "0", "n"].includes(normalized)) return "no";
+  if (["", "?", "unknown", "pending", "-"].includes(normalized)) return "unknown";
+  return null;
 }
 
 function parseDelta(line, source) {
@@ -44,6 +44,20 @@ function parseDelta(line, source) {
   };
 }
 
+// handoff 命名约定：<direction>__<topic>__<YYYYMMDD-HHmm>.md —— 提取 ts/topic 供 deltas[]
+// 规范化；形态不符时 ts 回退文件 mtime、topic 回退文件名，绝不丢条目
+function handoffEntryMeta(file) {
+  const base = file.name.replace(/\.md$/, "");
+  const stamp = base.match(/(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})$/);
+  const ts = stamp
+    ? `${stamp[1]}-${stamp[2]}-${stamp[3]}T${stamp[4]}:${stamp[5]}:00`
+    : new Date(file.mtimeMs).toISOString();
+  const topic = stamp
+    ? base.slice(0, stamp.index).split("__").filter(Boolean).pop() || base
+    : base;
+  return { ts, topic };
+}
+
 export class ObservabilityService {
   constructor({ aiSharedRoot, repoRoot }) {
     this.aiSharedRoot = aiSharedRoot;
@@ -52,55 +66,79 @@ export class ObservabilityService {
   }
 
   async routeGate({ days = 7, recent = 40 } = {}) {
-    const result = { total: 0, red: 0, gray: 0, byReason: {}, recent: [], available: false };
-    let text;
+    const result = {
+      total: 0,
+      red: 0,
+      gray: 0,
+      byReason: {},
+      summoned: { yes: 0, no: 0, unknown: 0 },
+      recent: [],
+      available: false,
+    };
+    const cutoff = Date.now() - days * 86_400_000;
+    const recentLimit = Math.max(0, Math.floor(Number(recent) || 0));
+    const rows = [];
     try {
-      text = await tailText(join(this.aiSharedRoot, "route-gate.log"));
+      // 逐行扫完整文件而非固定字节尾巴：days 才是统计窗口，recent 只限制返回明细。
+      // rows 是有界环形尾部，日志再大也不会按总行数占内存。
+      for await (const line of logLines(join(this.aiSharedRoot, "route-gate.log"))) {
+        const parts = line.split("\t");
+        if (parts.length < 2) continue;
+        const ts = Date.parse(parts[0].replace(" ", "T"));
+        if (!Number.isFinite(ts) || ts < cutoff) continue;
+        const flag = parts[1].trim().toUpperCase().startsWith("RED") ? "red" : "gray";
+        // v3.5 前日志为 ts/flag/prompt 三列，且旧 prompt 可能自带 TAB；新格式固定至少五列。
+        // 只有列数和 summoned token 都符合新契约才按新格式解释，避免把旧 prompt 误计为 reason。
+        const parsedSummoned = summonedState(parts[3]);
+        const modern = parts.length >= 5 && parsedSummoned !== null;
+        const reason = modern ? (parts[2] || "-").trim() || "-" : "-";
+        const summoned = modern ? parsedSummoned : "unknown";
+        const prompt = (modern ? parts.slice(4) : parts.slice(2)).join("\t").trim();
+        const row = { ts: parts[0], flag, reason, summoned, prompt };
+        if (recentLimit > 0) {
+          rows.push(row);
+          if (rows.length > recentLimit) rows.shift();
+        }
+        result.total += 1;
+        result[flag] += 1;
+        if (flag === "red") {
+          result.summoned[summoned] += 1;
+          for (const tag of reason.split(",")) {
+            if (tag && tag !== "-") result.byReason[tag] = (result.byReason[tag] || 0) + 1;
+          }
+        }
+      }
     } catch {
       return result;
     }
     result.available = true;
-    const cutoff = Date.now() - days * 86_400_000;
-    const rows = [];
-    for (const line of text.split(/\r?\n/)) {
-      const parts = line.split("\t");
-      if (parts.length < 2) continue; // 尾读截断的残首行/乱码行（mirror-gate 同口径）
-      const ts = Date.parse(parts[0].replace(" ", "T"));
-      if (!Number.isFinite(ts) || ts < cutoff) continue;
-      const flag = parts[1].trim().toUpperCase().startsWith("RED") ? "red" : "gray";
-      const reason = (parts[2] || "-").trim();
-      rows.push({ ts: parts[0], flag, reason, summoned: (parts[3] || "?").trim(), prompt: (parts[4] || "").trim() });
-      result.total += 1;
-      result[flag] += 1;
-      if (flag === "red") {
-        for (const tag of reason.split(",")) {
-          if (tag && tag !== "-") result.byReason[tag] = (result.byReason[tag] || 0) + 1;
-        }
-      }
-    }
-    result.recent = rows.slice(-recent).reverse();
+    result.recent = rows.reverse();
     return result;
   }
 
   async deltaLedger({ recent = 40 } = {}) {
     // stop-gate 双扫口径：decisions.md + handoff/*.md
     const entries = [];
-    try {
-      const decisions = await readFile(join(this.aiSharedRoot, "decisions.md"), "utf8");
-      for (const line of decisions.split(/\r?\n/)) {
-        const entry = parseDelta(line, "decisions.md");
-        if (entry) entries.push(entry);
+    const metas = []; // 与 entries 平行：v4.0 deltas[] 的规范化元数据（id/ts/topic 合成源）
+    const collect = (text, source, meta) => {
+      let lineNo = 0;
+      for (const line of text.split(/\r?\n/)) {
+        lineNo += 1;
+        const entry = parseDelta(line, source);
+        if (!entry) continue;
+        entries.push(entry);
+        metas.push({ id: `${source}#${lineNo}`, ...meta });
       }
+    };
+    try {
+      // decisions.md 行内无时间戳：ts 如实置 null，由前端决定如何呈现
+      collect(await readFile(join(this.aiSharedRoot, "decisions.md"), "utf8"), "decisions.md", { ts: null, topic: "decisions" });
     } catch {
       // decisions.md 缺失时账本仍可由 handoff 侧构成
     }
     for (const file of await this.#handoffFiles()) {
       try {
-        const text = await readFile(file.path, "utf8");
-        for (const line of text.split(/\r?\n/)) {
-          const entry = parseDelta(line, file.name);
-          if (entry) entries.push(entry);
-        }
+        collect(await readFile(file.path, "utf8"), file.name, handoffEntryMeta(file));
       } catch {
         // 单文件读取失败不阻塞账本
       }
@@ -110,7 +148,21 @@ export class ObservabilityService {
       if (entry.score === null) byScore.invalid += 1;
       else byScore[entry.score] += 1;
     }
-    return { total: entries.length, byScore, recent: entries.slice(-recent).reverse() };
+    return {
+      total: entries.length,
+      byScore,
+      recent: entries.slice(-recent).reverse(),
+      // v4.0 Forge 前端时间线契约：与 recent 同源的规范化全量明细；
+      // id 由 来源#行号 合成（稳定唯一），ts/topic 从 handoff 文件名提取，缺失如实置 null
+      deltas: entries.map((entry, index) => ({
+        id: metas[index].id,
+        ts: metas[index].ts,
+        agent: entry.agent,
+        score: entry.score,
+        topic: metas[index].topic,
+        evidence: entry.evidence,
+      })),
+    };
   }
 
   async handoffs({ limit = 120 } = {}) {
@@ -159,9 +211,50 @@ export class ObservabilityService {
       daysSinceLastFire = Math.floor((Date.now() - Date.parse(lastFire.modifiedAt)) / 86_400_000);
     }
     return {
-      routeGate: { total: routeGate.total, red: routeGate.red, gray: routeGate.gray, available: routeGate.available },
+      routeGate: {
+        total: routeGate.total,
+        red: routeGate.red,
+        gray: routeGate.gray,
+        summoned: routeGate.summoned,
+        available: routeGate.available,
+      },
       delta: { total: delta.total, byScore: delta.byScore },
       handoffs: { total: handoffs.length, lastFire: lastFire?.name || null, daysSinceLastFire },
+    };
+  }
+
+  /** v3.7 体检脉搏：把治理数据面聚合成一份"agent 可直接判断"的结构化摘要——
+     体检自动化把它注入 prompt，agent 不用自己跑工具轮抓数据（省一整圈工具调用与出错面）。
+     runtime 段由调用方（server）注入 orchestrator/health 侧数据，本方法只聚合 .ai-shared 数据面。 */
+  async pulse({ routeGateDays = 7 } = {}) {
+    const [routeGate, delta, handoffs] = await Promise.all([
+      this.routeGate({ days: routeGateDays, recent: 5 }),
+      this.deltaLedger({ recent: 5 }),
+      this.handoffs({ limit: 500 }),
+    ]);
+    const lastFire = handoffs.find((item) => item.direction === "external-fire");
+    const daysSinceLastFire = lastFire ? Math.floor((Date.now() - Date.parse(lastFire.modifiedAt)) / 86_400_000) : null;
+    // numeric 表示至少已有这么多条确认 no；若没有确认 no 但仍有 unknown，则不能假报 0。
+    // summoned breakdown 保留完整三态，供体检 agent 判断待对账规模。
+    const redUnsummoned = !routeGate.available
+      ? null
+      : routeGate.summoned.no > 0
+        ? routeGate.summoned.no
+        : routeGate.summoned.unknown > 0
+          ? null
+          : 0;
+    return {
+      generatedAt: new Date().toISOString(),
+      routeGate: {
+        available: routeGate.available,
+        windowDays: routeGateDays,
+        total: routeGate.total,
+        red: routeGate.red,
+        redUnsummoned,
+        summoned: routeGate.summoned,
+      },
+      delta: { total: delta.total, byScore: delta.byScore, recent: delta.recent },
+      handoffs: { total: handoffs.length, lastFire: lastFire?.name ?? null, daysSinceLastFire },
     };
   }
 
@@ -177,7 +270,8 @@ export class ObservabilityService {
       const env = childProcessEnv();
       for (const key of Object.keys(env)) if (key.toLowerCase() === "psmodulepath") delete env[key];
       const { output, exitCode } = await new Promise((resolvePromise, rejectPromise) => {
-        const child = spawn(
+        // spawnCommand：进子进程台账（drift 检查跑 90s，强杀主进程时不残留 powershell 树）
+        const child = spawnCommand(
           "powershell",
           ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script],
           { cwd: this.repoRoot, env, windowsHide: true },

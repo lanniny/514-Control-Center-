@@ -1,0 +1,11 @@
+get_native_capabilities
+get_auto_launch_status
+set_auto_launch
+restart_app
+is_portable_mode
+copy_text_to_clipboard
+set_window_theme
+update_tray_menu
+enter_lightweight_mode
+exit_lightweight_mode
+is_lightweight_mode

@@ -6,15 +6,20 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { findSecretCandidates } from "./redaction.mjs";
+import { PROVIDER_APPS } from "./providers.mjs";
+import { ADAPTER_BINDINGS } from "./adapters/manifest.mjs";
 
 const NAME_MAX = 60;
 const TEXT_MAX = 4000;
 const LIST_MAX = 40;
 const ITEM_MAX = 80;
 
-// 会话入口由团队主脑决定：主脑必须是具备真实 CLI 会话语义（原生多轮/resume）的 provider。
-// grok-search 是 MCP 宿主借道 Codex app-server，无独立 CLI 会话，不可任主脑。
-export const COORDINATOR_ELIGIBLE = Object.freeze(["claude-fable", "codex-technical", "grok-build", "gemini-research", "pi-resident"]);
+// 仅作旧调用方的默认目录；真实运行目录由 adapter manifest + 当前 models profile 共同生成。
+export const COORDINATOR_ELIGIBLE = Object.freeze(
+  ADAPTER_BINDINGS
+    .filter((binding) => !binding.fallbackFor && binding.coordinatorEligible === true)
+    .map((binding) => binding.profileId),
+);
 export const DEFAULT_COORDINATOR = "claude-fable";
 
 export const BUILTIN_TEAM = Object.freeze({
@@ -32,6 +37,10 @@ export const BUILTIN_TEAM = Object.freeze({
 
 function fail(message, code) {
   throw Object.assign(new Error(message), { code });
+}
+
+function catalogFail(message) {
+  throw Object.assign(new Error(message), { code: "VALIDATION_FAILED", catalogConflict: true });
 }
 
 function cleanText(value, label, max) {
@@ -52,18 +61,94 @@ function cleanList(value, label) {
   return [...new Set(items)];
 }
 
+function rawMemberReferences(value) {
+  if (!Array.isArray(value?.members)) return [];
+  return [...new Set(value.members
+    .filter((item) => typeof item === "string")
+    .map((item) => item.trim())
+    .filter(Boolean))];
+}
+
+// 供应商绑定（cc-switch 迁移波）：八应用 providerId——键白名单严格校验（拼写错即报），
+// id 存在性不在此硬校验（跨 Store 引用；绑了已删供应商时 apply-team 逐 app 如实报 SOURCE_NOT_FOUND，UI 显示失效）。
+function cleanProviders(value) {
+  if (value == null) return {};
+  if (typeof value !== "object" || Array.isArray(value)) fail("providers must be an object", "VALIDATION_FAILED");
+  const out = {};
+  for (const [app, raw] of Object.entries(value)) {
+    if (!PROVIDER_APPS.includes(app)) fail(`providers key must be one of ${PROVIDER_APPS.join("/")}: ${app}`, "VALIDATION_FAILED");
+    const id = String(raw ?? "").trim();
+    if (!id) continue;
+    if (id.length > ITEM_MAX) fail(`providers.${app} exceeds ${ITEM_MAX} characters`, "VALIDATION_FAILED");
+    out[app] = id;
+  }
+  return out;
+}
+
 export class TeamStore {
-  /** knownProviders：() => string[]——成员校验对齐当前 models 配置（热重载后取最新）。 */
-  constructor({ dataRoot, knownProviders = () => [] }) {
+  /** 目录函数在每次校验时求值，确保 models 热重载后成员和主脑资格立即同步。 */
+  constructor({
+    dataRoot,
+    teamCatalog = null,
+    knownProviders = () => [],
+    knownCoordinators = () => COORDINATOR_ELIGIBLE,
+  }) {
     this.path = join(dataRoot, "teams.json");
     this.dataRoot = dataRoot;
-    this.knownProviders = knownProviders;
+    this.teamCatalog = teamCatalog || (() => {
+      const coordinators = new Set(knownCoordinators());
+      return knownProviders().map((id) => ({
+        id,
+        teamMemberEligible: true,
+        coordinatorEligible: coordinators.has(id),
+      }));
+    });
     this.custom = new Map();
     this.rejectedOnLoad = [];
+    this.catalogRejectedOnLoad = [];
+    this.#retainedRejectedRecords = [];
+    this.storeStatus = { state: "ready", failClosed: false, code: null, message: null, causeCode: null };
+    this.pendingCatalog = null;
     this.#queue = Promise.resolve();
   }
 
   #queue;
+  #retainedRejectedRecords;
+
+  #assertWritable() {
+    if (!this.storeStatus.failClosed) return;
+    throw Object.assign(
+      new Error(this.storeStatus.message || "team store is unavailable"),
+      { code: "TEAM_STORE_UNAVAILABLE", storeStatus: { ...this.storeStatus } },
+    );
+  }
+
+  #effectiveCatalog() {
+    const current = Array.isArray(this.teamCatalog()) ? this.teamCatalog() : [];
+    if (!Array.isArray(this.pendingCatalog)) return current;
+    const pendingById = new Map(this.pendingCatalog.map((item) => [String(item?.id ?? ""), item]));
+    return current.map((item) => {
+      const pending = pendingById.get(String(item?.id ?? ""));
+      return {
+        ...item,
+        teamMemberEligible: item?.teamMemberEligible === true && pending?.teamMemberEligible === true,
+        coordinatorEligible: item?.coordinatorEligible === true && pending?.coordinatorEligible === true,
+      };
+    });
+  }
+
+  #catalogSets(catalog = undefined) {
+    const members = new Set();
+    const coordinators = new Set();
+    const source = catalog === undefined ? this.#effectiveCatalog() : catalog;
+    for (const item of Array.isArray(source) ? source : []) {
+      const id = String(item?.id ?? "").trim();
+      if (!id || item.teamMemberEligible !== true) continue;
+      members.add(id);
+      if (item.coordinatorEligible === true) coordinators.add(id);
+    }
+    return { members, coordinators };
+  }
 
   /** CRUD 串行化：原子写只保证单次落盘完整，不保证并发次序——排队防旧快照乱序覆盖（烛 R10 致命3）。 */
   #serialize(task) {
@@ -75,35 +160,134 @@ export class TeamStore {
     return next;
   }
 
+  async beginCatalogTransition(catalogOrFactory, { unreferencedMemberId = null } = {}) {
+    let releaseGate;
+    let released = false;
+    const previous = this.#queue;
+    const gate = new Promise((resolveGate) => { releaseGate = resolveGate; });
+    const reservation = previous.catch(() => {}).then(() => gate);
+    this.#queue = reservation.then(
+      () => undefined,
+      () => undefined,
+    );
+    await previous.catch(() => {});
+    const previousPendingCatalog = this.pendingCatalog;
+    const guardedMemberId = unreferencedMemberId == null
+      ? null
+      : String(unreferencedMemberId).trim();
+    try {
+      if (unreferencedMemberId != null && !guardedMemberId) {
+        fail("member id is required for a guarded catalog transition", "VALIDATION_FAILED");
+      }
+      if (guardedMemberId) {
+        const references = this.referencesForMember(guardedMemberId);
+        if (references.length) {
+          throw Object.assign(
+            new Error(`team member is referenced and cannot be deleted or rebound: ${guardedMemberId}`),
+            { code: "MEMBER_IN_USE", memberId: guardedMemberId, references },
+          );
+        }
+      }
+      const catalog = typeof catalogOrFactory === "function"
+        ? await catalogOrFactory()
+        : catalogOrFactory;
+      this.assertCatalogCompatible(catalog);
+      this.pendingCatalog = catalog;
+    } catch (error) {
+      releaseGate();
+      throw error;
+    }
+    return {
+      referenceGuardedMemberId: guardedMemberId,
+      release: async ({ committed = false, activation = null } = {}) => {
+        if (released) return;
+        released = true;
+        if (!committed) this.pendingCatalog = previousPendingCatalog;
+        else if (activation?.status === "reloaded") this.pendingCatalog = null;
+        releaseGate();
+      },
+    };
+  }
+
   async init() {
     try {
       const parsed = JSON.parse(await readFile(this.path, "utf8"));
-      for (const team of Array.isArray(parsed.teams) ? parsed.teams : []) {
-        if (!team?.id || team.id === BUILTIN_TEAM.id) continue;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || !Array.isArray(parsed.teams)) {
+        throw Object.assign(new Error("teams.json must contain a teams array"), { code: "TEAM_STORE_INVALID" });
+      }
+      const diskTeams = parsed.teams;
+      const seenTeamIds = new Set();
+      for (const team of diskTeams) {
+        if (!team || typeof team !== "object" || Array.isArray(team)) continue;
+        const id = String(team.id ?? "").trim();
+        if (!id || id === BUILTIN_TEAM.id) continue;
+        if (seenTeamIds.has(id)) {
+          throw Object.assign(new Error(`teams.json contains a duplicate team id: ${id}`), { code: "TEAM_STORE_INVALID" });
+        }
+        seenTeamIds.add(id);
+      }
+      for (const [index, team] of diskTeams.entries()) {
+        if (!team || typeof team !== "object" || Array.isArray(team) || team.id === BUILTIN_TEAM.id) continue;
+        const rejectedId = String(team.id ?? "").trim() || `rejected-team-${index + 1}`;
+        if (!team.id) {
+          this.#retainedRejectedRecords.push(team);
+          this.rejectedOnLoad.push({
+            id: rejectedId,
+            name: String(team.name ?? rejectedId),
+            reason: "team id is required",
+            members: rawMemberReferences(team),
+          });
+          continue;
+        }
         try {
           // 磁盘记录与 API 输入同一校验闸——手工注入 members:[] 等畸形记录拒载（烛 R10 致命1）
           const fields = this.#validate(team);
           this.custom.set(team.id, { ...team, ...fields, builtin: false });
         } catch (error) {
-          this.rejectedOnLoad.push({ id: team.id, reason: error.message });
+          this.#retainedRejectedRecords.push(team);
+          const rejected = {
+            id: rejectedId,
+            name: String(team.name ?? rejectedId),
+            reason: error.message,
+            members: rawMemberReferences(team),
+          };
+          this.rejectedOnLoad.push(rejected);
+          if (error.catalogConflict) this.catalogRejectedOnLoad.push(rejected);
         }
       }
-    } catch {
-      // 首次启动无文件；损坏文件不阻塞启动（列表回退为仅内置团队），保存时重建
+      this.storeStatus = { state: "ready", failClosed: false, code: null, message: null, causeCode: null };
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        this.storeStatus = { state: "missing", failClosed: false, code: null, message: null, causeCode: "ENOENT" };
+      } else {
+        const code = error instanceof SyntaxError ? "TEAM_STORE_INVALID" : (error?.code || "TEAM_STORE_UNREADABLE");
+        this.storeStatus = {
+          state: "blocked",
+          failClosed: true,
+          code,
+          message: `团队存储不可验证：${error.message}`,
+          causeCode: error?.code ?? null,
+        };
+      }
     }
     return this;
   }
 
   /** 失败原子性（烛 R11 建议）：构造 next Map → 落盘 → 才提交内存；写盘失败时内存不变，API 报错与状态一致。 */
   async #commit(next) {
+    this.#assertWritable();
     await mkdir(this.dataRoot, { recursive: true });
     const temp = join(this.dataRoot, `.teams.${randomUUID()}.tmp`);
-    await writeFile(temp, `${JSON.stringify({ teams: [...next.values()] }, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+    // 拒载记录不进入运行图，但必须原样留在真源中。否则一次无关 CRUD 就会抹掉其成员引用，
+    // 重启后成员删除/换绑保护会失明。原始记录只在磁盘回写，不通过 rejectedOnLoad API 暴露。
+    const persistedTeams = [...next.values(), ...this.#retainedRejectedRecords];
+    await writeFile(temp, `${JSON.stringify({ teams: persistedTeams }, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
     await rename(temp, this.path);
     this.custom = next;
+    this.storeStatus = { state: "ready", failClosed: false, code: null, message: null, causeCode: null };
   }
 
-  #validate(input) {
+  #validate(input, catalog = undefined) {
     const name = cleanText(input.name, "team name", NAME_MAX);
     if (!name) fail("team name is required", "VALIDATION_FAILED");
     // 保留名：自定义团队冒名 "514cc" 会让审计上无法区分冻结内置与任意提示词团队（烛 R10 致命4）。
@@ -117,17 +301,21 @@ export class TeamStore {
       }
     }
     const members = cleanList(input.members, "members");
-    if (!members.includes("claude-fable")) {
-      fail("team must include claude-fable: the coordinator seat is not removable", "VALIDATION_FAILED");
-    }
-    const known = new Set(this.knownProviders());
+    if (!members.length) fail("team must include at least one member", "VALIDATION_FAILED");
+    const { members: known, coordinators: eligible } = this.#catalogSets(catalog);
     for (const member of members) {
-      if (!known.has(member)) fail(`unknown team member: ${member}`, "VALIDATION_FAILED");
+      if (!known.has(member)) catalogFail(`team member has no executable adapter binding: ${member}`);
     }
-    // 主脑：会话入口所系——必须是团队成员且具备 CLI 会话语义；缺省 claude
-    const coordinator = cleanText(input.coordinator, "coordinator", NAME_MAX) || DEFAULT_COORDINATOR;
-    if (!COORDINATOR_ELIGIBLE.includes(coordinator)) {
-      fail(`coordinator must be a CLI-session provider (${COORDINATOR_ELIGIBLE.join(", ")})`, "VALIDATION_FAILED");
+    // 自定义团队不继承内置团队的 Claude 默认：缺省时取成员顺序中的首个 CLI profile。
+    // UI 要求显式选择；动态缺省仅服务旧磁盘记录和 API 兼容。
+    const coordinator = cleanText(input.coordinator, "coordinator", NAME_MAX)
+      || members.find((member) => eligible.has(member))
+      || "";
+    if (!coordinator) {
+      catalogFail("team must include at least one executable member that can act as coordinator");
+    }
+    if (!eligible.has(coordinator)) {
+      catalogFail(`coordinator must have an executable coordinator adapter (${[...eligible].join(", ")})`);
     }
     if (!members.includes(coordinator)) fail("coordinator must be a team member", "VALIDATION_FAILED");
     return {
@@ -138,7 +326,39 @@ export class TeamStore {
       members,
       skills: cleanList(input.skills, "skills"),
       mcp: cleanList(input.mcp, "mcp"),
+      providers: cleanProviders(input.providers),
     };
+  }
+
+  catalogConflicts(catalog = this.teamCatalog()) {
+    const { members, coordinators } = this.#catalogSets(catalog);
+    const conflicts = [];
+    for (const team of [BUILTIN_TEAM, ...this.custom.values()]) {
+      const missingMembers = (team.members ?? []).filter((id) => !members.has(id));
+      const coordinator = String(team.coordinator ?? "").trim();
+      const reasons = [];
+      if (missingMembers.length) reasons.push(`members without executable adapters: ${missingMembers.join(", ")}`);
+      if (!coordinator || !coordinators.has(coordinator)) reasons.push(`coordinator is not executable: ${coordinator || "<missing>"}`);
+      if (coordinator && !(team.members ?? []).includes(coordinator)) reasons.push(`coordinator is not a member: ${coordinator}`);
+      if (reasons.length) conflicts.push({ id: team.id, name: team.name, reasons });
+    }
+    for (const rejected of this.catalogRejectedOnLoad) {
+      if (conflicts.some((item) => item.id === rejected.id)) continue;
+      conflicts.push({ id: rejected.id, name: rejected.name, reasons: [rejected.reason] });
+    }
+    return conflicts;
+  }
+
+  assertCatalogCompatible(catalog = this.teamCatalog()) {
+    const conflicts = this.catalogConflicts(catalog);
+    if (!conflicts.length) return { valid: true, conflicts: [] };
+    const summary = conflicts
+      .map((item) => `${item.name} (${item.id}): ${item.reasons.join("; ")}`)
+      .join(" | ");
+    throw Object.assign(
+      new Error(`team catalog update would invalidate saved teams: ${summary}`),
+      { code: "TEAM_CATALOG_CONFLICT", conflicts },
+    );
   }
 
   list() {
@@ -152,8 +372,48 @@ export class TeamStore {
     return team;
   }
 
+  referencesForMember(memberId) {
+    if (this.storeStatus.failClosed) {
+      throw Object.assign(
+        new Error(this.storeStatus.message || "team references cannot be verified"),
+        {
+          code: "MEMBER_REFERENCE_CHECK_FAILED",
+          causeCode: this.storeStatus.code,
+          storeStatus: { ...this.storeStatus },
+        },
+      );
+    }
+    const id = String(memberId ?? "").trim();
+    if (!id) return [];
+    const references = [];
+    for (const team of [BUILTIN_TEAM, ...this.custom.values()]) {
+      if (Array.isArray(team.members) && team.members.includes(id)) references.push(team.id);
+    }
+    for (const rejected of this.rejectedOnLoad) {
+      if (Array.isArray(rejected.members) && rejected.members.includes(id)) references.push(rejected.id);
+    }
+    return [...new Set(references)];
+  }
+
+  withMemberReferenceGuard(memberId, mutation) {
+    if (typeof mutation !== "function") fail("member mutation callback is required", "VALIDATION_FAILED");
+    const id = String(memberId ?? "").trim();
+    if (!id) fail("member id is required", "VALIDATION_FAILED");
+    return this.#serialize(async () => {
+      const references = this.referencesForMember(id);
+      if (references.length) {
+        throw Object.assign(
+          new Error(`team member is referenced and cannot be deleted or rebound: ${id}`),
+          { code: "MEMBER_IN_USE", memberId: id, references },
+        );
+      }
+      return mutation();
+    });
+  }
+
   create(input = {}) {
     return this.#serialize(async () => {
+      this.#assertWritable();
       const fields = this.#validate(input);
       const now = new Date().toISOString();
       const team = { id: `team-${randomUUID()}`, builtin: false, ...fields, createdAt: now, updatedAt: now };
@@ -167,6 +427,7 @@ export class TeamStore {
   update(id, input = {}) {
     return this.#serialize(async () => {
       if (id === BUILTIN_TEAM.id) fail("the builtin 514cc team is frozen and cannot be modified", "FROZEN_BLOCK");
+      this.#assertWritable();
       const existing = this.get(id);
       const fields = this.#validate({ ...existing, ...input });
       const team = { ...existing, ...fields, updatedAt: new Date().toISOString() };
@@ -180,6 +441,7 @@ export class TeamStore {
   remove(id) {
     return this.#serialize(async () => {
       if (id === BUILTIN_TEAM.id) fail("the builtin 514cc team is frozen and cannot be deleted", "FROZEN_BLOCK");
+      this.#assertWritable();
       this.get(id); // 不存在则 404
       const next = new Map(this.custom);
       next.delete(id);
@@ -192,10 +454,20 @@ export class TeamStore {
       团队提示词是受信配置但不与 planner 契约同层级）。 */
   brief(id) {
     const team = this.get(id);
+    const memberById = new Map((this.teamCatalog() || []).map((member) => [member.id, member]));
     const parts = [`当前团队：${team.name}`];
-    parts.push(`团队主脑（会话入口与总协调者）：${team.coordinator || DEFAULT_COORDINATOR}`);
+    const coordinator = memberById.get(team.coordinator);
+    parts.push(`团队主脑（会话入口与总协调者）：${coordinator?.label || team.coordinator || DEFAULT_COORDINATOR}（${team.coordinator || DEFAULT_COORDINATOR}）`);
     if (team.systemPrompt) parts.push(`团队指令：${team.systemPrompt}`);
-    if (team.members?.length) parts.push(`团队成员（可派工白名单）：${team.members.join("、")}`);
+    if (team.members?.length) {
+      const roster = team.members.map((memberId) => {
+        const member = memberById.get(memberId);
+        if (!member) return memberId;
+        const details = [member.label || memberId, member.role, ...(member.capabilities || [])].filter(Boolean);
+        return `${details.join(" · ")} [${memberId}]`;
+      });
+      parts.push(`团队成员（可派工白名单）：${roster.join("；")}`);
+    }
     if (team.skills?.length) parts.push(`团队 Skill（声明，供派工参考）：${team.skills.join("、")}`);
     if (team.mcp?.length) parts.push(`团队 MCP（声明，供派工参考）：${team.mcp.join("、")}`);
     return [

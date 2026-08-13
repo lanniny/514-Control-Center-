@@ -1,0 +1,840 @@
+/* ==========================================================================
+ * rail-tools.css — 右栏工具标签栏（LO 2026-08-08 参考图波）
+ *
+ * 任务上下文 / 审阅 / 浏览器 / 文件各成一页；标签可关闭，全关后露出工具选择列表。
+ * 终端不在此列——它是底部抽屉（文末 terminal-drawer）。
+ * ========================================================================== */
+
+.rail-tabbar {
+  position: relative;
+  display: flex;
+  min-height: 40px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 6px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.rail-tabs {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 3px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.rail-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.rail-tab {
+  display: inline-flex;
+  min-width: 0;
+  flex: 0 0 auto;
+  align-items: center;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.rail-tab:hover {
+  background: var(--surface-hover);
+}
+
+/* 活动标签用描边胶囊而非下划线：参考图的标签是浮起的卡片感 */
+.rail-tab.is-active {
+  border-color: var(--border);
+  background: var(--surface-muted);
+}
+
+.rail-tab-main {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 4px 5px 9px;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.rail-tab.is-active .rail-tab-main {
+  color: var(--text-strong);
+  font-weight: 620;
+}
+
+.rail-tab-main .icon {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+}
+
+.rail-tab-main > span {
+  overflow: hidden;
+  max-width: 132px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rail-tab-close {
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  margin-right: 5px;
+  background: transparent;
+  color: var(--text-soft);
+  cursor: pointer;
+  /* 常显而非 hover 才显：隐藏时它仍占位，会把「打开文件」挤成「打开」，且悬停时布局会跳 */
+  opacity: 0.55;
+}
+
+.rail-tab:hover .rail-tab-close,
+.rail-tab.is-active .rail-tab-close,
+.rail-tab-close:focus-visible {
+  opacity: 1;
+}
+
+.rail-tab-close:hover {
+  background: var(--surface-strong);
+  color: var(--text-strong);
+}
+
+.rail-tab-close .icon {
+  width: 11px;
+  height: 11px;
+}
+
+.rail-tabbar-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+}
+
+.rail-tab-add {
+  display: inline-flex;
+  width: 26px;
+  height: 26px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.rail-tab-add .icon {
+  width: 15px;
+  height: 15px;
+}
+
+.rail-tab-add:hover,
+.rail-tab-add[aria-expanded="true"] {
+  background: var(--surface-hover);
+  color: var(--text-strong);
+}
+
+.rail-tool-menu {
+  position: absolute;
+  z-index: 60;
+  top: calc(100% - 2px);
+  right: 6px;
+  display: grid;
+  min-width: 196px;
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 16%);
+  gap: 1px;
+}
+
+.rail-tool-menu[hidden] {
+  display: none;
+}
+
+/* 工具条目：菜单与空态选择器共用一套外观，只有尺寸随场景放大 */
+.rail-tool-item {
+  display: grid;
+  min-height: 32px;
+  grid-template-columns: 17px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 11.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rail-tool-item:hover {
+  background: var(--surface-hover);
+  color: var(--text-strong);
+}
+
+.rail-tool-item .icon {
+  width: 15px;
+  height: 15px;
+  color: var(--text-muted);
+}
+
+.rail-tool-item kbd {
+  padding: 1px 5px;
+  border: 0;
+  border-radius: 4px;
+  background: var(--surface-strong);
+  color: var(--text-soft);
+  font-family: var(--font-sans);
+  font-size: 9px;
+}
+
+.rail-tool-panels {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+}
+
+.rail-tool-panel {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.rail-tool-panel[hidden] {
+  display: none;
+}
+
+/* 空态：标签全关时的工具选择列表（参考图的大行距列表） */
+.rail-tool-empty-state {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 18px;
+}
+
+.rail-tool-empty-state[hidden] {
+  display: none;
+}
+
+.rail-tool-picker {
+  display: grid;
+  width: 100%;
+  max-width: 340px;
+  gap: 4px;
+}
+
+.rail-tool-picker .rail-tool-item {
+  min-height: 44px;
+  grid-template-columns: 19px minmax(0, 1fr) auto;
+  font-size: 12.5px;
+}
+
+.rail-tool-picker .rail-tool-item .icon {
+  width: 17px;
+  height: 17px;
+}
+
+/* 各工具页内部的空态 / 载入态 / 边界说明 */
+.rail-tool-empty {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 28px 20px;
+  gap: 5px;
+  text-align: center;
+}
+
+.rail-tool-empty .icon {
+  width: 30px;
+  height: 30px;
+  margin-bottom: 4px;
+  color: var(--text-soft);
+  opacity: 0.7;
+}
+
+.rail-tool-empty strong {
+  color: var(--text-strong);
+  font-size: 13px;
+  font-weight: 640;
+}
+
+.rail-tool-empty span {
+  color: var(--text-soft);
+  font-size: 10.5px;
+}
+
+.rail-tool-note {
+  margin: 6px 0 0;
+  padding: 0 12px;
+  color: var(--text-soft);
+  font-size: 9.5px;
+  line-height: 1.6;
+  text-align: center;
+}
+
+.rail-tool-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 22px;
+  gap: 8px;
+  color: var(--text-soft);
+  font-size: 10.5px;
+}
+
+.rail-tool-loading .icon {
+  width: 14px;
+  height: 14px;
+  animation: forge-tool-reveal 900ms linear infinite;
+}
+
+/* ── 审阅页 ─────────────────────────────────────────── */
+
+.rail-review-head {
+  display: grid;
+  flex: 0 0 auto;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  gap: 5px;
+}
+
+.rail-review-scope {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.rail-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
+  color: var(--text-strong);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 620;
+  cursor: pointer;
+}
+
+.rail-chip .icon {
+  width: 13px;
+  height: 13px;
+  color: var(--text-muted);
+}
+
+.rail-chip .chevron {
+  width: 11px;
+  height: 11px;
+}
+
+.rail-review-stat {
+  display: inline-flex;
+  gap: 7px;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.rail-review-stat b {
+  color: var(--green);
+  font-weight: 650;
+}
+
+.rail-review-stat i {
+  color: var(--red);
+  font-style: normal;
+}
+
+.rail-review-range {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-soft);
+  font-size: 10px;
+}
+
+.rail-review-range .icon {
+  width: 11px;
+  height: 11px;
+}
+
+.rail-review-body {
+  min-height: 0;
+  flex: 1 1 auto;
+  padding: 8px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.rail-review-status {
+  margin: 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-muted);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 10px;
+  white-space: pre-wrap;
+}
+
+.rail-diff-file {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  margin-bottom: 8px;
+  background: var(--surface);
+}
+
+.rail-diff-file > header {
+  display: grid;
+  min-height: 32px;
+  grid-template-columns: 14px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  padding: 0 9px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-muted);
+}
+
+.rail-diff-file > header .icon {
+  width: 13px;
+  height: 13px;
+  color: var(--text-muted);
+}
+
+.rail-diff-file > header strong {
+  overflow: hidden;
+  color: var(--text-strong);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 620;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rail-diff-count {
+  display: inline-flex;
+  gap: 5px;
+  font-family: var(--mono);
+  font-size: 9px;
+}
+
+.rail-diff-count b {
+  color: var(--green);
+  font-weight: 650;
+}
+
+.rail-diff-count i {
+  color: var(--red);
+  font-style: normal;
+}
+
+.rail-diff-lines {
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.rail-diff-line {
+  display: grid;
+  grid-template-columns: 34px 34px minmax(0, 1fr);
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1.65;
+}
+
+.rail-diff-no {
+  padding-right: 6px;
+  color: var(--text-soft);
+  font-size: 9px;
+  opacity: 0.7;
+  text-align: right;
+  user-select: none;
+}
+
+.rail-diff-line code {
+  padding-right: 8px;
+  padding-left: 6px;
+  color: var(--text);
+  white-space: pre;
+}
+
+.rail-diff-line.is-add {
+  background: color-mix(in srgb, var(--green) 12%, transparent);
+}
+
+.rail-diff-line.is-add code {
+  color: color-mix(in srgb, var(--green) 72%, var(--text-strong));
+}
+
+.rail-diff-line.is-del {
+  background: color-mix(in srgb, var(--red) 11%, transparent);
+}
+
+.rail-diff-line.is-del code {
+  color: color-mix(in srgb, var(--red) 70%, var(--text-strong));
+}
+
+.rail-diff-line.is-hunk {
+  background: var(--surface-muted);
+}
+
+.rail-diff-line.is-hunk code,
+.rail-diff-line.is-meta code {
+  color: var(--text-soft);
+}
+
+/* ── 浏览器页 ───────────────────────────────────────── */
+
+.rail-browser-bar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 3px;
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.rail-browser-bar .icon-button {
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  padding: 5px;
+}
+
+/* 后退用同一枚箭头精灵镜像，不为一个方向再引一枚图标 */
+#rail-browser-back .icon {
+  transform: rotate(180deg);
+}
+
+.rail-browser-url {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.rail-browser-url input {
+  width: 100%;
+  min-width: 0;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-muted);
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+}
+
+.rail-browser-url input:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.rail-browser-history {
+  flex: 0 0 auto;
+  padding: 6px 8px 10px;
+  margin: 0;
+  list-style: none;
+}
+
+.rail-browser-history button {
+  display: grid;
+  width: 100%;
+  min-height: 28px;
+  grid-template-columns: 14px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 10.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rail-browser-history button:hover {
+  background: var(--surface-hover);
+  color: var(--text-strong);
+}
+
+.rail-browser-history .icon {
+  width: 12px;
+  height: 12px;
+}
+
+.rail-browser-history span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── 文件页 ─────────────────────────────────────────── */
+
+.rail-files-head {
+  display: flex;
+  min-height: 34px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 8px 5px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.rail-files-path {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rail-files-split {
+  display: grid;
+  min-height: 0;
+  flex: 1 1 auto;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.rail-files-preview {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border-right: 1px solid var(--border);
+}
+
+.rail-files-preview-head {
+  display: grid;
+  flex: 0 0 auto;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  gap: 2px;
+}
+
+.rail-files-preview-head strong {
+  overflow: hidden;
+  color: var(--text-strong);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rail-files-preview-head span {
+  color: var(--text-soft);
+  font-size: 9px;
+}
+
+.rail-files-preview-body {
+  min-height: 0;
+  flex: 1 1 auto;
+  padding: 8px 10px;
+  margin: 0;
+  overflow: auto;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1.65;
+  scrollbar-width: thin;
+}
+
+.rail-files-tree {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.rail-files-filter {
+  display: grid;
+  flex: 0 0 auto;
+  grid-template-columns: 14px minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.rail-files-filter .icon {
+  width: 13px;
+  height: 13px;
+  color: var(--text-soft);
+}
+
+.rail-files-filter input {
+  width: 100%;
+  min-width: 0;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+}
+
+.rail-files-filter input:focus-visible {
+  outline: 0;
+}
+
+.rail-files-list {
+  min-height: 0;
+  flex: 1 1 auto;
+  padding: 4px 6px 10px;
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.rail-files-entry {
+  display: grid;
+  width: 100%;
+  min-height: 28px;
+  grid-template-columns: 14px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  padding: 0 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rail-files-entry:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text-strong);
+}
+
+.rail-files-entry:disabled {
+  color: var(--text-soft);
+  cursor: default;
+  opacity: 0.6;
+}
+
+.rail-files-entry .icon {
+  width: 13px;
+  height: 13px;
+  color: var(--text-soft);
+}
+
+.rail-files-entry span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rail-files-entry.is-parent {
+  color: var(--text-muted);
+}
+
+/* ── 底部终端抽屉 ───────────────────────────────────── */
+
+/* 抽屉必须显式占最后一行（负数索引对 6/7 行两套模板都成立）：
+   conversation-pane 已把 heading/stream/recovery-bar/composer 显式钉在 2..5 行，
+   recovery-bar 隐藏时不占位，auto-placement 会让抽屉抢进第 4 行、跑到输入框上方去。 */
+.terminal-drawer {
+  position: relative;
+  display: flex;
+  min-height: 0;
+  flex: 0 0 auto;
+  flex-direction: column;
+  grid-row: -2 / -1;
+  border-top: 1px solid var(--border);
+  background: var(--surface-muted);
+}
+
+.terminal-drawer[hidden] {
+  display: none;
+}
+
+.terminal-drawer-grip {
+  height: 6px;
+  flex: 0 0 auto;
+  cursor: ns-resize;
+}
+
+.terminal-drawer-grip:hover,
+.terminal-drawer-grip:focus-visible {
+  background: color-mix(in srgb, var(--rose) 30%, transparent);
+}
+
+/* 靠左而不是靠右：右栏是 z-index 85 的浮层，会永久盖住对话区右上角的一切控件 */
+.terminal-drawer-close {
+  position: absolute;
+  z-index: 5;
+  top: 8px;
+  left: 10px;
+  display: inline-flex;
+  width: 22px;
+  height: 22px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.terminal-drawer-close:hover {
+  color: var(--text-strong);
+}
+
+.terminal-drawer-close .icon {
+  width: 12px;
+  height: 12px;
+}
+
+.terminal-drawer-body {
+  height: 240px; /* JS 启动时按持久化值覆写 */
+  min-height: 0;
+  overflow: hidden;
+}
+
+.terminal-drawer-body .terminal-shell {
+  height: 100%;
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+}
+
+.terminal-drawer-body .terminal-tabs {
+  padding: 4px 8px;
+}

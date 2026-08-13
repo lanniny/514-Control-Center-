@@ -1,0 +1,74 @@
+/* ==========================================================================
+   514 Forge — Wave G 代码块语法着色（highlight.js token → tokens.css 语义色）
+   契约对齐 codeg 的 shiki 双主题：亮色取 :root 值，暗色 [data-theme="dark"]
+   整组覆盖；所有颜色只引用 tokens.css 语义变量，主题切换零 JS。
+   消费：markdown.js renderMarkdown 的 fence 分支（.md-code 内 hljs-* span）。
+   ========================================================================== */
+
+/* —— 亮色（默认）—— */
+:root {
+  --hljs-keyword: var(--primary);
+  --hljs-string: oklch(0.55 0.14 155);
+  --hljs-comment: var(--muted-foreground);
+  --hljs-title: var(--info);
+  --hljs-number: oklch(0.62 0.15 70);
+  --hljs-attr: oklch(0.58 0.13 267.7);
+  --hljs-type: oklch(0.58 0.14 293.5);
+  --hljs-meta: var(--muted-foreground);
+  --hljs-deletion: var(--danger);
+  --hljs-addition: var(--success);
+}
+
+/* —— 暗色：整体提亮保对比（OKLCH L 上调，hue 与亮色同族）—— */
+[data-theme="dark"] {
+  --hljs-keyword: oklch(0.74 0.12 40);
+  --hljs-string: oklch(0.76 0.14 155);
+  --hljs-comment: oklch(0.65 0 0);
+  --hljs-title: oklch(0.78 0.13 262.9);
+  --hljs-number: oklch(0.78 0.13 70);
+  --hljs-attr: oklch(0.76 0.12 267.7);
+  --hljs-type: oklch(0.78 0.13 293.5);
+  --hljs-meta: oklch(0.65 0 0);
+  --hljs-deletion: oklch(0.72 0.18 27.3);
+  --hljs-addition: oklch(0.76 0.15 155);
+}
+
+.md-code .hljs-keyword,
+.md-code .hljs-literal,
+.md-code .hljs-selector-tag,
+.md-code .hljs-built_in { color: var(--hljs-keyword); }
+
+.md-code .hljs-string,
+.md-code .hljs-regexp,
+.md-code .hljs-template-string,
+.md-code .hljs-doctag { color: var(--hljs-string); }
+
+.md-code .hljs-comment,
+.md-code .hljs-quote { color: var(--hljs-comment); font-style: italic; }
+
+.md-code .hljs-title,
+.md-code .hljs-title.function_,
+.md-code .hljs-section { color: var(--hljs-title); }
+
+.md-code .hljs-title.class_,
+.md-code .hljs-type { color: var(--hljs-type); }
+
+.md-code .hljs-number,
+.md-code .hljs-literal { color: var(--hljs-number); }
+
+.md-code .hljs-attr,
+.md-code .hljs-attribute,
+.md-code .hljs-variable,
+.md-code .hljs-template-variable,
+.md-code .hljs-selector-attr,
+.md-code .hljs-selector-class,
+.md-code .hljs-selector-id { color: var(--hljs-attr); }
+
+.md-code .hljs-meta,
+.md-code .hljs-meta .hljs-keyword { color: var(--hljs-meta); }
+
+.md-code .hljs-addition { color: var(--hljs-addition); }
+.md-code .hljs-deletion { color: var(--hljs-deletion); }
+
+.md-code .hljs-emphasis { font-style: italic; }
+.md-code .hljs-strong { font-weight: 600; }

@@ -34,6 +34,59 @@ test("routeGate parses TSV rows and drops the truncated first line on tail reads
   }
 });
 
+test("routeGate normalizes summoned to yes/no/unknown and keeps legacy three-column rows", async () => {
+  const { root, aiShared } = await fixture();
+  try {
+    const now = new Date().toISOString().slice(0, 19).replace("T", " ");
+    const legacyPrompt = "旧格式提示\t内含 TAB\t仍须完整保留";
+    const lines = [
+      `${now}\tRED\t${legacyPrompt}`,
+      `${now}\tRED\treview\tTRUE\t已召唤`,
+      `${now}\tRED\tsecurity\t0\t未召唤`,
+      `${now}\tRED\tarchitecture\t?\t待对账`,
+    ];
+    await writeFile(join(aiShared, "route-gate.log"), lines.join("\n") + "\n", "utf8");
+    const svc = new ObservabilityService({ aiSharedRoot: aiShared, repoRoot: root });
+    const result = await svc.routeGate();
+
+    assert.deepEqual(result.summoned, { yes: 1, no: 1, unknown: 2 });
+    const legacy = result.recent.find((row) => row.prompt === legacyPrompt);
+    assert.deepEqual(
+      { reason: legacy?.reason, summoned: legacy?.summoned },
+      { reason: "-", summoned: "unknown" },
+      "旧三列日志的提示不得被错当 reason，缺失召唤证据必须标 unknown",
+    );
+    assert.equal(result.recent.find((row) => row.prompt === "已召唤")?.summoned, "yes");
+    assert.equal(result.recent.find((row) => row.prompt === "未召唤")?.summoned, "no");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("pulse counts summoned states across the full window and never reports unknown as zero", async () => {
+  const { root, aiShared } = await fixture();
+  try {
+    const now = new Date().toISOString().slice(0, 19).replace("T", " ");
+    const rows = [
+      `${now}\tRED\treview\tno\t窗口内较早的未召唤`,
+      ...Array.from({ length: 5 }, (_, index) => `${now}\tRED\treview\tyes\t较新的已召唤 ${index}`),
+    ];
+    await writeFile(join(aiShared, "route-gate.log"), rows.join("\n") + "\n", "utf8");
+    const svc = new ObservabilityService({ aiSharedRoot: aiShared, repoRoot: root });
+    const pulse = await svc.pulse();
+    assert.equal(pulse.routeGate.red, 6);
+    assert.equal(pulse.routeGate.redUnsummoned, 1, "不能只检查 recent=5 而漏掉窗口内较早的 no");
+    assert.deepEqual(pulse.routeGate.summoned, { yes: 5, no: 1, unknown: 0 });
+
+    await writeFile(join(aiShared, "route-gate.log"), `${now}\tRED\treview\t?\t尚未对账\n`, "utf8");
+    const unresolved = await svc.pulse();
+    assert.equal(unresolved.routeGate.redUnsummoned, null, "unknown 不能伪装成已确认的 0 次未召唤");
+    assert.deepEqual(unresolved.routeGate.summoned, { yes: 0, no: 0, unknown: 1 });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("deltaLedger double-scans decisions.md and handoff with score buckets", async () => {
   const { root, aiShared } = await fixture();
   try {
@@ -178,6 +231,39 @@ test("projects groups sessions per project, restores cwd label and sorts by rece
   }
 });
 
+test("codex activity updates an existing project's recency before private fields are stripped", async () => {
+  const { root, aiShared } = await fixture();
+  const home = join(root, "home");
+  try {
+    const alphaFile = join(home, ".claude", "projects", "I--demo-alpha", "alpha.jsonl");
+    const betaFile = join(home, ".claude", "projects", "I--demo-beta", "beta.jsonl");
+    await projectFixture(home, "I--demo-alpha", {
+      "alpha.jsonl": [{ cwd: "I:\\demo\\alpha", message: { role: "user", content: "alpha old" } }],
+    });
+    await projectFixture(home, "I--demo-beta", {
+      "beta.jsonl": [{ cwd: "I:\\demo\\beta", message: { role: "user", content: "beta middle" } }],
+    });
+    const codexDir = join(home, ".codex", "sessions", "2026", "07", "21");
+    const codexFile = join(codexDir, "rollout-2026-07-21T20-00-00-alpha.jsonl");
+    await mkdir(codexDir, { recursive: true });
+    await writeFile(
+      codexFile,
+      `${JSON.stringify({ type: "session_meta", payload: { cwd: "I:\\demo\\alpha" } })}\n`,
+      "utf8",
+    );
+    const { utimes } = await import("node:fs/promises");
+    const now = Date.now();
+    await utimes(alphaFile, new Date(now - 120_000), new Date(now - 120_000));
+    await utimes(betaFile, new Date(now - 60_000), new Date(now - 60_000));
+    await utimes(codexFile, new Date(now), new Date(now));
+
+    const result = await new SessionAggregator({ aiSharedRoot: aiShared, home }).projects();
+    assert.equal(result.projects[0]?.path, "I:\\demo\\alpha", "最新 Codex 活动应把 alpha 项目排到 beta 前面");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("projects falls back to directory name without cwd and honours perProjectLimit", async () => {
   const { root, aiShared } = await fixture();
   const home = join(root, "home");
@@ -191,6 +277,217 @@ test("projects falls back to directory name without cwd and honours perProjectLi
     assert.equal(result.projects[0].path, null);
     assert.equal(result.projects[0].sessionCount, 5, "sessionCount reflects all files");
     assert.equal(result.projects[0].sessions.length, 3, "listed sessions capped by perProjectLimit");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("projects coalesces identical scans, isolates cached snapshots, and refresh bypasses stale work", async () => {
+  const { root, aiShared } = await fixture();
+  const home = join(root, "home");
+  let releaseFirst;
+  const firstScanGate = new Promise((resolveGate) => { releaseFirst = resolveGate; });
+  let scans = 0;
+  try {
+    const projectDir = await projectFixture(home, "cache-demo", {
+      "first.jsonl": [{ cwd: "I:\\demo\\cache", message: { role: "user", content: "first" } }],
+    });
+    const agg = new SessionAggregator({
+      aiSharedRoot: aiShared,
+      home,
+      projectSnapshotTtlMs: 10_000,
+      onProjectScan: async () => {
+        scans += 1;
+        if (scans === 1) await firstScanGate;
+      },
+    });
+
+    const firstPending = agg.projects({ perProjectLimit: 10 });
+    const secondPending = agg.projects({ perProjectLimit: 10 });
+    await new Promise((resolveTick) => setImmediate(resolveTick));
+    assert.equal(scans, 1, "identical concurrent calls share one filesystem scan");
+    releaseFirst();
+    const [first, second] = await Promise.all([firstPending, secondPending]);
+    assert.deepEqual(first, second);
+
+    first.projects[0].label = "caller-mutated";
+    const cached = await agg.projects({ perProjectLimit: 10 });
+    assert.equal(scans, 1, "cache hit avoids a second scan");
+    assert.equal(cached.projects[0].label, "cache", "callers receive detached cache clones");
+
+    await writeFile(join(projectDir, "second.jsonl"), `${JSON.stringify({ cwd: "I:\\demo\\cache", message: { role: "user", content: "second" } })}\n`, "utf8");
+    const [freshA, freshB] = await Promise.all([
+      agg.projects({ perProjectLimit: 10, refresh: true }),
+      agg.projects({ perProjectLimit: 10, refresh: true }),
+    ]);
+    assert.equal(scans, 2, "concurrent forced refreshes share their own fresh scan");
+    assert.equal(freshA.projects[0].sessionCount, 2);
+    assert.deepEqual(freshA, freshB);
+
+    await agg.projects({ perProjectLimit: 10, includeSummaries: true });
+    assert.equal(scans, 3, "summary mode has an independent snapshot key");
+
+    let ttlScans = 0;
+    const expiring = new SessionAggregator({
+      aiSharedRoot: aiShared,
+      home,
+      projectSnapshotTtlMs: 5,
+      onProjectScan: () => { ttlScans += 1; },
+    });
+    await expiring.projects();
+    await expiring.projects();
+    assert.equal(ttlScans, 1);
+    await new Promise((resolveTimer) => setTimeout(resolveTimer, 15));
+    await expiring.projects();
+    assert.equal(ttlScans, 2, "expired snapshots are rescanned rather than retained indefinitely");
+
+    let attempts = 0;
+    const retrying = new SessionAggregator({
+      aiSharedRoot: aiShared,
+      home,
+      projectSnapshotTtlMs: 10_000,
+      onProjectScan: () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("injected scan failure");
+      },
+    });
+    await assert.rejects(() => retrying.projects(), /injected scan failure/);
+    assert.equal((await retrying.projects()).projects[0].sessionCount, 2);
+    assert.equal(attempts, 2, "failed scans are removed from inflight and never cached");
+
+    let activeScans = 0;
+    let maxActiveScans = 0;
+    let scanNumber = 0;
+    let markFirstComplete;
+    let releaseFirstComplete;
+    const firstComplete = new Promise((resolveComplete) => { markFirstComplete = resolveComplete; });
+    const holdFirstCompletion = new Promise((resolveRelease) => { releaseFirstComplete = resolveRelease; });
+    const serialRefresh = new SessionAggregator({
+      aiSharedRoot: aiShared,
+      home,
+      projectSnapshotTtlMs: 10_000,
+      onProjectScan: () => {
+        scanNumber += 1;
+        activeScans += 1;
+        maxActiveScans = Math.max(maxActiveScans, activeScans);
+      },
+      onProjectScanComplete: async () => {
+        activeScans -= 1;
+        if (scanNumber === 1) {
+          markFirstComplete();
+          await holdFirstCompletion;
+        }
+      },
+    });
+    const normalPending = serialRefresh.projects();
+    await firstComplete;
+    await writeFile(join(projectDir, "third.jsonl"), `${JSON.stringify({ cwd: "I:\\demo\\cache", message: { role: "user", content: "third" } })}\n`, "utf8");
+    const forcedPending = serialRefresh.projects({ refresh: true });
+    await new Promise((resolveTick) => setImmediate(resolveTick));
+    assert.equal(scanNumber, 1, "forced refresh waits for an in-flight normal scan instead of competing for disk");
+    releaseFirstComplete();
+    const [normalResult, forcedResult] = await Promise.all([normalPending, forcedPending]);
+    assert.equal(normalResult.projects[0].sessionCount, 2);
+    assert.equal(forcedResult.projects[0].sessionCount, 3, "forced refresh rescans after the prior snapshot and sees newer disk state");
+    assert.equal(scanNumber, 2);
+    assert.equal(maxActiveScans, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("project scans serialize globally across summary and limit cache keys", async () => {
+  const { root, aiShared } = await fixture();
+  const home = join(root, "home");
+  let releaseFirst;
+  let markFirstStarted;
+  const firstGate = new Promise((resolveGate) => { releaseFirst = resolveGate; });
+  const firstStarted = new Promise((resolveStarted) => { markFirstStarted = resolveStarted; });
+  let scans = 0;
+  let activeScans = 0;
+  let maxActiveScans = 0;
+  try {
+    const projectDir = await projectFixture(home, "global-serial", {
+      "first.jsonl": [{ cwd: "I:\\demo\\global-serial", message: { role: "user", content: "first" } }],
+      "second.jsonl": [{ cwd: "I:\\demo\\global-serial", message: { role: "user", content: "second" } }],
+    });
+    const agg = new SessionAggregator({
+      aiSharedRoot: aiShared,
+      home,
+      projectSnapshotTtlMs: 10_000,
+      onProjectScan: async () => {
+        scans += 1;
+        activeScans += 1;
+        maxActiveScans = Math.max(maxActiveScans, activeScans);
+        if (scans === 1) {
+          markFirstStarted();
+          await firstGate;
+        }
+      },
+      onProjectScanComplete: () => { activeScans -= 1; },
+    });
+
+    const metadataOnly = agg.projects({ perProjectLimit: 1, includeSummaries: false });
+    await firstStarted;
+    const withSummaries = agg.projects({ perProjectLimit: 2, includeSummaries: true });
+    await new Promise((resolveTick) => setImmediate(resolveTick));
+    assert.equal(scans, 1, "different cache keys must not walk the same projects tree concurrently");
+    releaseFirst();
+    const [metadataResult, summaryResult] = await Promise.all([metadataOnly, withSummaries]);
+    assert.equal(scans, 2);
+    assert.equal(maxActiveScans, 1);
+    assert.equal(metadataResult.projects[0].sessions.length, 1);
+    assert.equal(summaryResult.projects[0].sessions.length, 2);
+    assert.equal(summaryResult.includeSummaries, true);
+
+    await writeFile(join(projectDir, "third.jsonl"), `${JSON.stringify({ cwd: "I:\\demo\\global-serial", message: { role: "user", content: "third" } })}\n`, "utf8");
+    const refreshedMetadata = await agg.projects({ perProjectLimit: 1, includeSummaries: false, refresh: true });
+    assert.equal(refreshedMetadata.projects[0].sessionCount, 3);
+    const refreshedSummaries = await agg.projects({ perProjectLimit: 2, includeSummaries: true });
+    assert.equal(scans, 4, "forced refresh invalidates cached projections for every summary/limit key");
+    assert.equal(refreshedSummaries.projects[0].sessionCount, 3);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a refresh epoch prevents other keys from joining pre-refresh inflight scans", async () => {
+  const { root, aiShared } = await fixture();
+  const home = join(root, "home");
+  let markOldComplete;
+  let releaseOldComplete;
+  const oldComplete = new Promise((resolveComplete) => { markOldComplete = resolveComplete; });
+  const oldCompleteGate = new Promise((resolveGate) => { releaseOldComplete = resolveGate; });
+  let scans = 0;
+  try {
+    const projectDir = await projectFixture(home, "refresh-epoch", {
+      "first.jsonl": [{ cwd: "I:\\demo\\refresh-epoch", message: { role: "user", content: "first" } }],
+    });
+    const agg = new SessionAggregator({
+      aiSharedRoot: aiShared,
+      home,
+      projectSnapshotTtlMs: 10_000,
+      onProjectScan: () => { scans += 1; },
+      onProjectScanComplete: async () => {
+        if (scans === 1) {
+          markOldComplete();
+          await oldCompleteGate;
+        }
+      },
+    });
+
+    const oldSummary = agg.projects({ includeSummaries: true });
+    await oldComplete;
+    await writeFile(join(projectDir, "second.jsonl"), `${JSON.stringify({ cwd: "I:\\demo\\refresh-epoch", message: { role: "user", content: "second" } })}\n`, "utf8");
+    const forcedMetadata = agg.projects({ includeSummaries: false, refresh: true });
+    const laterSummary = agg.projects({ includeSummaries: true });
+    releaseOldComplete();
+
+    const [oldResult, forcedResult, laterResult] = await Promise.all([oldSummary, forcedMetadata, laterSummary]);
+    assert.equal(oldResult.projects[0].sessionCount, 1);
+    assert.equal(forcedResult.projects[0].sessionCount, 2);
+    assert.equal(laterResult.projects[0].sessionCount, 2, "post-refresh callers cannot join a stale other-key inflight");
+    assert.equal(scans, 3);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -358,6 +655,34 @@ test("codex rollout payload.role/content shape yields a summary", async () => {
     const codex = sources.find((item) => item.source === "codex");
     assert.equal(codex.available, true);
     assert.equal(codex.sessions[0]?.summary, "帮我评审这段代码");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("codex recursive scan selects the true newest files after enumerating every directory", async () => {
+  const { root, aiShared } = await fixture();
+  const home = join(root, "home");
+  try {
+    const oldDir = join(home, ".codex", "sessions", "00-old");
+    const newestDir = join(home, ".codex", "sessions", "zz-newest");
+    await mkdir(oldDir, { recursive: true });
+    await mkdir(newestDir, { recursive: true });
+    const { utimes } = await import("node:fs/promises");
+    const now = Date.now();
+    for (let index = 0; index < 12; index += 1) {
+      const path = join(oldDir, `old-${String(index).padStart(2, "0")}.jsonl`);
+      await writeFile(path, "{}\n", "utf8");
+      await utimes(path, new Date(now - 120_000 - index), new Date(now - 120_000 - index));
+    }
+    const newest = join(newestDir, "true-newest.jsonl");
+    await writeFile(newest, "{}\n", "utf8");
+    await utimes(newest, new Date(now), new Date(now));
+
+    const result = await new SessionAggregator({ aiSharedRoot: aiShared, home }).list({ limitPerSource: 2 });
+    const codex = result.sources.find((source) => source.source === "codex");
+    assert.equal(codex.sessions.length, 2);
+    assert.equal(codex.sessions[0]?.id, "true-newest", "目录遍历顺序不得在 mtime 排序前淘汰真正最新文件");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

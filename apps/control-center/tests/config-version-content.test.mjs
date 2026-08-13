@@ -1,31 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawnTestServer, stopTestServer, testModelProfiles, waitForUrl } from "./server-fixture.mjs";
 
 const appRoot = fileURLToPath(new URL("..", import.meta.url));
-
-function waitForUrl(child) {
-  return new Promise((resolveUrl, reject) => {
-    let output = "";
-    const timer = setTimeout(() => reject(new Error(`server startup timed out: ${output}`)), 20_000);
-    child.stdout.on("data", (chunk) => {
-      output += chunk.toString("utf8");
-      const match = output.match(/514cc Control Center: (http:\/\/[^\s]+)/);
-      if (match) {
-        clearTimeout(timer);
-        resolveUrl(match[1]);
-      }
-    });
-    child.stderr.on("data", (chunk) => { output += chunk.toString("utf8"); });
-    child.once("exit", (code) => {
-      clearTimeout(timer);
-      reject(new Error(`server exited ${code}: ${output}`));
-    });
-  });
-}
 
 // GET /api/config/:id/versions/:versionId/content —— 回滚预览端点（W1B）。
 // 独立临时 repoRoot：instance-lock 按 repoRoot/.ai-shared/control-center 落锁，避开 5140 dev server。
@@ -37,10 +17,7 @@ test("config version content endpoint serves the stored version text over HTTP",
   await writeFile(resolve(repoRoot, "config/app.json"), '{"enabled":true}\n');
   await writeFile(resolve(repoRoot, "config/control-center/models.json"), JSON.stringify({
     version: 1,
-    profiles: [
-      { id: "claude-fable", label: "Fable", role: "primary-coordinator", provider: "anthropic", adapter: "claude-stream-json", command: "claude", model: "fable" },
-      { id: "codex-technical", label: "Codex", role: "technical-executor", provider: "openai", adapter: "codex-app-server", command: "codex", model: "gpt-5" },
-    ],
+    profiles: testModelProfiles(),
   }));
   await writeFile(resolve(repoRoot, "config/control-center/routing.json"), JSON.stringify({
     version: 1, primaryCoordinator: "claude-fable", technicalExecutor: "codex-technical", rules: [],
@@ -59,23 +36,16 @@ test("config version content endpoint serves the stored version text over HTTP",
     runtime: [],
   }));
   const token = "version-content-token-0123456789";
-  const child = spawn(process.execPath, [resolve(appRoot, "server.mjs")], {
-    cwd: appRoot,
+  const child = spawnTestServer({
     env: {
-      ...process.env,
       CONTROL_CENTER_TOKEN: token,
       CONTROL_CENTER_REPO_ROOT: repoRoot,
       CONTROL_CENTER_DATA_DIR: dataRoot,
       CONTROL_CENTER_PORT: "0",
     },
-    stdio: ["ignore", "pipe", "pipe"],
-    windowsHide: true,
   });
   t.after(async () => {
-    if (child.exitCode == null) {
-      child.kill();
-      await new Promise((resolveExit) => child.once("exit", resolveExit));
-    }
+    await stopTestServer(child, { token });
     await rm(root, { recursive: true, force: true });
   });
   const origin = new URL(await waitForUrl(child)).origin;

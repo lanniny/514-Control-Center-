@@ -22,6 +22,23 @@ For 514cc self-review handoff, write:
 
 `I:/514claude/514cc/.ai-shared/handoff/codex-to-claude__{topic}__{YYYYMMDD-HHmm}.md`
 
-End handoff with:
+When the handoff has no YAML frontmatter, the first line must be the exact
+session marker emitted by route-gate, copied verbatim. With valid YAML
+frontmatter, place the marker immediately after the closing `---`. Never invent
+a session id and never leave a marker placeholder in the file. If route-gate
+did not provide a marker, report that limitation instead of claiming exact
+session ownership.
 
-`__DELTA__: 烛(Codex) | 0白发/1补强/2推翻主驾判断 | evidence`
+Handoff template first line before substitution (or first line after valid YAML
+frontmatter):
+
+`<!-- 514cc-session-id: {session_id_from_route_gate} -->`
+
+Use this syntactically valid DELTA example:
+
+`__DELTA__: 烛(Codex) | 1 | 证据：file:line 说明新增发现`
+
+Replace the example evidence and select exactly one score from the facts: `0` =
+no new finding, `1` = strengthening evidence, `2` = overturning a prior
+judgement. The score field must be one digit. Do not write `0/1/2`, `{0/1/2}`,
+`1补强`, or any other labeled/placeholder value.

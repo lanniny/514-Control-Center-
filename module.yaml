@@ -1,7 +1,7 @@
 code: 514cc
 name: "514cc — AI 能力放大系统"
 version: "3.5.0"
-description: "Skill 驱动的多 AI 协作能力放大系统。5 命名 Agent + 结构化工作流 + 三层定制 + Codex 一等公民。"
+description: "Skill 驱动的多 AI 协作能力放大系统。5 命名 Agent + 结构化工作流 + 三层定制 + Codex 一等公民 + 富渲染 + 命令面板 + 团队可视化。"
 license: personal
 
 # === 跨项目用户配置（scope: user） ===
@@ -102,17 +102,48 @@ skills:
     phase: orchestration
     description: "多 Agent 真并行 spawn——复杂问题多视角讨论"
 
-  - code: ultracode
-    path: .agents/skills/ultracode
+  # -- Codex 仓库 Skill --
+  - code: 514cc-collab
+    path: .agents/skills/514cc-collab
     type: codex-skill
     phase: orchestration
-    description: "Codex 版 Claude ultracode 等价模式：xhigh 推理 + 受控动态 workflow + fan-out/对抗验证/DELTA 证据"
+    description: "514cc 在 Codex 中的编排、同步、审计与 /co-* 等价总入口"
+
+  - code: aemeath-persona
+    path: .agents/skills/aemeath-persona
+    type: codex-skill
+    phase: meta
+    description: "AEMEATH 人格与输出风格在 Codex 平台上的安全适配、审计与同步"
+
+  - code: co-review
+    path: .agents/skills/co-review
+    type: codex-skill
+    phase: review
+    description: "烛的四节深度评审入口：正确性、安全、性能与架构证据链"
+
+  - code: co-status
+    path: .agents/skills/co-status
+    type: codex-skill
+    phase: meta
+    description: "514cc route/mirror gate、DELTA、handoff 与运行时漂移状态检查"
+
+  - code: co-sync-codex
+    path: .agents/skills/co-sync-codex
+    type: codex-skill
+    phase: utility
+    description: "将仓库中的 514cc/Codex 配置受控同步到用户运行时"
 
   - code: lilith-core
     path: .agents/skills/lilith-core
     type: codex-skill
     phase: orchestration
     description: "莉莉丝虚拟智慧体 profile：Pi/514cc 集成、记忆纪律、人格边界、反思闭环和跨 CLI resident agent 架构"
+
+  - code: ultracode
+    path: .agents/skills/ultracode
+    type: codex-skill
+    phase: orchestration
+    description: "Codex 版 Claude ultracode 等价模式：xhigh 推理 + 受控动态 workflow + fan-out/对抗验证/DELTA 证据"
 
   # -- 评审层 --
   - code: codex-reviewer
@@ -190,6 +221,10 @@ skills:
 dependencies:
   claude-code: ">=2.1.0"
   codex-cli: ">=0.144.0"   # v3.5 对话桥依赖 mcp-server 双工具（codex/codex-reply + structuredContent.threadId）
+  node: ">=22.5.0"         # node:sqlite 自 22.5.0 起可用；Console 的 package engine 必须与此一致
+  python: ">=3.11"         # 配置校验使用 stdlib tomllib；第三方包见 requirements-validation.txt
+  kimi-code-cli: "0.31.1"  # 2026-08-06 本机契约读回；权限边界见 control_center.provider_contracts.kimi
+  validation-python-packages: "requirements-validation.txt (PyYAML + jsonschema)"
   grok-api: "514claude.xyz/v1/chat/completions (grok-4.5，via $GROK_API_KEY，织驱动；反代无 server-side 搜索，WR 走 web MCP 联合)"
   grok-build-cli: ">=0.2.102"   # 第三本地 CLI（2026-07-17 装，~/.grok/bin）：headless -p + 自定义模型 grok45-514/grok43-long 走反代免订阅；ACP grok agent stdio
 
@@ -241,10 +276,19 @@ control_center:
   path: apps/control-center
   role: "本地全配置前端 + 观测面 + 会话深路（127.0.0.1 + ephemeral token + SSE）"
   configs: "config/control-center/{models,routing,permissions,sources}.json + claude-coordinator.md"
-  adapters: [claude-cli, codex-app-server, codex-cli, gemini-cli, grok-mcp, pi-rpc]
+  adapter_manifest: apps/control-center/src/adapters/manifest.mjs
+  adapters: [claude-cli, codex-app-server, codex-cli, gemini-cli, grok-build, grok-mcp, kimi-cli, opencode-cli, pi-rpc]
   pipeline: "config validate/plan/apply/rollback（乐观锁 + 备份 + 原子替换 + parse readback + 审计事件）"
-  tests: "npm test 46/47（2026-07-17 实测；唯一失败 http-e2e 为 60s 超时环境类）"
+  tests: "npm test + npm run validate（结果以当轮命令输出为准，注册表不固化易漂移计数）"
   start: "cd apps/control-center; npm start"
+  release_status: "正式 framework version 为 3.5.0；工作记录中的 v3.6/v3.7/v4.0 仅表示未发布功能波次"
+  provider_contracts:
+    kimi:
+      cli_version: "0.31.1"
+      profile: kimi-frontend
+      adapter: kimi-headless-resume
+      read_only_permission_flag: "--plan"
+      workspace_write_policy: fail-closed
   note: "v3.5 接电：models.json gemini-research disabled（对齐 D-2026-07-16-005）+ module.yaml 注册 + 治理补账"
   phase2: "2026-07-17 落地（D-2026-07-17-004）：①体系观测页（observability.mjs——route-gate 命中/DELTA 账本双扫/handoff 浏览/sync-runtime 漂移检查）②会话聚合页（sessions.mjs——Claude/Codex/对话桥/Grok 四源只读元数据+摘要）③current-research 回落链修正（gemini 禁用→主驾 claude-fable 可见回落，capabilities 补 web MCP 事实）④sources.json 补宪法运行时源；剩余 P1=路由信号外置合一 + summoned 审计闭环（proposals/v35-deep-collab-design.md §五）"
 
@@ -263,16 +307,38 @@ desktop_shell:
 # === harness 硬扳机（.claude/hooks/ — 把核心纪律从 Markdown 软线下沉为 harness 强制） ===
 
 harness_hooks:
+  handoff_sources: ".claude/hooks/handoff-sources.json"
+  required_handoff_prefixes: [codex-to-, grok-to-, gemini-to-, kimi-to-, synthesis__]
+  delta_contract:
+    scores: [0, 1, 2]
+    evidence_required: true
+    hooks:
+      claude: .claude/hooks/stop-gate.py
+      codex: .codex/hooks/stop-gate-codex.py
+    template_assets:
+      - AGENTS.md
+      - .agents/skills/co-review/SKILL.md
+      - skills/review/codex-reviewer/SKILL.md
+      - skills/research/grok-researcher/SKILL.md
   hooks:
     - file: .claude/hooks/route-gate.py
       event: UserPromptSubmit
       role: "每轮硬注入路由门（§三）+ 写 route-gate.log（G1：hit_reason+summoned 审计列）；英文 token 双词边界防子串误判 + stdin UTF-8"
     - file: .claude/hooks/stop-gate.py
       event: Stop
-      role: "发火/自审 handoff（codex-to-/grok-to-/gemini-to-/synthesis__）缺 __DELTA__ 即 exit 2 逼补；三重防死循环"
+      role: "发火/自审 handoff（codex-to-/grok-to-/gemini-to-/kimi-to-/synthesis__）缺失或格式非法的 __DELTA__ 均由精确会话门禁 exit 2 逼补；三重防死循环"
     - file: .claude/hooks/mirror-gate.py
       event: SessionStart(startup)
       role: "开机注入自省体检卡——route-gate.log/DELTA账本/距上次发火间隔，给死数据装机械消费者（C：自身落 mirror-gate.log）"
+    - file: .codex/hooks/stop-gate-codex.py
+      event: Stop
+      role: "Codex 收尾使用同一 handoff 前缀注册表与严格数字 DELTA 语法；与 Claude stop-gate 做行为等价校验"
+    - file: .codex/hooks/route-gate-codex.py
+      event: UserPromptSubmit
+      role: "Codex 每轮记录路由判级证据并注入紧凑提醒；与 .codex/hooks.json 的事件和命令路径机械对齐"
+    - file: .codex/hooks/mirror-gate-codex.py
+      event: SessionStart
+      role: "Codex 在 startup/resume/clear/compact 时记录开机体检轨迹；与 .codex/hooks.json 的 matcher 和命令路径机械对齐"
   runtime: "全局 settings.json 用绝对路径引用（仓库内单份，无副本漂移）"
   note: "fail-open（任何异常放行）+ cwd 门控（仅 514claude 工作区）；route-gate/mirror-gate 绝不阻断，stop-gate 仅 exit 2 逼补"
 

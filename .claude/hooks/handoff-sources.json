@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "sources": [
+    {
+      "id": "codex-reviewer",
+      "prefixes": ["codex-to-"]
+    },
+    {
+      "id": "grok-researcher",
+      "prefixes": ["grok-to-"]
+    },
+    {
+      "id": "gemini-legacy",
+      "prefixes": ["gemini-to-"]
+    },
+    {
+      "id": "kimi-driver",
+      "prefixes": ["kimi-to-"]
+    },
+    {
+      "id": "multi-agent-synthesis",
+      "prefixes": ["synthesis__"]
+    }
+  ]
+}

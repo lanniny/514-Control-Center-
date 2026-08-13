@@ -59,7 +59,7 @@
 | 路径 | 内容 |
 |------|------|
 | `rules.md` | 体系宪法 v3.5（§三 模型优势路由表 v2 + §四 对话桥三通道 + hook 接电 + DELTA 账本 + 白发降级） |
-| `apps/control-center/` | **514cc Console（v3.5 接电）**：本地全配置前端 + 观测面（config validate/plan/apply/rollback 管线 + SSE + 六适配器），`npm start` 起 127.0.0.1 |
+| `apps/control-center/` | **514cc Console（v4.0）**：本地全配置前端 + 观测面 + 富渲染 + 命令面板 + 团队可视化 + 项目启动器，`npm start` 起 127.0.0.1 |
 | `apps/desktop/` | **Console 桌面壳（Tauri 2）**：cc-desktop.exe 自动拉起内核 + 原生窗口（LO 拍板自研不 fork；桌面快捷方式已建） |
 | `config/control-center/` | Console 配置真相源（models/routing/permissions/sources.json + claude-coordinator.md） |
 | `.claude/hooks/` | **harness 硬扳机（v3.4）**：`route-gate.py`（路由门注入 + 发散档 + 审计列）+ `stop-gate.py`（DELTA 门禁）+ `mirror-gate.py`（开机自省体检卡 + 留痕） |
@@ -93,6 +93,7 @@
 
 > 完整变更史见 `CHANGELOG.md`。本节只留最近两版详情 + 更早版本压缩索引。
 
+- **v4.0（未发布波次·工作记录）**（2026-07-25）— **深度整合 codeg + LiveAgent + 多 CLI 协作可视化**：①富渲染引擎（Markdown + KaTeX + Mermaid + highlight.js 代码高亮，LiveAgent 灵感）②全局命令面板（Ctrl+K 模糊搜索视图/操作/Agent，codeg 灵感）③团队协作可视化面板（5 命名 Agent 实时状态/角色/负载/协作流/拓扑图，514cc 独有创新）④DELTA 问责时间线（发火净增量评分 + 证据可视化 + 统计面板，514cc 独有创新）⑤项目启动器（框架/样式/主题/图标/字体可视化配置 + 实时预览 + 一键创建，codeg 灵感）⑥动画系统 + 键盘快捷键提示 + 空状态优化。源：proposals/v4-deep-integration-plan.md
 - **v3.5.0**（2026-07-17）— **深度对话协作 + 模型优势路由 v2 + Console 接电**：①Claude↔Codex 对话桥三层通道（MCP `codex-agent` 主路 codex/codex-reply + threadId 跨轮记忆端到端实测；exec resume 降级；app-server 留 Console 深路），烛 SKILL 加 DL 模式 + reflection 同会话续聊 + `.ai-shared/roster.json`②Codex 双角色 profile（review/executor）+ 新增"技术执行者"🟡 路由③§三路由表 v2 按模型优势标注 + 织反代无 server-side 搜索如实化④apps/control-center 补治理账 + module.yaml 注册 + models.json gemini 漂移修正。8 路调研依据：proposals/v35-deep-collab-design.md。源：D-2026-07-17-001
 - **v3.4.3**（2026-07-16）— **mirror-gate 契约驱动重构 + 织换 grok 驱动**：①SOUL 送达连撞五轮补丁后上策抽契约驱动（单一输出点 + 9 INV + 回归基线 + buggy必变红元验收），烛 R6 肯定核心结构、R7 SECURE，终结六轮循环②织情报驱动 gemini→grok-4.5 完全替代（514claude.xyz，key 走环境变量 GROK_API_KEY，速度+搜索强）。源：D-2026-07-16-004 + D-2026-07-16-005
 - **v3.4.0–v3.4.2**（2026-06-14 ~ 07-16）— 全面审查优化落地（36-agent 审查）→ MCP/skill 审计诚实债勘误 → 双地落漂移哨兵接电。详见 CHANGELOG.md

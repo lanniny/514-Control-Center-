@@ -5,9 +5,9 @@ function actionHash(message) {
   return createHash("sha256").update(JSON.stringify({ method: message.method, params: message.params })).digest("hex");
 }
 
-function responseFor(method, approved) {
+function responseFor(method, approved, approvalId = null) {
   if (method === "control/runBuild/requestApproval") {
-    return { decision: approved ? "accept" : "decline" };
+    return { decision: approved ? "accept" : "decline", approvalId };
   }
   if (["item/commandExecution/requestApproval", "item/fileChange/requestApproval"].includes(method)) {
     return { decision: approved ? "accept" : "decline" };
@@ -115,8 +115,14 @@ export class ApprovalBroker {
       throw Object.assign(new Error("approval was cancelled while the decision was being persisted"), { code: "APPROVAL_NOT_FOUND" });
     }
     this.pending.delete(id);
-    item.resolve(response);
-    return { id, decision, actionSha256: item.actionSha256 };
+    item.resolve(responseFor(item.method, approved, id));
+    return {
+      id,
+      decision,
+      actionSha256: item.actionSha256,
+      runId: item.runId,
+      method: item.method,
+    };
   }
 
   async denyAll(reason = "control plane shutdown") {

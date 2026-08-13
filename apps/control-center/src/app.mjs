@@ -1,17 +1,30 @@
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { EventStore } from "./event-store.mjs";
+import { configureChildRegistry } from "./child-registry.mjs";
 import { ConfigManager } from "./config-manager.mjs";
 import { HealthService } from "./health.mjs";
 import { ModelRouter } from "./router.mjs";
 import { ApprovalBroker } from "./approval-broker.mjs";
 import { createAdapters } from "./adapters/index.mjs";
+import { createTeamCatalog, resolveAdapterTemplate } from "./adapters/manifest.mjs";
 import { Orchestrator } from "./orchestrator.mjs";
+import { AutomationStore, seedBuiltinAutomations } from "./automations.mjs";
+import { createCapabilities } from "./capabilities.mjs";
+import { ModelDiscovery } from "./model-discovery.mjs";
 import { ObservabilityService } from "./observability.mjs";
 import { SessionAggregator } from "./sessions.mjs";
 import { TeamStore } from "./teams.mjs";
+import { TeamMemberStore } from "./team-members.mjs";
+import { ProviderStore } from "./providers.mjs";
+import { CcSwitchProxyService } from "./ccswitch/proxy.mjs";
+import { CcSwitchDomainService } from "./ccswitch/domain.mjs";
+import { CcSwitchAuthService } from "./ccswitch/auth.mjs";
 import { DATA_ROOT, REPO_ROOT } from "./paths.mjs";
 import { acquireInstanceLock } from "./instance-lock.mjs";
+import { createRemoteGateService } from "./security/remote-gates.mjs";
+import { createRemoteRunner } from "./ssh/remote-run.mjs";
+import { getSshService } from "./ssh/routes.mjs";
 
 async function readJson(path) {
   return JSON.parse(await readFile(path, "utf8"));
@@ -55,36 +68,171 @@ export function validateRuntimeGraph({ models, routing, permissions }) {
   }
 }
 
-function createRuntimeComponents({ models, routing, permissions, eventStore, repoRoot, approvalBroker }) {
+export function createRuntimeMemberCatalog(profiles = [], { providerStore = null } = {}) {
+  const executableCatalog = createTeamCatalog(profiles, { providerStore });
+  const profileById = new Map(profiles.map((profile) => [profile.id, profile]));
+  return executableCatalog.map((entry) => {
+    const profile = profileById.get(entry.id) || {};
+    const { adapterTemplate } = resolveAdapterTemplate(profile);
+    const modelOptions = (profile.modelOptions || []).map((option) => (
+      typeof option === "string" ? { id: option, label: option } : { ...option }
+    ));
+    const defaultModel = profile.defaultModel ?? profile.model ?? null;
+    if (defaultModel && !modelOptions.some((option) => option.id === defaultModel)) {
+      modelOptions.push({ id: defaultModel, label: defaultModel });
+    }
+    const effortLevels = [...new Set([
+      ...(profile.effortLevels || []),
+      ...(adapterTemplate.effortLevels || []),
+    ])];
+    return Object.freeze({
+      ...entry,
+      shortLabel: String(profile.shortLabel || profile.label || entry.label || entry.id),
+      description: String(profile.description || ""),
+      systemPrompt: String(profile.systemPrompt || ""),
+      capabilities: Object.freeze([...(profile.capabilities || [])]),
+      defaultModel,
+      defaultEffort: profile.defaultEffort ?? null,
+      command: profile.command ?? null,
+      model: profile.model ?? null,
+      defaultPermissionMode: profile.defaultPermissionMode ?? "read-only",
+      quality: profile.quality ?? null,
+      speed: profile.speed ?? null,
+      costTier: profile.costTier ?? null,
+      modelOptions: Object.freeze(modelOptions.map((option) => Object.freeze(option))),
+      effortLevels: Object.freeze(effortLevels),
+    });
+  });
+}
+
+function createRuntimeComponents({ models, routing, permissions, eventStore, repoRoot, approvalBroker, providerStore }) {
+  // Provider 绑定降级（席位引用的连接当前环境解析不到）：席位按 Adapter 管理继续运行，
+  // 同时留下显眼痕迹——控制台 + 事件流（catalog 条目另有 providerDegraded 供 UI 展示）。
+  const onProviderDegraded = (info) => {
+    console.error(`[control-plane] runtime seat ${info.runtimeProfileId} provider binding degraded: ${info.providerId} (${info.reason}) — running adapter-managed`);
+    eventStore?.emit?.(
+      "control.provider_binding_degraded",
+      info,
+      { sensitivity: "internal", agentId: "control-plane" },
+    )?.catch?.(() => {});
+  };
   const adapters = createAdapters({
     profiles: models.profiles,
     eventStore,
     cwd: repoRoot,
     approvalResolver: (message, context) => approvalBroker.request(message, context),
+    providerStore,
+    onProviderDegraded,
   });
   const externalProbes = new Map();
-  if (adapters.get("grok-search")?.health) externalProbes.set("grok-search", () => adapters.get("grok-search").health());
+  for (const profile of models.profiles) {
+    const adapter = adapters.get(profile.id);
+    if (typeof adapter?.health === "function") {
+      externalProbes.set(profile.id, (_profile, { signal } = {}) => adapter.health({ signal }));
+    }
+  }
   const healthService = new HealthService(models.profiles, { externalProbes });
   const router = new ModelRouter({ profiles: models.profiles, policy: routing, healthService });
-  return { models, routing, permissions, adapters, healthService, router };
+  const runtimeCatalog = createRuntimeMemberCatalog(models.profiles, { providerStore });
+  return { models, routing, permissions, adapters, healthService, router, runtimeCatalog };
+}
+
+async function closeCandidateAdapters(adapters, timeoutMs = 10_000) {
+  const warnings = [];
+  await Promise.all([...new Set(adapters?.values?.() ?? [])].map(async (adapter) => {
+    let timer;
+    try {
+      const result = await Promise.race([
+        Promise.resolve().then(() => adapter.close?.()).then(() => null, (error) => error),
+        new Promise((resolveTimeout) => {
+          timer = setTimeout(() => resolveTimeout(new Error(`candidate adapter close timed out after ${timeoutMs}ms`)), timeoutMs);
+        }),
+      ]);
+      if (result) warnings.push(result.message || String(result));
+    } finally {
+      clearTimeout(timer);
+    }
+  }));
+  return warnings;
 }
 
 export async function createControlCenter(options = {}) {
   const repoRoot = resolve(options.repoRoot || REPO_ROOT);
   const dataRoot = resolve(options.dataRoot || DATA_ROOT);
-  const instanceLock = await acquireInstanceLock(join(repoRoot, ".ai-shared", "control-center"), { repoRoot, dataRoot });
+  // 实例锁域 = dataRoot（烛建议2：锁与 children.json 台账同命名空间）。默认 dataRoot 就在
+  // <repoRoot>/.ai-shared/control-center，生产行为不变；显式分 dataRoot 的实例（测试/多开）自然分域
+  const instanceLock = await acquireInstanceLock(dataRoot, { repoRoot, dataRoot });
   try {
+  // 孤儿收割：实例锁在手即旧主已死——台账里的子进程（codex app-server/MCP 孙子等）连树清理，
+  // 防强制重启残留内存堆叠（2026-07-19 LO 报障，含 pid 复用防护）
+  const childReg = configureChildRegistry({ dataRoot });
+  const { reaped, skipped, failed = 0, pending = 0 } = await childReg.reapPrevious();
+  if (reaped || skipped || failed || pending) {
+    const guarded = Math.max(0, skipped - failed);
+    process.stdout.write(`control-center: previous children reaped=${reaped} guarded=${guarded} failed=${failed} pending=${pending}\n`);
+  }
   const { configRoot, models, routing, permissions } = await readRuntimeConfig(repoRoot);
-  const eventStore = await new EventStore(join(dataRoot, "events.jsonl")).init();
-  const approvalBroker = new ApprovalBroker({ eventStore, ttlMs: permissions.approval.ttlMs });
-  const runtime = createRuntimeComponents({ models, routing, permissions, eventStore, repoRoot, approvalBroker });
-  // 稳定引用盒子：init() 在 state 声明执行前调用 knownProviders——optional chaining 绕不过
-  // let 的 TDZ（烛 R11 致命：ReferenceError 被逐记录 catch 吞掉→自定义团队重启后静默拒载）
-  const modelsRef = { current: models };
-  const teams = await new TeamStore({
+  const eventStore = await new EventStore(join(dataRoot, "events.jsonl"), options.eventStoreOptions).init();
+  // Provider 连接先于运行图加载：席位只保存 providerId，凭据仍由 ProviderStore 私有持有。
+  let providerReferenceCatalogs = { live: [], candidate: null };
+  const providerStore = await new ProviderStore({
     dataRoot,
-    knownProviders: () => modelsRef.current.profiles.map((profile) => profile.id),
+    eventStore,
+    referencesForProvider: async (providerId) => {
+      const references = new Map();
+      for (const catalog of [providerReferenceCatalogs.live, providerReferenceCatalogs.candidate]) {
+        for (const seat of catalog ?? []) {
+          if (seat.providerId !== providerId) continue;
+          const reference = { seatId: seat.id, providerApp: seat.providerApp };
+          references.set(JSON.stringify([reference.seatId, reference.providerApp]), reference);
+        }
+      }
+      return [...references.values()];
+    },
   }).init();
+  // Wave G v2：授权感知门闸（grant 账本 + 实现注册表）。各面路由注册时 registerImplementation。
+  const remoteGates = await createRemoteGateService({ dataRoot, eventStore }).init();
+  const approvalBroker = new ApprovalBroker({ eventStore, ttlMs: permissions.approval.ttlMs });
+  const runtime = createRuntimeComponents({ models, routing, permissions, eventStore, repoRoot, approvalBroker, providerStore });
+  providerReferenceCatalogs = { live: runtime.runtimeCatalog, candidate: null };
+  // 运行席位与逻辑成员分层：adapter manifest 仍是执行真源；成员库只绑定真实席位并承载人物元数据。
+  const runtimeCatalogRef = { current: runtime.runtimeCatalog };
+  let teams = null;
+  const teamMembers = await new TeamMemberStore({
+    dataRoot,
+    runtimeCatalog: () => runtimeCatalogRef.current,
+    referencesForMember: async (memberId) => teams?.referencesForMember(memberId) ?? [],
+    guardMemberMutation: async (memberId, mutation) => {
+      if (!teams) throw Object.assign(new Error("team store is not ready"), { code: "TEAM_STORE_UNAVAILABLE" });
+      return teams.withMemberReferenceGuard(memberId, mutation);
+    },
+    beginCatalogTransition: async (catalog, transitionOptions = {}) => {
+      if (!teams) throw Object.assign(new Error("team store is not ready"), { code: "TEAM_STORE_UNAVAILABLE" });
+      return teams.beginCatalogTransition(catalog, transitionOptions);
+    },
+  }).init();
+  teamMembers.assertRuntimeCompatible(runtime.runtimeCatalog);
+  teams = await new TeamStore({
+    dataRoot,
+    teamCatalog: () => teamMembers.list(),
+  }).init();
+  teams.assertCatalogCompatible(teamMembers.list());
+  // cc-switch 迁移：统一供应商档案（baseUrl+apiKey 一处录入，按 app 投影 live 配置）；
+  // runtimeHome 默认 homedir()，测试/隔离环境走 CONTROL_CENTER_RUNTIME_HOME
+  const ccswitchProxy = await new CcSwitchProxyService({ dataRoot, providerStore, eventStore }).init();
+  const ccswitchAuth = await new CcSwitchAuthService({ dataRoot }).init();
+  const ccswitchDomain = await new CcSwitchDomainService({ dataRoot, providerStore, eventStore, authService: ccswitchAuth }).init();
+  const modelDiscovery = new ModelDiscovery({ profiles: models.profiles });
+  let configManager = null;
+  const capabilities = createCapabilities({
+    repoRoot,
+    homeDir: process.env.USERPROFILE ?? process.env.HOME ?? null,
+    teamsStore: teams,
+    membersStore: teamMembers,
+    dataRoot,
+    eventStore,
+    sourceIdForPath: (path) => configManager?.sourceIdForPath(path) ?? null,
+  });
   const orchestrator = await new Orchestrator({
     router: runtime.router,
     adapters: runtime.adapters,
@@ -93,11 +241,20 @@ export async function createControlCenter(options = {}) {
     policy: permissions,
     approvalBroker,
     teams,
+    teamMembers,
+    models: runtime.models, // modelOptions 目录：/model 覆盖按起始 agent 校验（v3.6 P2）
+    modelDiscovery, // 动态模型/档位发现（codex debug models / grok models，5min 缓存）
+    capabilities, // agent skill 启停负名单：成员轮提示词 skill 声明按此过滤（LO 拍板可配置面）
+    repoRoot, // v41：远程 adapter 工厂表 assertWithin 锚点
+    // v41 波二：远程 run 桥——懒解析 ssh service 单例（registerSshRoutes 建），ssh 门闸随 assertRunnable
+    remoteRunner: createRemoteRunner({ getService: getSshService, gates: remoteGates }),
   }).init();
   let generation = 1;
   let closed = false;
+  let closeFailure = null;
+  let closePromise = null;
   let state;
-  const configManager = await new ConfigManager({
+  configManager = await new ConfigManager({
     repoRoot,
     dataRoot,
     registryPath: join(configRoot, "sources.json"),
@@ -109,6 +266,29 @@ export async function createControlCenter(options = {}) {
       if (sourceId === "control.routing") candidate.routing = JSON.parse(content);
       if (sourceId === "control.permissions") candidate.permissions = JSON.parse(content);
       validateRuntimeGraph(candidate);
+      if (sourceId === "control.models") {
+        // 配置事务在写盘前同时验证 adapter wiring 与所有已存团队。ConfigManager 的
+        // onCommitted 是提交后激活，不能把这种冲突留到那一步才发现。
+        const candidateRuntimeCatalog = createRuntimeMemberCatalog(candidate.models.profiles, { providerStore });
+        teamMembers.assertRuntimeCompatible(candidateRuntimeCatalog);
+        const catalogTransition = await teams.beginCatalogTransition(teamMembers.catalogForRuntime(candidateRuntimeCatalog));
+        const previousProviderReferences = providerReferenceCatalogs;
+        // Provider 写操作必须从 models 写盘开始就同时看见 live 与候选引用。若热重载因繁忙延期，
+        // 两个代际都继续受保护；只有提交失败才恢复进入事务前的候选状态。
+        const transitionProviderReferences = {
+          live: previousProviderReferences.live,
+          candidate: candidateRuntimeCatalog,
+        };
+        providerReferenceCatalogs = transitionProviderReferences;
+        return {
+          async release(outcome) {
+            if (outcome?.committed !== true && providerReferenceCatalogs === transitionProviderReferences) {
+              providerReferenceCatalogs = previousProviderReferences;
+            }
+            await catalogTransition.release(outcome);
+          },
+        };
+      }
     },
     onCommitted: async ({ sourceId }) => {
       if (sourceId === "control.permissions") await orchestrator.revokeBuildGrants("permission policy changed");
@@ -116,69 +296,204 @@ export async function createControlCenter(options = {}) {
         return { status: "restart-required", reason: "the source registry is loaded during control-plane startup" };
       }
       if (!HOT_RELOAD_SOURCES.has(sourceId)) return { status: "not-required", generation };
-      return state.reloadRuntime({ sourceId, reason: "configuration commit" });
+      return state.reloadRuntime({
+        sourceId,
+        reason: "configuration commit",
+        catalogGuarded: sourceId === "control.models",
+      });
     },
   }).init();
 
   const aiSharedRoot = join(repoRoot, ".ai-shared");
   const observability = new ObservabilityService({ aiSharedRoot, repoRoot });
   const sessions = new SessionAggregator({ aiSharedRoot });
+  // v3.7 Automations：composer 快照定时/手动 headless 执行（走 orchestrator 全治理链）。
+  // pulseProvider 惰性引用 state.collectPulse（server 层组装 observability+runtime 双面数据）
+  const automations = await new AutomationStore({
+    dataRoot,
+    orchestrator,
+    eventStore,
+    pulseProvider: () => state?.collectPulse?.() ?? null,
+  }).init();
+  // 损坏/不可读库保持 degraded 供 API 诊断，绝不让内置播种覆盖原文件；缺文件仍是
+  // 正常首次初始化，会在播种时原子创建。
+  if (automations.status().writable) {
+    await seedBuiltinAutomations(automations); // 内置「体系体检」播种（幂等，manual 不产生费用）
+    automations.start();
+  }
 
+  let reloadInProgress = false;
   state = {
     repoRoot,
     dataRoot,
     observability,
     sessions,
+    automations,
+    capabilities,
+    providers: providerStore,
+    ccswitchProxy,
+    ccswitchDomain,
+    ccswitchAuth,
     teams,
+    teamMembers,
+    get teamCatalog() { return teamMembers.list(); },
+    get runtimeCatalog() { return runtimeCatalogRef.current; },
     models: runtime.models,
     routing: runtime.routing,
     permissions: runtime.permissions,
     eventStore,
+    childRegistry: childReg,
+    remoteGates,
     healthService: runtime.healthService,
     router: runtime.router,
     approvalBroker,
     orchestrator,
     configManager,
+    modelDiscovery,
     get generation() { return generation; },
-    async reloadRuntime({ sourceId = "manual", reason = "manual reload" } = {}) {
-      if (orchestrator.isBusy() || approvalBroker.list().length) {
+    async reloadRuntime({ sourceId = "manual", reason = "manual reload", catalogGuarded = false } = {}) {
+      if (reloadInProgress) {
         return {
           status: "restart-required",
           generation,
-          reason: "active runs or approvals prevent an atomic runtime graph swap",
+          reason: "another runtime reload is already in progress",
         };
       }
-      const nextConfig = await readRuntimeConfig(repoRoot);
-      const next = createRuntimeComponents({ ...nextConfig, eventStore, repoRoot, approvalBroker });
-      const closeWarnings = await orchestrator.replaceRuntime({
-        router: next.router,
-        adapters: next.adapters,
-        policy: next.permissions,
-      });
-      approvalBroker.ttlMs = next.permissions.approval.ttlMs;
-      modelsRef.current = next.models; // 团队成员校验对齐热重载后的 models
-      state.models = next.models;
-      state.routing = next.routing;
-      state.permissions = next.permissions;
-      state.healthService = next.healthService;
-      state.router = next.router;
-      generation += 1;
-      await eventStore.emit(
-        "control.runtime_reloaded",
-        { generation, sourceId, reason, closeWarnings },
-        { sensitivity: "internal", agentId: "control-plane" },
-      ).catch(() => {});
-      return { status: "reloaded", generation, closeWarnings };
+      reloadInProgress = true;
+      let catalogGuard = null;
+      let activation = null;
+      let next = null;
+      let swapped = false;
+      try {
+        if (catalogGuarded) {
+          const nextConfig = await readRuntimeConfig(repoRoot);
+          next = createRuntimeComponents({ ...nextConfig, eventStore, repoRoot, approvalBroker, providerStore });
+          teamMembers.assertRuntimeCompatible(next.runtimeCatalog);
+          teams.assertCatalogCompatible(teamMembers.catalogForRuntime(next.runtimeCatalog));
+        } else {
+          // 先占用团队目录迁移门，再读盘。否则 models 提交可能在 read 与 swap 之间插入，
+          // 让手动 reload 用旧快照覆盖刚提交的新目录。
+          catalogGuard = await teams.beginCatalogTransition(async () => {
+            const nextConfig = await readRuntimeConfig(repoRoot);
+            next = createRuntimeComponents({ ...nextConfig, eventStore, repoRoot, approvalBroker, providerStore });
+            teamMembers.assertRuntimeCompatible(next.runtimeCatalog);
+            return teamMembers.catalogForRuntime(next.runtimeCatalog);
+          });
+        }
+        if (orchestrator.isBusy() || approvalBroker.list().length) {
+          const candidateCloseWarnings = await closeCandidateAdapters(next.adapters);
+          activation = {
+            status: "restart-required",
+            generation,
+            reason: "active runs or approvals prevent an atomic runtime graph swap",
+            candidateCloseWarnings,
+          };
+          return activation;
+        }
+        const retirement = orchestrator.swapRuntime({
+          router: next.router,
+          adapters: next.adapters,
+          policy: next.permissions,
+          models: next.models,
+        });
+        swapped = true;
+        // swapRuntime 在返回 retirement promise 前已同步替换 Orchestrator 指针；同一 tick
+        // 发布 state/catalog/generation，之后才等待旧 adapter 退役，避免代际可观测分裂。
+        approvalBroker.ttlMs = next.permissions.approval.ttlMs;
+        runtimeCatalogRef.current = next.runtimeCatalog;
+        providerReferenceCatalogs = { live: next.runtimeCatalog, candidate: null };
+        state.models = next.models;
+        state.modelDiscovery.profiles = next.models.profiles; // 动态发现的静态回退随热重载刷新
+        state.modelDiscovery.cache.clear();
+        state.routing = next.routing;
+        state.permissions = next.permissions;
+        state.healthService = next.healthService;
+        state.router = next.router;
+        generation += 1;
+        const closeWarnings = await retirement;
+        await eventStore.emit(
+          "control.runtime_reloaded",
+          { generation, sourceId, reason, closeWarnings },
+          { sensitivity: "internal", agentId: "control-plane" },
+        ).catch(() => {});
+        activation = { status: "reloaded", generation, closeWarnings };
+        return activation;
+      } catch (error) {
+        if (next && !swapped) {
+          const warnings = await closeCandidateAdapters(next.adapters);
+          if (warnings.length) error.candidateCloseWarnings = warnings;
+        }
+        throw error;
+      } finally {
+        await catalogGuard?.release({ committed: true, activation });
+        reloadInProgress = false;
+      }
     },
     async close() {
+      if (closeFailure) throw closeFailure;
       if (closed) return;
-      closed = true;
+      if (closePromise) return closePromise;
+      const resumeAutomations = Boolean(automations.timer);
+      closePromise = (async () => {
+        await automations.stop(); // 先停调度器：关闭窗口不再产生新 run
+        let proxyStatus;
+        try {
+          proxyStatus = await ccswitchProxy.close();
+          if (proxyStatus?.closed !== true) {
+            throw Object.assign(
+              new Error("Control Center close aborted because CC-Switch takeover restore is incomplete"),
+              {
+                code: "CONTROL_CENTER_CLOSE_INCOMPLETE",
+                proxyStatus: proxyStatus ?? null,
+              },
+            );
+          }
+        } catch (error) {
+          if (resumeAutomations) automations.start();
+          throw error;
+        }
+
+        // Proxy restore is the shutdown commit point. Before it succeeds, the instance lock and
+        // every other runtime service remain live so a failed close can be retried safely.
+        const cleanupErrors = [];
+        const cleanupSteps = [
+          ["approvalBroker.denyAll", () => approvalBroker.denyAll()],
+          ["orchestrator.close", () => orchestrator.close()],
+          ["eventStore.close", () => eventStore.close()],
+          ["childRegistry.flush", () => childReg.flush()],
+          ["instanceLock.release", () => instanceLock.release()],
+        ];
+        for (const [step, operation] of cleanupSteps) {
+          try {
+            await operation();
+          } catch (error) {
+            cleanupErrors.push({
+              step,
+              code: error?.code ?? null,
+              message: String(error?.message || error),
+              error,
+            });
+          }
+        }
+        closed = true;
+        if (cleanupErrors.length) {
+          closeFailure = Object.assign(
+            new AggregateError(
+              cleanupErrors.map((entry) => entry.error),
+              `Control Center cleanup failed: ${cleanupErrors.map((entry) => entry.step).join(", ")}`,
+            ),
+            {
+              code: "CONTROL_CENTER_CLOSE_FAILED",
+              cleanupErrors: cleanupErrors.map(({ step, code, message }) => ({ step, code, message })),
+            },
+          );
+          throw closeFailure;
+        }
+      })();
       try {
-        await approvalBroker.denyAll();
-        await orchestrator.close();
-        await eventStore.close();
+        return await closePromise;
       } finally {
-        await instanceLock.release();
+        if (!closed) closePromise = null;
       }
     },
   };

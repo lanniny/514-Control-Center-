@@ -9,7 +9,7 @@ import {
   stat,
   writeFile,
 } from "node:fs/promises";
-import { basename, dirname, extname, join, relative, resolve } from "node:path";
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { assertWithin, expandPathTemplate, isWithin, toPortablePath } from "./paths.mjs";
 import { diffLines } from "./diff.mjs";
 import { validateContent } from "./validator.mjs";
@@ -26,6 +26,12 @@ function sourceKind(path) {
   if (extension === ".md" || extension === ".mdc") return "markdown";
   if (extension === ".py") return "python";
   return "text";
+}
+
+function absolutePathKey(path) {
+  if (typeof path !== "string" || !isAbsolute(path)) return null;
+  const normalized = resolve(path);
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
 }
 
 function extractFrozenBlocks(content) {
@@ -181,6 +187,18 @@ export class ConfigManager {
     return source;
   }
 
+  sourceIdForPath(path) {
+    const target = absolutePathKey(path);
+    if (!target) return null;
+    let match = null;
+    for (const [id, source] of this.sources) {
+      if (absolutePathKey(source.path) !== target) continue;
+      if (match !== null) return null;
+      match = id;
+    }
+    return match;
+  }
+
   async listSources() {
     const items = [];
     for (const source of this.sources.values()) {
@@ -320,21 +338,30 @@ export class ConfigManager {
 
   async apply(id, input) {
     return this.withCommitLock(() => this.withSourceLock(id, async () => {
-      const result = await this.applyUnlocked(id, input);
-      if (!result.changed || !result.committed || !this.onCommitted) return result;
+      const transaction = { guard: null, committed: false, activation: null };
       try {
-        result.activation = await this.onCommitted({ sourceId: id, result });
-      } catch (error) {
-        result.activation = {
-          status: "restart-required",
-          reason: `configuration committed but live activation failed: ${error.message}`,
-        };
+        const result = await this.applyUnlocked(id, input, transaction);
+        if (!result.changed || !result.committed || !this.onCommitted) return result;
+        try {
+          result.activation = await this.onCommitted({ sourceId: id, result });
+        } catch (error) {
+          result.activation = {
+            status: "restart-required",
+            reason: `configuration committed but live activation failed: ${error.message}`,
+          };
+        }
+        transaction.activation = result.activation;
+        return result;
+      } finally {
+        await transaction.guard?.release?.({
+          committed: transaction.committed,
+          activation: transaction.activation,
+        });
       }
-      return result;
     }));
   }
 
-  async applyUnlocked(id, { content, baseSha256, planId, confirmation, actor = "operator", reason = "edit" }) {
+  async applyUnlocked(id, { content, baseSha256, planId, confirmation, actor = "operator", reason = "edit" }, transaction = {}) {
     const source = this.getSource(id);
     if (source.transactionBlocked) {
       throw Object.assign(new Error("source is blocked by an inconsistent recovered transaction"), { code: "TRANSACTION_INCONSISTENT" });
@@ -355,7 +382,8 @@ export class ConfigManager {
     }
     const validation = await this.validate(id, content);
     if (!validation.valid) throw Object.assign(new Error("candidate configuration is invalid"), { code: "VALIDATION_FAILED", validation });
-    await this.beforeCommit?.({ sourceId: id, content, current });
+    const guard = await this.beforeCommit?.({ sourceId: id, content, current });
+    if (guard?.release) transaction.guard = guard;
     const targetSha256 = sha256(content);
     const planned = this.plans.get(planId);
     if (!planned || planned.expiresAt < Date.now()) {
@@ -421,6 +449,7 @@ export class ConfigManager {
       error.rolledBack = rolledBack;
       throw error;
     }
+    transaction.committed = true;
 
     manifest.state = "committed";
     manifest.committedAt = new Date().toISOString();

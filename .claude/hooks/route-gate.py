@@ -84,7 +84,7 @@ def strip_noise(text: str) -> str:
     return "\n".join(ln for ln in text.splitlines() if not _MCP_NOISE.search(ln))
 
 
-def main() -> None:
+def _main() -> None:
     try:
         data = json.load(sys.stdin)
     except Exception:
@@ -92,8 +92,14 @@ def main() -> None:
     if not isinstance(data, dict):
         sys.exit(0)  # 合法 JSON 但非对象 → 静默退出，防 .get 崩（与 mirror-gate 一致）
 
-    cwd = data.get("cwd") or os.environ.get("CLAUDE_PROJECT_DIR", "")
-    prompt = data.get("prompt") or ""
+    cwd_value = data.get("cwd") or os.environ.get("CLAUDE_PROJECT_DIR", "")
+    cwd = cwd_value if isinstance(cwd_value, str) else ""
+    prompt_value = data.get("prompt") or ""
+    prompt = prompt_value if isinstance(prompt_value, str) else ""
+    session_value = data.get("session_id")
+    session_id = session_value.strip() if isinstance(session_value, str) else ""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", session_id):
+        session_id = ""
 
     if WORKSPACE_ANCHOR not in cwd.replace("\\", "/").lower():
         sys.exit(0)  # cwd 门控：非 514claude 工作区静默退出
@@ -138,6 +144,17 @@ def main() -> None:
             "收尾在 handoff 留 __DELTA__。纯业务代码/小改可忽略。"
         )
 
+    if session_id:
+        # 精确 session marker 把 stop-gate 从跨会话 mtime 猜测升级为可验证归属；没有 marker 的
+        # time-window 文件只留审计、绝不硬拦。每轮传递 marker，确保灰档转复杂或 subagent
+        # 后续落 handoff 时同样能拿到真实归属，不再依赖路由关键词碰巧命中。
+        body += (
+            "\n⚡ handoff 精确归属：若本轮落 handoff，请在文件首部原样写入 "
+            f"`<!-- 514cc-session-id: {session_id} -->`；DELTA 严格使用 "
+            "`__DELTA__: 烛(Codex) | 1 | 证据：file:line 说明新增发现` 这一语法，"
+            "并按事实只选择单个 0、1 或 2，分数不得附带文字。"
+        )
+
     # 事后审计留痕（best-effort，失败不影响注入）
     try:
         aishared = find_aishared(cwd)
@@ -145,15 +162,15 @@ def main() -> None:
             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             flag = "RED " if hits else "gray"
             # G1 审计列（2026-06-14）：reason=命中信号简码；summoned=主驾是否真召唤——
-            # route-gate 在 UserPromptSubmit 当场无法知道，先占位 "?" 待事后(G2/Stop)对账回填，
-            # 把「标 RED 却埋掉」从不可审计变成有列可查。旧 3 列日志行兼容（下游只读前两列）。
+            # route-gate 在 UserPromptSubmit 当场无法知道，明确写 unknown 待事后对账；旧版 "?"
+            # 仍由下游归一为 unknown，因此 TSV 5 列 schema 向后兼容，且不再用问号假装一个值。
             reason_parts = list(hit_tags)
             if div_hit:
                 reason_parts.append("div")
             if meta_hit:
                 reason_parts.append("meta")
             reason = ",".join(reason_parts) if reason_parts else "-"
-            summoned = "?"
+            summoned = "unknown"
             one_line = prompt.replace("\r", " ").replace("\n", " ")[:80]
             with open(aishared / "route-gate.log", "a", encoding="utf-8") as fp:
                 fp.write(f"{ts}\t{flag}\t{reason}\t{summoned}\t{one_line}\n")
@@ -168,6 +185,16 @@ def main() -> None:
     }
     print(json.dumps(out, ensure_ascii=False))
     sys.exit(0)
+
+
+def main() -> None:
+    try:
+        _main()
+    except SystemExit:
+        raise
+    except Exception:
+        # Hook defects must not block or consume a user prompt.
+        sys.exit(0)
 
 
 if __name__ == "__main__":

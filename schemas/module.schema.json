@@ -1,0 +1,375 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://514cc.local/schemas/module.schema.json",
+  "title": "514cc module registry",
+  "type": "object",
+  "required": [
+    "code",
+    "name",
+    "version",
+    "description",
+    "license",
+    "agents",
+    "skills",
+    "dependencies",
+    "control_center",
+    "harness_hooks"
+  ],
+  "properties": {
+    "code": {
+      "const": "514cc"
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1
+    },
+    "license": {
+      "type": "string",
+      "minLength": 1
+    },
+    "agents": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/agent"
+      }
+    },
+    "skills": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/skill"
+      }
+    },
+    "dependencies": {
+      "type": "object",
+      "required": ["node", "python", "kimi-code-cli", "validation-python-packages"],
+      "minProperties": 1,
+      "properties": {
+        "node": {
+          "type": "string",
+          "pattern": "^>=[0-9]+\\.[0-9]+\\.[0-9]+$"
+        },
+        "python": {
+          "type": "string",
+          "pattern": "^>=[0-9]+\\.[0-9]+$"
+        },
+        "kimi-code-cli": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+        },
+        "validation-python-packages": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "control_center": {
+      "$ref": "#/$defs/controlCenter"
+    },
+    "harness_hooks": {
+      "$ref": "#/$defs/harnessHooks"
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "agent": {
+      "type": "object",
+      "required": ["code", "name", "title", "skill", "model", "description"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "icon": {
+          "type": "string",
+          "minLength": 1
+        },
+        "team": {
+          "type": "string",
+          "minLength": 1
+        },
+        "skill": {
+          "type": "string",
+          "pattern": "^skills/"
+        },
+        "model": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": true
+    },
+    "skill": {
+      "type": "object",
+      "required": ["code", "path", "type", "phase", "description"],
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]*$"
+        },
+        "path": {
+          "type": "string",
+          "pattern": "^(skills|\\.agents/skills)/"
+        },
+        "type": {
+          "enum": ["agent", "codex-skill", "task", "tool", "workflow"]
+        },
+        "phase": {
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": true
+    },
+    "controlCenter": {
+      "type": "object",
+      "required": ["path", "role", "configs", "adapter_manifest", "adapters", "pipeline", "tests", "start", "provider_contracts"],
+      "properties": {
+        "path": {
+          "const": "apps/control-center"
+        },
+        "role": {
+          "type": "string",
+          "minLength": 1
+        },
+        "configs": {
+          "type": "string",
+          "minLength": 1
+        },
+        "adapter_manifest": {
+          "const": "apps/control-center/src/adapters/manifest.mjs"
+        },
+        "adapters": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9-]*$"
+          }
+        },
+        "pipeline": {
+          "type": "string",
+          "minLength": 1
+        },
+        "tests": {
+          "type": "string",
+          "minLength": 1
+        },
+        "start": {
+          "type": "string",
+          "minLength": 1
+        },
+        "provider_contracts": {
+          "type": "object",
+          "required": ["kimi"],
+          "properties": {
+            "kimi": {
+              "type": "object",
+              "required": [
+                "cli_version",
+                "profile",
+                "adapter",
+                "read_only_permission_flag",
+                "workspace_write_policy"
+              ],
+              "properties": {
+                "cli_version": {
+                  "type": "string",
+                  "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+                },
+                "profile": {
+                  "const": "kimi-frontend"
+                },
+                "adapter": {
+                  "const": "kimi-headless-resume"
+                },
+                "read_only_permission_flag": {
+                  "const": "--plan"
+                },
+                "workspace_write_policy": {
+                  "const": "fail-closed"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "harnessHooks": {
+      "type": "object",
+      "required": [
+        "handoff_sources",
+        "required_handoff_prefixes",
+        "delta_contract",
+        "hooks",
+        "runtime",
+        "note"
+      ],
+      "properties": {
+        "handoff_sources": {
+          "const": ".claude/hooks/handoff-sources.json"
+        },
+        "required_handoff_prefixes": {
+          "type": "array",
+          "minItems": 5,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9_-]{1,63}$"
+          },
+          "allOf": [
+            { "contains": { "const": "codex-to-" } },
+            { "contains": { "const": "grok-to-" } },
+            { "contains": { "const": "gemini-to-" } },
+            { "contains": { "const": "kimi-to-" } },
+            { "contains": { "const": "synthesis__" } }
+          ]
+        },
+        "delta_contract": {
+          "type": "object",
+          "required": ["scores", "evidence_required", "hooks", "template_assets"],
+          "properties": {
+            "scores": {
+              "const": [0, 1, 2]
+            },
+            "evidence_required": {
+              "const": true
+            },
+            "hooks": {
+              "type": "object",
+              "required": ["claude", "codex"],
+              "properties": {
+                "claude": { "const": ".claude/hooks/stop-gate.py" },
+                "codex": { "const": ".codex/hooks/stop-gate-codex.py" }
+              },
+              "additionalProperties": false
+            },
+            "template_assets": {
+              "type": "array",
+              "minItems": 4,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "allOf": [
+                { "contains": { "const": "AGENTS.md" } },
+                { "contains": { "const": ".agents/skills/co-review/SKILL.md" } },
+                { "contains": { "const": "skills/review/codex-reviewer/SKILL.md" } },
+                { "contains": { "const": "skills/research/grok-researcher/SKILL.md" } }
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        "hooks": {
+          "type": "array",
+          "minItems": 1,
+          "allOf": [
+            {
+              "contains": {
+                "type": "object",
+                "required": ["file", "event"],
+                "properties": {
+                  "file": { "const": ".claude/hooks/stop-gate.py" },
+                  "event": { "const": "Stop" }
+                }
+              }
+            },
+            {
+              "contains": {
+                "type": "object",
+                "required": ["file", "event"],
+                "properties": {
+                  "file": { "const": ".codex/hooks/stop-gate-codex.py" },
+                  "event": { "const": "Stop" }
+                }
+              }
+            },
+            {
+              "contains": {
+                "type": "object",
+                "required": ["file", "event"],
+                "properties": {
+                  "file": { "const": ".codex/hooks/route-gate-codex.py" },
+                  "event": { "const": "UserPromptSubmit" }
+                }
+              }
+            },
+            {
+              "contains": {
+                "type": "object",
+                "required": ["file", "event"],
+                "properties": {
+                  "file": { "const": ".codex/hooks/mirror-gate-codex.py" },
+                  "event": { "const": "SessionStart" }
+                }
+              }
+            }
+          ],
+          "items": {
+            "type": "object",
+            "required": ["file", "event", "role"],
+            "properties": {
+              "file": {
+                "type": "string",
+                "pattern": "^\\.(claude|codex)/hooks/"
+              },
+              "event": {
+                "type": "string",
+                "minLength": 1
+              },
+              "role": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "runtime": {
+          "type": "string",
+          "minLength": 1
+        },
+        "note": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

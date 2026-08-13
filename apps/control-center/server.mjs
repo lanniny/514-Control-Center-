@@ -1,20 +1,502 @@
 #!/usr/bin/env node
 
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import { basename, dirname, extname, join } from "node:path";
+import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { setTimeout as delay } from "node:timers/promises";
 import { createControlCenter } from "./src/app.mjs";
+import { createShutdownController, shouldSetShutdownFailureExitCode } from "./src/shutdown.mjs";
+import { normalizeRequestedAgentIds, resolveStartAgentId } from "./src/orchestrator.mjs";
+import { runDiffForRun } from "./src/run-diff.mjs";
+import {
+  checkReachability,
+  defaultBillingProbe,
+  parseDeeplink,
+  queryProviderUsage,
+  queryUsageScript,
+  testEndpoints,
+  testModelRequest,
+  USAGE_TEMPLATES,
+} from "./src/provider-net.mjs";
+import { PROVIDER_APPS } from "./src/providers.mjs";
+import { adapterTemplateCatalog } from "./src/adapters/manifest.mjs";
 import { childProcessEnv, runProcess } from "./src/process-runner.mjs";
+import { createAgentControlActionRunner } from "./src/agent-actions.mjs";
+import { ResponseLeaseLimiter } from "./src/response-limiter.mjs";
+import { collectPulseSnapshot } from "./src/pulse.mjs";
+import { eventForUi } from "./src/event-view.mjs";
+import { auditBusDiagnostics, MISSION_CONTROL_LIMITS, projectMissionControl } from "./src/mission-control.mjs";
+import { inspectRunWorkspace } from "./src/workspace-explorer.mjs";
+import { collectWorkbenchEnvironment, GitActionBroker } from "./src/workbench-environment.mjs";
+import { attestRunWorkspace, resolveRunWorkspace } from "./src/run-workspace.mjs";
+import { publicSourceEntries, redactSourcePaths as redactPublicSourcePaths } from "./src/run-sources.mjs";
+import { SearchService } from "./src/search.mjs";
+import { MemoryService } from "./src/memory.mjs";
+import { scaffoldProject } from "./src/bootstrap.mjs";
+import { registerChannelsRoutes } from "./src/channels/routes.mjs";
+import { registerSshRoutes } from "./src/ssh/routes.mjs";
+import { registerRemoteProjectRoutes } from "./src/remote-projects/routes.mjs";
+import { registerOfficeRoutes } from "./src/office/routes.mjs";
+import { registerPtyRoutes } from "./src/pty/routes.mjs";
+import { registerMarketRoutes } from "./src/market/routes.mjs";
+import { registerCcSwitchRoutes } from "./src/ccswitch/routes.mjs";
+import { registerCliEnvRoutes } from "./src/cli-env/routes.mjs";
+import { homedir } from "node:os";
 
 const appRoot = fileURLToPath(new URL(".", import.meta.url));
 const publicRoot = join(appRoot, "public");
+// cc-switch 3.18 预设供应商目录（src/data/provider-presets.json，转换自官方 *ProviderPresets.ts）
+let providerPresetsCache = null;
+async function loadProviderPresets() {
+  if (!providerPresetsCache) {
+    providerPresetsCache = JSON.parse(await readFile(join(appRoot, "src", "data", "provider-presets.json"), "utf8"));
+  }
+  return providerPresetsCache;
+}
+function maskSensitivePreview(value) {
+  if (Array.isArray(value)) return value.map(maskSensitivePreview);
+  if (!value || typeof value !== "object") return value;
+  const result = {};
+  for (const [key, entry] of Object.entries(value)) {
+    if (/^(api[_-]?key|token|password|secret|access[_-]?token|refresh[_-]?token)$/i.test(key) && typeof entry === "string" && entry) {
+      result[key] = entry.length > 4 ? `••••${entry.slice(-4)}` : "••••";
+    } else result[key] = maskSensitivePreview(entry);
+  }
+  return result;
+}
 const token = process.env.CONTROL_CENTER_TOKEN || randomBytes(32).toString("base64url");
+const bootstrapNonce = randomBytes(32).toString("base64url");
+const bootstrapExpiresAt = Date.now() + 2 * 60_000;
+let bootstrapConsumed = false;
 const port = Number(process.env.CONTROL_CENTER_PORT || process.argv.find((value) => value.startsWith("--port="))?.split("=")[1] || 0);
 const host = "127.0.0.1";
-const state = await createControlCenter();
+const testRunHistoryScanDelayMs = process.env.CONTROL_CENTER_TEST_MODE === "1"
+  ? Math.min(30_000, Math.max(0, Number(process.env.CONTROL_CENTER_TEST_RUN_HISTORY_SCAN_DELAY_MS) || 0))
+  : 0;
+const testBusTailReadDelayMs = process.env.CONTROL_CENTER_TEST_MODE === "1"
+  ? Math.min(30_000, Math.max(0, Number(process.env.CONTROL_CENTER_TEST_BUS_TAIL_READ_DELAY_MS) || 0))
+  : 0;
+const testMissionHealthDelayMs = process.env.CONTROL_CENTER_TEST_MODE === "1"
+  ? Math.min(30_000, Math.max(0, Number(process.env.CONTROL_CENTER_TEST_MISSION_HEALTH_DELAY_MS) || 0))
+  : 0;
+const testAgentActionDelayMs = process.env.CONTROL_CENTER_TEST_MODE === "1"
+  ? Math.min(30_000, Math.max(0, Number(process.env.CONTROL_CENTER_TEST_AGENT_ACTION_DELAY_MS) || 0))
+  : 0;
+const testBusTailGateEnabled = process.env.CONTROL_CENTER_TEST_MODE === "1"
+  && process.env.CONTROL_CENTER_TEST_BUS_TAIL_GATE === "1";
+const state = await createControlCenter({
+  repoRoot: process.env.CONTROL_CENTER_TEST_MODE === "1"
+    ? process.env.CONTROL_CENTER_TEST_REPO_ROOT || undefined
+    : undefined,
+  eventStoreOptions: testRunHistoryScanDelayMs > 0
+    ? {
+        onRunIndexScan: ({ signal }) => delay(testRunHistoryScanDelayMs, undefined, { signal }),
+      }
+    : undefined,
+});
+// Wave G 面路由注册表：各面 src/<surface>/routes.mjs 导出 register<SX>Routes(router, ctx)。
+// router.get/post/put/delete(prefix, handler)；handler(request, response, url, ctx) 返回 true 表示已处理。
+// 工位纪律：面模块不碰本文件；主驾在下方统一接线（import + register）。
+const surfaceRoutes = [];
+const surfaceRouter = Object.freeze({
+  use(method, prefix, handler) { surfaceRoutes.push({ method, prefix, handler }); },
+  get(prefix, handler) { this.use("GET", prefix, handler); },
+  post(prefix, handler) { this.use("POST", prefix, handler); },
+  put(prefix, handler) { this.use("PUT", prefix, handler); },
+  delete(prefix, handler) { this.use("DELETE", prefix, handler); },
+});
+const surfaceCtx = { state, remoteGates: state.remoteGates, json, body, rawBody };
+// ---- Wave G 面接线（五面全部就位；门闸 v2 在 register 内登记实现）----
+registerChannelsRoutes(surfaceRouter, surfaceCtx);
+registerSshRoutes(surfaceRouter, surfaceCtx);
+registerRemoteProjectRoutes(surfaceRouter, surfaceCtx); // 必须在 registerSshRoutes 之后：主机解析依赖 getSshService()
+registerOfficeRoutes(surfaceRouter, surfaceCtx);
+registerPtyRoutes(surfaceRouter, surfaceCtx);
+registerMarketRoutes(surfaceRouter, surfaceCtx);
+registerCcSwitchRoutes(surfaceRouter, surfaceCtx);
+registerCliEnvRoutes(surfaceRouter, surfaceCtx);
+async function dispatchSurfaceRoute(request, response, url) {
+  for (const route of surfaceRoutes) {
+    if (request.method !== route.method) continue;
+    if (!url.pathname.startsWith(route.prefix)) continue;
+    if (await route.handler(request, response, url, surfaceCtx)) return true;
+  }
+  return false;
+}
+
+function runtimeProfileIdForMember(memberId) {
+  return state.teamMembers.get(String(memberId || "")).runtimeProfileId;
+}
+
+const runAgentControlAction = createAgentControlActionRunner({
+  resolveMember: (memberId) => state.teamMembers.get(memberId),
+  resolveProfile: (runtimeProfileId) => state.models.profiles.find((item) => item.id === runtimeProfileId) || null,
+  modelDiscovery: state.modelDiscovery,
+  repoRoot: state.repoRoot,
+  eventStore: state.eventStore,
+  runProcessImpl: testAgentActionDelayMs > 0
+    ? async (...args) => {
+        await delay(testAgentActionDelayMs);
+        return runProcess(...args);
+      }
+    : runProcess,
+});
+const gitActionBroker = new GitActionBroker();
+
+function projectRouteToTeamMembers(route, team, preferredMemberIds = []) {
+  const roster = (team?.members || []).map((memberId) => state.teamMembers.get(memberId));
+  const preferences = preferredMemberIds
+    .map((memberId) => String(memberId || "").trim())
+    .filter((memberId, index, all) => memberId && all.indexOf(memberId) === index);
+  const memberForRuntime = (runtimeProfileId, excludedMemberIds = []) => {
+    const excluded = new Set(excludedMemberIds.filter(Boolean));
+    const candidates = roster.filter((member) => (
+      !excluded.has(member.id) && member.runtimeProfileId === runtimeProfileId
+    ));
+    return preferences
+      .map((memberId) => candidates.find((member) => member.id === memberId))
+      .find(Boolean)
+      || candidates[0]
+      || null;
+  };
+  const project = (candidate, excludedMemberIds = []) => {
+    if (!candidate) return null;
+    const member = memberForRuntime(candidate.id, excludedMemberIds);
+    if (!member) return { ...candidate, runtimeProfileId: candidate.id };
+    return {
+      ...candidate,
+      id: member.id,
+      label: member.label,
+      role: member.role,
+      runtimeProfileId: candidate.id,
+    };
+  };
+  const selected = project(route.selected);
+  return {
+    ...route,
+    selected,
+    independent: project(route.independent, [selected?.id]),
+    candidates: (route.candidates || []).map((candidate) => project(candidate)).filter(Boolean),
+  };
+}
+
+const RUNTIME_SEAT_SOURCE_ID = "control.models";
+const RUNTIME_SEAT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/;
+let runtimeSeatMutationChain = Promise.resolve();
+
+function runtimeSeatError(message, code = "VALIDATION_FAILED", details = {}) {
+  return Object.assign(new Error(message), { code, ...details });
+}
+
+function normalizeRuntimeSeatId(value) {
+  const id = String(value ?? "").trim();
+  if (!RUNTIME_SEAT_ID.test(id)) {
+    throw runtimeSeatError("runtime seat id must be 1-80 characters using letters, numbers, dot, underscore or hyphen");
+  }
+  return id;
+}
+
+function runtimeSeatPayload(input) {
+  const payload = input?.seat ?? input;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw runtimeSeatError("runtime seat payload must be an object");
+  }
+  return payload;
+}
+
+function runtimeSeatTemplate(adapter, runtimeProfileId) {
+  const template = adapterTemplateCatalog().find((item) => item.id === adapter && item.selectable !== false);
+  if (!template) {
+    throw runtimeSeatError(`unsupported adapter template: ${adapter || "missing"}`, "ADAPTER_MANIFEST_INVALID", {
+      runtimeProfileId,
+    });
+  }
+  return template;
+}
+
+function normalizeRuntimeSeatControls(profile, template) {
+  const runtimeProfileId = String(profile.id || "");
+  let command = profile.command == null ? "" : String(profile.command).trim();
+  if (template.commandMode === "none") {
+    if (command) throw runtimeSeatError(`${template.id} does not accept an execution command`, "ADAPTER_MANIFEST_INVALID", { runtimeProfileId });
+    command = "";
+  } else {
+    if (template.requiresCommand && !command) {
+      throw runtimeSeatError(`${template.id} requires an execution command`, "ADAPTER_MANIFEST_INVALID", { runtimeProfileId });
+    }
+    if (/[\0\r\n]/.test(command) || /^['"]|['"]$/.test(command)) {
+      throw runtimeSeatError("execution command must be an unquoted executable name or path", "VALIDATION_FAILED", { runtimeProfileId });
+    }
+    const looksAbsolute = /^(?:[A-Za-z]:[\\/]|\\\\|\/)/.test(command);
+    if (!looksAbsolute && /\s/.test(command)) {
+      throw runtimeSeatError("execution command cannot include arguments; enter only the executable name or an absolute path", "VALIDATION_FAILED", { runtimeProfileId });
+    }
+  }
+
+  const model = profile.model == null ? "" : String(profile.model).trim();
+  if (model && template.modelMode === "none") {
+    throw runtimeSeatError(`${template.id} does not support model overrides`, "INVALID_MODEL", { runtimeProfileId });
+  }
+  if (model && !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$/.test(model)) {
+    throw runtimeSeatError("model id contains unsupported characters", "INVALID_MODEL", { runtimeProfileId });
+  }
+
+  const defaultEffort = profile.defaultEffort == null ? "" : String(profile.defaultEffort).trim().toLowerCase();
+  if (defaultEffort && template.effortMode === "none") {
+    throw runtimeSeatError(`${template.id} does not support effort overrides`, "INVALID_EFFORT", { runtimeProfileId });
+  }
+  if (defaultEffort && template.effortLevels?.length && !template.effortLevels.includes(defaultEffort)) {
+    throw runtimeSeatError(`unsupported effort level for ${template.id}: ${defaultEffort}`, "INVALID_EFFORT", { runtimeProfileId });
+  }
+
+  const defaultPermissionMode = String(profile.defaultPermissionMode || template.defaultPermissionMode || "read-only");
+  if (!template.permissionModes.includes(defaultPermissionMode)) {
+    throw runtimeSeatError(`unsupported permission mode for ${template.id}: ${defaultPermissionMode}`, "UNSUPPORTED_PERMISSION", { runtimeProfileId });
+  }
+  return {
+    ...profile,
+    command: command || null,
+    model: model || null,
+    defaultEffort: defaultEffort || null,
+    defaultPermissionMode,
+  };
+}
+
+function buildCustomRuntimeSeat(input) {
+  const payload = runtimeSeatPayload(input);
+  const id = normalizeRuntimeSeatId(payload.id);
+  const adapter = String(payload.adapter ?? "").trim();
+  const template = runtimeSeatTemplate(adapter, id);
+  return normalizeRuntimeSeatControls({
+    id,
+    builtin: false,
+    label: id,
+    role: "custom-runtime-seat",
+    description: "",
+    systemPrompt: "",
+    provider: template.defaultProvider || "custom",
+    adapter,
+    command: template.defaultCommand ?? null,
+    model: null,
+    capabilities: [...template.capabilityEnvelope],
+    defaultPermissionMode: template.defaultPermissionMode || "read-only",
+    coordinatorEligible: false,
+    quality: template.routingDefaults?.quality ?? 0.5,
+    speed: template.routingDefaults?.speed ?? 0.5,
+    costTier: template.routingDefaults?.costTier ?? 3,
+    enabled: true,
+    evidence: [{
+      source: "operator-configured",
+      detail: "Created through the Control Center runtime seat editor; executability remains subject to adapter and health gates.",
+      verifiedAt: new Date().toISOString().slice(0, 10),
+    }],
+    ...payload,
+    id,
+    builtin: false,
+    adapter,
+  }, template);
+}
+
+async function readRuntimeSeatRegistry() {
+  const source = await state.configManager.read(RUNTIME_SEAT_SOURCE_ID);
+  let registry;
+  try {
+    registry = JSON.parse(source.content);
+  } catch (error) {
+    throw runtimeSeatError("runtime seat registry is not valid JSON", "RUNTIME_GRAPH_INVALID", { cause: error });
+  }
+  if (!registry || typeof registry !== "object" || Array.isArray(registry) || !Array.isArray(registry.profiles)) {
+    throw runtimeSeatError("runtime seat registry profiles must be an array", "RUNTIME_GRAPH_INVALID");
+  }
+  return { source, registry };
+}
+
+function runtimeSeatReferences(runtimeProfileId) {
+  return state.teamMembers.list()
+    .filter((member) => member.runtimeProfileId === runtimeProfileId)
+    .map((member) => ({
+      type: "team-member",
+      id: member.id,
+      label: member.label,
+      builtin: member.builtin,
+      runtimeProfileId,
+    }));
+}
+
+function configuredRuntimeSeatView(profile) {
+  const live = state.runtimeCatalog.find((item) => item.id === profile.id) ?? null;
+  const active = state.models.profiles.find((item) => item.id === profile.id) ?? null;
+  const activation = active && JSON.stringify(active) === JSON.stringify(profile)
+    ? "live"
+    : "restart-required";
+  return { ...profile, live, activation };
+}
+
+async function runtimeSeatSnapshot() {
+  const { source, registry } = await readRuntimeSeatRegistry();
+  const providerState = state.providers.list();
+  const seats = registry.profiles.map(configuredRuntimeSeatView);
+  const activation = seats.every((seat) => seat.activation === "live") ? "live" : "restart-required";
+  return {
+    seats,
+    runtimeProfiles: state.runtimeCatalog,
+    adapterTemplates: adapterTemplateCatalog(),
+    providers: providerState.providers,
+    providerCurrent: providerState.current,
+    providerApps: [...PROVIDER_APPS],
+    source: { id: source.id, sha256: source.sha256 },
+    runtime: { generation: state.generation, activation },
+  };
+}
+
+function withRuntimeSeatMutation(operation) {
+  const result = runtimeSeatMutationChain.catch(() => {}).then(operation);
+  runtimeSeatMutationChain = result.catch(() => {});
+  return result;
+}
+
+function mutateRuntimeSeats(reason, mutation) {
+  return withRuntimeSeatMutation(async () => {
+    const { source, registry } = await readRuntimeSeatRegistry();
+    const outcome = await mutation(registry.profiles, registry);
+    const content = `${JSON.stringify(registry, null, 2)}\n`;
+    const plan = await state.configManager.plan(RUNTIME_SEAT_SOURCE_ID, content, source.sha256);
+    const transaction = await state.configManager.apply(RUNTIME_SEAT_SOURCE_ID, {
+      content,
+      baseSha256: source.sha256,
+      planId: plan.planId,
+      confirmation: RUNTIME_SEAT_SOURCE_ID,
+      actor: "control-center-runtime-seat",
+      reason,
+    });
+    return { outcome, transaction };
+  });
+}
+
+let projectPrefsWriteChain = Promise.resolve();
+const runEventResponses = new ResponseLeaseLimiter({ maxActive: 16, maxActivePerKey: 4 });
+const testBusTailGate = (() => {
+  let open = !testBusTailGateEnabled;
+  const waiters = new Set();
+  return {
+    async wait(signal) {
+      if (open) return;
+      if (signal?.aborted) throw signal.reason;
+      await new Promise((resolveWait, rejectWait) => {
+        let settled = false;
+        const settle = (callback, value) => {
+          if (settled) return;
+          settled = true;
+          waiters.delete(release);
+          signal?.removeEventListener("abort", onAbort);
+          callback(value);
+        };
+        const release = () => settle(resolveWait);
+        const onAbort = () => settle(rejectWait, signal.reason);
+        waiters.add(release);
+        signal?.addEventListener("abort", onAbort, { once: true });
+        if (open) release();
+        else if (signal?.aborted) onAbort();
+      });
+    },
+    release() {
+      open = true;
+      const released = waiters.size;
+      for (const waiter of [...waiters]) waiter();
+      return released;
+    },
+  };
+})();
+
+function cleanProjectPrefs(payload, { persisted = false } = {}) {
+  const invalid = (message) => Object.assign(new Error(message), { code: persisted ? "PREFS_CORRUPT" : "VALIDATION_FAILED" });
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw invalid("project prefs must be an object");
+  const projects = payload.projects;
+  if (!projects || typeof projects !== "object" || Array.isArray(projects)) throw invalid("projects object is required");
+  const clean = Object.create(null);
+  for (const [key, value] of Object.entries(projects)) {
+    if (typeof key !== "string" || key.length > 500 || !value || typeof value !== "object" || Array.isArray(value)) continue;
+    const entry = {};
+    if (value.pinned !== undefined) entry.pinned = Boolean(value.pinned);
+    if (value.hidden !== undefined) entry.hidden = Boolean(value.hidden);
+    if (typeof value.name === "string" && value.name.trim()) entry.name = value.name.trim().slice(0, 120);
+    if (typeof value.teamId === "string" && value.teamId.trim()) entry.teamId = value.teamId.trim().slice(0, 80);
+    if (Object.keys(entry).length) clean[key] = entry;
+  }
+
+  const cleanSessions = Object.create(null);
+  const sessions = payload.sessions;
+  if (sessions !== undefined && (!sessions || typeof sessions !== "object" || Array.isArray(sessions))) {
+    if (persisted) throw invalid("persisted sessions must be an object");
+  } else if (sessions) {
+    for (const [key, value] of Object.entries(sessions)) {
+      if (typeof key !== "string" || key.length > 700 || !value || typeof value !== "object" || Array.isArray(value)) continue;
+      const entry = {};
+      if (value.pinned !== undefined) entry.pinned = Boolean(value.pinned);
+      if (value.archived !== undefined) entry.archived = Boolean(value.archived);
+      if (value.unread !== undefined) entry.unread = Boolean(value.unread);
+      if (typeof value.alias === "string" && value.alias.trim()) entry.alias = value.alias.trim().slice(0, 160);
+      if (typeof value.teamId === "string" && value.teamId.trim()) entry.teamId = value.teamId.trim().slice(0, 80);
+      if (Object.keys(entry).length) cleanSessions[key] = entry;
+    }
+  }
+
+  const revision = payload.revision === undefined ? 0 : Number(payload.revision);
+  if (!Number.isSafeInteger(revision) || revision < 0) throw invalid("project prefs revision is invalid");
+  return { revision, projects: clean, sessions: cleanSessions };
+}
+
+async function readProjectPrefs(path) {
+  try {
+    return cleanProjectPrefs(JSON.parse(await readFile(path, "utf8")), { persisted: true });
+  } catch (error) {
+    if (error.code === "ENOENT") return { revision: 0, projects: {}, sessions: {} };
+    if (error instanceof SyntaxError) {
+      throw Object.assign(new Error(`project prefs JSON is corrupt: ${error.message}`), { code: "PREFS_CORRUPT" });
+    }
+    throw error;
+  }
+}
+
+async function atomicWriteProjectPrefs(path, value) {
+  await mkdir(dirname(path), { recursive: true });
+  const temp = join(dirname(path), `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`);
+  try {
+    await writeFile(temp, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await rename(temp, path);
+        return;
+      } catch (error) {
+        if (!["EPERM", "EACCES", "EBUSY"].includes(error.code) || attempt >= 5) throw error;
+        await delay(10 * (2 ** attempt));
+      }
+    }
+  } finally {
+    await rm(temp, { force: true }).catch(() => {});
+  }
+}
+
+// v3.7 体检脉搏：治理数据面（observability）+ 运行时实况（runs/health/automations）合一——
+// 体检自动化的 prompt 注入源，也是 GET /api/observability/pulse 的响应体
+async function collectPulse({ signal } = {}) {
+  return collectPulseSnapshot({
+    observability: state.observability,
+    orchestrator: state.orchestrator,
+    healthService: state.healthService,
+    automations: state.automations,
+    signal,
+  });
+}
+state.collectPulse = collectPulse; // AutomationStore 注入 prompt 用（app 装配期拿不到闭包，挂 state 上）
+
+// v4.0 Forge：统一搜索 / 记忆浏览器 / 项目脚手架服务（全部本地只读，脚手架是唯一写口且限根）
+const aiSharedRoot = join(state.repoRoot, ".ai-shared");
+const searchService = new SearchService({ repoRoot: state.repoRoot, aiSharedRoot, sessions: state.sessions });
+const memoryService = new MemoryService({ repoRoot: state.repoRoot, aiSharedRoot });
 
 const securityHeaders = {
   "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
@@ -28,6 +510,115 @@ const securityHeaders = {
 function json(response, status, payload) {
   response.writeHead(status, { ...securityHeaders, "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
   response.end(JSON.stringify(payload));
+}
+
+function redactOrphanedRunPaths(value) {
+  const seen = new WeakSet();
+  const redact = (item) => {
+    if (typeof item === "string") {
+      return item
+        .replace(/\b[A-Za-z]:[\\/][^\r\n]*/g, "[本地路径]")
+        .replace(/\\\\[^\\/\r\n]+[\\/][^\r\n]*/g, "[本地路径]")
+        .replace(/(^|[\s(])\/(?!\/)[^\r\n]*/g, "$1[本地路径]");
+    }
+    if (!item || typeof item !== "object") return item;
+    if (seen.has(item)) return item;
+    seen.add(item);
+    if (Array.isArray(item)) {
+      for (let index = 0; index < item.length; index += 1) item[index] = redact(item[index]);
+    } else {
+      for (const key of Object.keys(item)) item[key] = redact(item[key]);
+    }
+    return item;
+  };
+  return redact(structuredClone(value));
+}
+
+function runForPublic(run) {
+  if (!run || typeof run !== "object") return run;
+  const sources = publicSourceEntries(run.sources);
+  const value = redactPublicSourcePaths(run, sources);
+  if (Array.isArray(value.sources)) {
+    value.sources = sources.map(({ kind, name }) => ({ kind, name }));
+  }
+  return value;
+}
+
+function runsForPublic(runs) {
+  return (Array.isArray(runs) ? runs : []).map(runForPublic);
+}
+
+function automationForPublic(automation) {
+  if (!automation || typeof automation !== "object") return automation;
+  const sources = publicSourceEntries(automation.sources);
+  const value = redactPublicSourcePaths(automation, sources);
+  if (Array.isArray(value.sources)) value.sources = sources.map(({ kind, name }) => ({ kind, name }));
+  return value;
+}
+
+function automationsForPublic(automations) {
+  return (Array.isArray(automations) ? automations : []).map(automationForPublic);
+}
+
+function eventForPublic(event, run, uiView = false) {
+  const sourceRefs = Array.isArray(run?.sources) && run.sources.length
+    ? run.sources
+    : event?.sourceRefs;
+  let value = redactPublicSourcePaths(event, sourceRefs);
+  if (event?.runId && !run && !sourceRefs?.length) value = redactOrphanedRunPaths(value);
+  if (value && typeof value === "object") delete value.sourceRefs;
+  return uiView ? eventForUi(value) : value;
+}
+
+async function writeWithBackpressure(response, chunk) {
+  if (response.destroyed || response.writableEnded) return false;
+  if (response.write(chunk)) return true;
+  return new Promise((resolveDrain) => {
+    const settle = (value) => {
+      response.off("drain", onDrain);
+      response.off("close", onClose);
+      response.off("error", onClose);
+      resolveDrain(value);
+    };
+    const onDrain = () => settle(!response.destroyed && !response.writableEnded);
+    const onClose = () => settle(false);
+    response.once("drain", onDrain);
+    response.once("close", onClose);
+    response.once("error", onClose);
+    if (response.destroyed || response.writableEnded) settle(false);
+  });
+}
+
+async function ndjson(response, events, {
+  batchSize = 128,
+  maxBatchBytes = 64 * 1024,
+  maxBatchMs = 8,
+  transform = (event) => event,
+} = {}) {
+  response.writeHead(200, {
+    ...securityHeaders,
+    "content-type": "application/x-ndjson; charset=utf-8",
+    "cache-control": "no-store",
+  });
+  let lines = [];
+  let bytes = 0;
+  let batchStartedAt = performance.now();
+  for (let index = 0; index < events.length; index += 1) {
+    const line = JSON.stringify(transform(events[index]));
+    lines.push(line);
+    bytes += Buffer.byteLength(line, "utf8") + 1;
+    const elapsed = performance.now() - batchStartedAt;
+    const shouldFlush = lines.length >= batchSize || bytes >= maxBatchBytes || elapsed >= maxBatchMs;
+    if (!shouldFlush && index + 1 < events.length) continue;
+    if (!(await writeWithBackpressure(response, `${lines.join("\n")}\n`))) return;
+    lines = [];
+    bytes = 0;
+    if (index + 1 < events.length) {
+      await new Promise((resolveYield) => setImmediate(resolveYield));
+      batchStartedAt = performance.now();
+    }
+  }
+  response.end();
 }
 
 async function body(request, maxBytes = 6 * 1024 * 1024) {
@@ -46,8 +637,26 @@ async function body(request, maxBytes = 6 * 1024 * 1024) {
   }
 }
 
+/** Wave G：HMAC 验签等场景需要原文字节（重序列化会破坏签名）。 */
+async function rawBody(request, maxBytes = 6 * 1024 * 1024) {
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of request) {
+    size += chunk.length;
+    if (size > maxBytes) throw Object.assign(new Error("request body is too large"), { code: "BODY_TOO_LARGE" });
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
 function authorized(request) {
   return request.headers.authorization === `Bearer ${token}`;
+}
+
+function secretEquals(left, right) {
+  const a = Buffer.from(String(left ?? ""));
+  const b = Buffer.from(String(right ?? ""));
+  return a.length === b.length && timingSafeEqual(a, b);
 }
 
 function secretReferenceStatus(health) {
@@ -82,14 +691,99 @@ function secretReferenceStatus(health) {
 }
 
 function statusFor(error) {
-  if (["SOURCE_NOT_FOUND", "RUN_NOT_FOUND", "VERSION_NOT_FOUND", "APPROVAL_NOT_FOUND"].includes(error.code)) return 404;
-  if (["STALE_BASE", "RUN_ACTIVE", "TURN_ACTIVE", "APPROVAL_HASH_MISMATCH", "APPROVAL_IN_PROGRESS", "PLAN_REQUIRED", "PLAN_MISMATCH", "APPROVAL_REQUIRED", "RECOVERY_REQUIRED", "RUNTIME_BUSY"].includes(error.code)) return 409;
+  if (["SOURCE_NOT_FOUND", "RUN_NOT_FOUND", "VERSION_NOT_FOUND", "APPROVAL_NOT_FOUND", "LEASE_NOT_FOUND", "AUTOMATION_NOT_FOUND", "RUNTIME_SEAT_NOT_FOUND", "REMOTE_HOST_NOT_FOUND", "BACKUP_NOT_FOUND"].includes(error.code)) return 404;
+  if (["STALE_BASE", "RUN_ACTIVE", "RUN_TERMINAL", "TURN_ACTIVE", "CONTROL_TRANSITION_FORBIDDEN", "APPROVAL_HASH_MISMATCH", "APPROVAL_IN_PROGRESS", "PLAN_REQUIRED", "PLAN_MISMATCH", "PLAN_EXPIRED", "PLAN_STALE", "APPROVAL_REQUIRED", "RECOVERY_REQUIRED", "RUNTIME_BUSY", "AGENT_ACTION_BUSY", "AUTOMATION_BUSY", "AUTOMATION_RECOVERY_REQUIRED", "PREFS_REVISION_MISMATCH", "MCP_RESTORE_CONFLICT", "MCP_QUARANTINE_CONFLICT", "MCP_SOURCE_CONFLICT", "TEAM_CATALOG_CONFLICT", "MEMBER_IN_USE", "MEMBER_RUNTIME_CONFLICT", "RUNTIME_SEAT_EXISTS", "RUNTIME_SEAT_IN_USE", "PROVIDER_IN_USE", "ASK_NOT_PENDING", "ASK_MISMATCH", "ASK_OWNER_MISMATCH", "ANSWER_IN_PROGRESS", "GIT_ACTION_FAILED", "REMOTE_HOST_DISABLED", "BACKUP_TARGET_CHANGED"].includes(error.code)) return 409;
   if (["CONFIRMATION_REQUIRED", "DEPLOYMENT_REQUIRED", "READ_ONLY_SOURCE", "FROZEN_BLOCK"].includes(error.code)) return 403;
-  if (["VALIDATION_FAILED", "INVALID_PROMPT", "INVALID_JSON", "INVALID_DECISION", "PROVIDER_NOT_FOUND", "PROVIDER_UNAVAILABLE", "NO_ROUTE", "NO_INDEPENDENT_ROUTE", "ROUND_LIMIT", "INSUFFICIENT_ROUNDS", "SENSITIVE_PROMPT", "UNSUPPORTED_APPROVAL", "UNSUPPORTED_PERMISSION", "POLICY_VIOLATION", "ADAPTER_UNAVAILABLE", "TRANSACTION_INCONSISTENT"].includes(error.code)) return 422;
+  if (["VALIDATION_FAILED", "RUNTIME_GRAPH_INVALID", "ADAPTER_MANIFEST_INVALID", "RUNTIME_CATALOG_INVALID", "RUNTIME_PROFILE_NOT_FOUND", "RUNTIME_PROFILE_INELIGIBLE", "RUNTIME_CAPABILITY_CONFLICT", "AGENT_ACTION_UNSUPPORTED", "PATH_BOUNDARY", "INVALID_PROMPT", "INVALID_JSON", "INVALID_DECISION", "INVALID_CWD", "INVALID_MODEL", "INVALID_EFFORT", "NOT_TEAM_MEMBER", "PROVIDER_NOT_FOUND", "PROVIDER_UNAVAILABLE", "NO_ROUTE", "NO_INDEPENDENT_ROUTE", "ROUND_LIMIT", "INSUFFICIENT_ROUNDS", "SENSITIVE_PROMPT", "UNSUPPORTED_APPROVAL", "UNSUPPORTED_PERMISSION", "POLICY_VIOLATION", "ADAPTER_UNAVAILABLE", "TRANSACTION_INCONSISTENT", "GIT_STATE_UNAVAILABLE", "NOTHING_STAGED", "NOTHING_TO_PUSH", "NO_UPSTREAM", "MULTIPLE_PUSH_TARGETS", "PUSH_URL_REWRITE", "DETACHED_HEAD", "WORKTREE_NOT_READY", "WORKTREE_INVALID", "INVALID_REMOTE", "INVALID_REMOTE_PATH", "REMOTE_ADAPTER_UNSUPPORTED", "BACKUP_NAME_INVALID", "BACKUP_TARGET_UNRESOLVED"].includes(error.code)) return 422;
   if (error.code === "BODY_TOO_LARGE") return 413;
+  if (["EVENT_TOO_LARGE", "EVENT_HISTORY_TOO_LARGE"].includes(error.code)) return 413;
   if (error.code === "PROCESS_TIMEOUT") return 408; // 系统选择框挂满 5 分钟未选属预期流程，不是服务端故障
   if (error.code === "OUTPUT_LIMIT") return 413;
+  if (["AGENT_ACTION_CAPACITY", "MODEL_DISCOVERY_CAPACITY"].includes(error.code)) return 429;
+  if (["EVENT_INDEX_BUSY", "HEALTH_PROBE_BUSY", "TEAM_STORE_UNAVAILABLE", "MEMBER_REFERENCE_CHECK_FAILED", "PROVIDER_REFERENCE_CHECK_FAILED", "REMOTE_UNAVAILABLE"].includes(error.code)) return 503;
+  if ([
+    "AUTOMATION_STORE_CORRUPT",
+    "AUTOMATION_STORE_UNREADABLE",
+    "AUTOMATION_STORE_DEGRADED",
+    "AUTOMATION_STORE_WRITE_FAILED",
+    "CAPABILITY_CONFIG_CORRUPT",
+    "CAPABILITY_CONFIG_UNREADABLE",
+    "CAPABILITY_CONFIG_UNAVAILABLE",
+    "MCP_QUARANTINE_CORRUPT",
+    "MCP_QUARANTINE_UNREADABLE",
+    "MCP_QUARANTINE_UNAVAILABLE",
+    "MCP_SOURCE_CORRUPT",
+    "MCP_SOURCE_UNREADABLE",
+    "MCP_TRANSACTION_INCOMPLETE",
+    "SENSITIVE_FILE_PERMISSION_FAILED",
+    "SENSITIVE_TEMP_CLEANUP_FAILED",
+  ].includes(error.code)) return 503;
+  if (error.code === "NOT_ACCEPTABLE") return 406;
+  if (error.code === "REMOTE_GATE_BLOCKED") return 501; // 远程门闸未授权（ssh/sftp）——各面路由同语义
   return 500;
+}
+
+function parseAcceptHeader(header) {
+  return String(header ?? "")
+    .split(",")
+    .map((raw, order) => {
+      const [rawMediaType, ...rawParameters] = raw.split(";");
+      const mediaType = rawMediaType.trim().toLowerCase();
+      const match = /^([^\s/]+)\/([^\s/]+)$/.exec(mediaType);
+      if (!match) return null;
+      let quality = 1;
+      for (const rawParameter of rawParameters) {
+        const separator = rawParameter.indexOf("=");
+        if (separator < 0 || rawParameter.slice(0, separator).trim().toLowerCase() !== "q") continue;
+        const value = rawParameter.slice(separator + 1).trim();
+        quality = /^(?:0(?:\.\d{0,3})?|1(?:\.0{0,3})?)$/.test(value) ? Number(value) : 0;
+        break;
+      }
+      return { type: match[1], subtype: match[2], quality, order };
+    })
+    .filter(Boolean);
+}
+
+function acceptMatch(ranges, type, subtype) {
+  let best = { quality: 0, specificity: -1, order: Number.POSITIVE_INFINITY };
+  for (const range of ranges) {
+    if (range.type !== "*" && range.type !== type) continue;
+    if (range.subtype !== "*" && range.subtype !== subtype) continue;
+    const specificity = Number(range.type !== "*") + Number(range.subtype !== "*");
+    if (specificity > best.specificity || (specificity === best.specificity && range.order < best.order)) {
+      best = { quality: range.quality, specificity, order: range.order };
+    }
+  }
+  return best;
+}
+
+function selectRunHistoryRepresentation(header) {
+  // RFC 9110: a missing Accept header means the client accepts any media type.
+  // Keep the historical JSON representation as the deterministic default.
+  if (!String(header ?? "").trim()) return "json";
+  const ranges = parseAcceptHeader(header);
+  const ndjson = acceptMatch(ranges, "application", "x-ndjson");
+  const jsonPreference = acceptMatch(ranges, "application", "json");
+  if (ndjson.quality <= 0 && jsonPreference.quality <= 0) return null;
+  if (ndjson.quality <= 0) return "json";
+  if (jsonPreference.quality <= 0) return "ndjson";
+  if (ndjson.quality !== jsonPreference.quality) return ndjson.quality > jsonPreference.quality ? "ndjson" : "json";
+  if (ndjson.specificity !== jsonPreference.specificity) return ndjson.specificity > jsonPreference.specificity ? "ndjson" : "json";
+  if (ndjson.order !== jsonPreference.order) return ndjson.order < jsonPreference.order ? "ndjson" : "json";
+  return "json"; // Equal wildcards retain the backward-compatible JSON default.
+}
+
+const PUBLIC_ASSET_PREFIXES = ["/forge/", "/modules/", "/vendor/"];
+const PUBLIC_ASSET_EXTS = new Set([".css", ".js", ".mjs", ".svg", ".json"]);
+function resolvePublicAsset(pathname) {
+  if (!PUBLIC_ASSET_PREFIXES.some((prefix) => pathname.startsWith(prefix))) return null;
+  const segments = pathname.split("/").filter(Boolean);
+  if (segments.length < 2) return null;
+  if (segments.some((segment) => segment === ".." || segment.includes("\\") || segment.includes("\0"))) return null;
+  if (!PUBLIC_ASSET_EXTS.has(extname(segments.at(-1) || ""))) return null;
+  const resolved = resolve(publicRoot, ...segments);
+  if (resolved !== publicRoot && !resolved.startsWith(`${publicRoot}${sep}`)) return null;
+  return segments.join("/");
 }
 
 async function serveStatic(pathname, response) {
@@ -98,11 +792,57 @@ async function serveStatic(pathname, response) {
     response.end();
     return true;
   }
-  const paths = { "/": "index.html", "/index.html": "index.html", "/app.js": "app.js", "/markdown.js": "markdown.js", "/theme.js": "theme.js", "/styles.css": "styles.css" };
-  const file = paths[pathname];
+
+  const paths = {
+    "/": "index.html",
+    "/index.html": "index.html",
+    "/app.js": "app.js",
+    "/mission-control.js": "mission-control.js",
+    "/environment-panel.js": "environment-panel.js",
+    "/rail-tools.js": "rail-tools.js",
+    "/path-key.js": "path-key.js",
+    "/markdown.js": "markdown.js",
+    "/theme.js": "theme.js",
+    "/styles.css": "styles.css",
+    "/atelier.css": "atelier.css",
+    "/atelier-canvas.js": "atelier-canvas.js",
+    "/lucide.js": "lucide.js",
+    "/lucide-sprite.svg": "lucide-sprite.svg",
+    "/modules/stream-epoch.js": "modules/stream-epoch.js",
+    "/modules/welcome-tips.js": "modules/welcome-tips.js",
+    "/modules/resume-hints.js": "modules/resume-hints.js",
+    "/modules/agent-roles.js": "modules/agent-roles.js",
+    "/rich-render.js": "rich-render.js",
+    "/command-palette.js": "command-palette.js",
+    "/team-panel.js": "team-panel.js",
+    "/channels-panel.js": "channels-panel.js",
+    "/office-panel.js": "office-panel.js",
+    "/terminal-panel.js": "terminal-panel.js",
+    "/market-panel.js": "market-panel.js",
+    "/hosts-panel.js": "hosts-panel.js",
+    "/splitter.js": "splitter.js",
+    "/workbench-chrome.js": "workbench-chrome.js",
+    "/hero-starmap.js": "hero-starmap.js",
+    "/delta-timeline.js": "delta-timeline.js",
+    "/project-bootstrapper.js": "project-bootstrapper.js",
+    "/collab-flow.js": "collab-flow.js",
+    "/memory-browser.js": "memory-browser.js",
+    "/utils.js": "utils.js",
+    "/api.js": "api.js",
+    "/state.js": "state.js",
+  };
+  // v4.0 Forge：子目录资产（/forge/*、/modules/*）按段校验放行，拒绝逃逸与未知扩展
+  const file = paths[pathname] ?? resolvePublicAsset(pathname);
   if (!file) return false;
   const content = await readFile(join(publicRoot, file));
-  const type = extname(file) === ".js" ? "text/javascript; charset=utf-8" : extname(file) === ".css" ? "text/css; charset=utf-8" : "text/html; charset=utf-8";
+  const ext = extname(file);
+  const type = ext === ".js" || ext === ".mjs"
+    ? "text/javascript; charset=utf-8"
+    : ext === ".css"
+      ? "text/css; charset=utf-8"
+      : ext === ".svg"
+        ? "image/svg+xml; charset=utf-8"
+        : "text/html; charset=utf-8";
   response.writeHead(200, { ...securityHeaders, "content-type": type, "cache-control": "no-store" });
   response.end(content);
   return true;
@@ -110,32 +850,168 @@ async function serveStatic(pathname, response) {
 
 async function api(request, response, url) {
   const { pathname } = url;
+  if (request.method === "POST" && pathname === "/api/test/shutdown" && process.env.CONTROL_CENTER_TEST_MODE === "1") {
+    json(response, 202, { status: "shutting_down" });
+    setImmediate(() => requestShutdown("test-api"));
+    return;
+  }
+  if (request.method === "GET" && pathname === "/api/test/response-leases" && process.env.CONTROL_CENTER_TEST_MODE === "1") {
+    return json(response, 200, runEventResponses.snapshot(url.searchParams.get("key")));
+  }
+  if (request.method === "POST" && pathname === "/api/test/bus-tail-gate/release" && testBusTailGateEnabled) {
+    return json(response, 200, { released: testBusTailGate.release() });
+  }
   if (request.method === "GET" && pathname === "/api/bootstrap") {
-    const [health, sources] = await Promise.all([state.healthService.all(), state.configManager.listSources()]);
-    return json(response, 200, {
-      version: "0.1.0",
-      runtime: { generation: state.generation, activation: "live" },
-      repoRoot: state.repoRoot,
-      providers: state.models.profiles,
-      health,
-      sources,
-      runs: state.orchestrator.list(),
-      approvals: state.approvalBroker.list(),
-      routing: state.routing,
-      permissions: state.permissions,
-      security: { secrets: secretReferenceStatus(health) },
-    });
+    return await runEventResponses.run("bootstrap", response, async (signal) => {
+      const [health, sources] = await Promise.all([
+        state.healthService.all({ signal }),
+        state.configManager.listSources(),
+      ]);
+      return json(response, 200, {
+        version: "0.1.0",
+        runtime: { generation: state.generation, activation: "live" },
+        repoRoot: state.repoRoot,
+        providers: state.models.profiles,
+        runtimeSeats: state.models.profiles,
+        adapterTemplates: adapterTemplateCatalog(),
+        teamCatalog: state.teamCatalog,
+        memberCatalog: state.teamCatalog,
+        runtimeCatalog: state.runtimeCatalog,
+        health,
+        sources,
+        runs: runsForPublic(state.orchestrator.list()),
+        approvals: state.approvalBroker.list(),
+        routing: state.routing,
+        permissions: state.permissions,
+        security: { secrets: secretReferenceStatus(health) },
+      });
+    }, { request });
   }
   if (request.method === "GET" && pathname === "/api/health") {
-    return json(response, 200, { items: await state.healthService.all({ refresh: url.searchParams.get("refresh") === "1" }) });
+    return await runEventResponses.run("health", response, async (signal) => json(response, 200, {
+      items: await state.healthService.all({
+        refresh: url.searchParams.get("refresh") === "1",
+        signal,
+      }),
+    }), { request });
+  }
+  if (request.method === "GET" && pathname === "/api/workbench/environment") {
+    const requestedRunId = String(url.searchParams.get("runId") || "").trim();
+    const run = requestedRunId ? structuredClone(state.orchestrator.get(requestedRunId)) : null;
+    const workspace = run
+      ? await attestRunWorkspace(run)
+      : resolveRunWorkspace(null, { fallbackPath: state.repoRoot });
+    // Snapshot before Git/GitHub probes start so the probe processes never list themselves.
+    const processes = state.childRegistry.snapshot();
+    return await runEventResponses.run(`environment:${requestedRunId || "idle"}`, response, async (signal) => {
+      const environment = await collectWorkbenchEnvironment({
+        cwd: workspace.path,
+        run,
+        runs: state.orchestrator.list(),
+        processes,
+        signal,
+        workspaceSource: workspace.kind === "worktree" ? "worktree" : run ? "run" : "control-center",
+      });
+      return json(response, 200, environment);
+    }, { request });
+  }
+  if (request.method === "POST" && pathname === "/api/workbench/git/plan") {
+    const input = await body(request);
+    const runId = String(input?.runId || "").trim();
+    const run = runId ? state.orchestrator.get(runId) : null;
+    const workspace = run
+      ? await attestRunWorkspace(run)
+      : resolveRunWorkspace(null, { fallbackPath: state.repoRoot });
+    return json(response, 200, await gitActionBroker.plan({
+      cwd: workspace.path,
+      action: String(input?.action || ""),
+      message: String(input?.message || ""),
+      revalidateWorkspace: workspace.kind === "worktree"
+        ? async () => attestRunWorkspace(state.orchestrator.get(runId))
+        : null,
+    }));
+  }
+  if (request.method === "POST" && pathname === "/api/workbench/git/execute") {
+    const input = await body(request);
+    return json(response, 200, await gitActionBroker.execute({
+      planId: input?.planId,
+      confirmation: input?.confirmation,
+    }));
+  }
+  // Wave G v2：门闸清单（grant 账本 + 实现注册表；未授权/未实现即 501）
+  if (request.method === "GET" && pathname === "/api/security/remote-gates") {
+    return json(response, 200, state.remoteGates.snapshot());
+  }
+  if (request.method === "POST" && pathname === "/api/security/remote-gates/open") {
+    const payload = await body(request);
+    const gate = String(payload?.gate || payload?.id || "");
+    try {
+      state.remoteGates.assert(gate);
+      return json(response, 200, { ok: true });
+    } catch (error) {
+      return json(response, error.httpStatus || 501, {
+        ok: false,
+        code: error.code || "REMOTE_GATE_BLOCKED",
+        gate: error.gate || gate,
+        message: error.message,
+      });
+    }
+  }
+  if (request.method === "POST" && pathname === "/api/security/remote-gates/grant") {
+    const payload = await body(request);
+    const gate = String(payload?.gate || payload?.id || "");
+    try {
+      const entry = await state.remoteGates.grant(gate, {
+        source: String(payload?.source || "operator"),
+        note: String(payload?.note || ""),
+      });
+      return json(response, 200, { ok: true, gate: entry });
+    } catch (error) {
+      return json(response, error.httpStatus || 501, { ok: false, code: error.code, gate, message: error.message });
+    }
+  }
+  if (request.method === "POST" && pathname === "/api/security/remote-gates/revoke") {
+    const payload = await body(request);
+    const gate = String(payload?.gate || payload?.id || "");
+    try {
+      const entry = await state.remoteGates.revoke(gate, { source: String(payload?.source || "operator") });
+      return json(response, 200, { ok: true, gate: entry });
+    } catch (error) {
+      return json(response, error.httpStatus || 501, { ok: false, code: error.code, gate, message: error.message });
+    }
   }
   if (request.method === "POST" && pathname === "/api/runtime/reload") {
-    return json(response, 200, await state.reloadRuntime({ reason: "operator request" }));
+    return json(response, 200, await withRuntimeSeatMutation(() => state.reloadRuntime({ reason: "operator request" })));
   }
   if (request.method === "GET" && pathname === "/api/config/sources") {
     return json(response, 200, { sources: await state.configManager.listSources() });
   }
   if (request.method === "GET" && pathname === "/api/observability/summary") return json(response, 200, await state.observability.summary());
+  // 能力图谱（codeg 对标 P2）：skills 只读矩阵 + MCP 本地扫描（白名单字段，密钥面不外发）
+  if (request.method === "GET" && pathname === "/api/capabilities") return json(response, 200, await state.capabilities.summary());
+  // agent skill 启停（LO 可配置面）：负名单落 dataRoot，成员轮提示词按此过滤（真接线非摆设）
+  if (request.method === "PUT" && pathname === "/api/capabilities/agent-skill") {
+    const payload = await body(request);
+    const agentId = String(payload?.agentId ?? "");
+    const skill = String(payload?.skill ?? "");
+    if (!agentId || !skill) throw Object.assign(new Error("agentId and skill are required"), { code: "VALIDATION_FAILED" });
+    return json(response, 200, await state.capabilities.setAgentSkill(agentId, skill, payload?.enabled !== false));
+  }
+  // MCP 启停（claude.json 全局 server 隔离式）：mtime 乐观锁防覆写 Claude Code 并发写
+  if (request.method === "POST" && pathname === "/api/capabilities/mcp/toggle") {
+    const payload = await body(request);
+    return json(response, 200, await state.capabilities.toggleMcpServer({
+      name: String(payload?.name ?? ""),
+      source: String(payload?.source ?? ""),
+      action: String(payload?.action ?? ""),
+      knownMtimeMs: Number(payload?.knownMtimeMs),
+    }));
+  }
+  if (request.method === "GET" && pathname === "/api/observability/pulse") {
+    return await runEventResponses.run("observability:pulse", response, async (signal) => {
+      return json(response, 200, await collectPulse({ signal }));
+    }, { request });
+  }
   if (request.method === "GET" && pathname === "/api/observability/routegate") {
     return json(response, 200, await state.observability.routeGate({ days: Number(url.searchParams.get("days")) || 7 }));
   }
@@ -144,11 +1020,33 @@ async function api(request, response, url) {
   const handoffMatch = pathname.match(/^\/api\/observability\/handoffs\/([^/]+)$/);
   if (request.method === "GET" && handoffMatch) return json(response, 200, await state.observability.handoffContent(decodeURIComponent(handoffMatch[1])));
   if (request.method === "POST" && pathname === "/api/observability/drift") return json(response, 200, await state.observability.drift());
+  // v4.0 Forge 统一搜索：handoff/doc/memory/session/skill 五源分组（空 q 回空 groups）
+  if (request.method === "GET" && pathname === "/api/search") {
+    return json(response, 200, await searchService.search({
+      query: url.searchParams.get("q") ?? "",
+      limit: Number(url.searchParams.get("limit")) || 50,
+    }));
+  }
+  // v4.0 Forge 记忆浏览器：只读三根视图 + 全文检索（路径全部由仓库根派生）
+  if (request.method === "GET" && pathname === "/api/memory") return json(response, 200, await memoryService.roots());
+  if (request.method === "GET" && pathname === "/api/memory/search") {
+    return json(response, 200, await memoryService.search({ query: url.searchParams.get("q") ?? "" }));
+  }
+  // v4.0 Forge 项目脚手架：静态模板生成（零网络零安装）；dryRun 只出计划，dir 限根 home/仓库父目录
+  if (request.method === "POST" && pathname === "/api/bootstrap/scaffold") {
+    return json(response, 200, await scaffoldProject(await body(request), {
+      homeDir: homedir(),
+      allowedRoots: [homedir(), dirname(state.repoRoot)],
+    }));
+  }
   if (request.method === "GET" && pathname === "/api/sessions") {
     return json(response, 200, await state.sessions.list({ includeSummaries: url.searchParams.get("summaries") === "1" }));
   }
   if (request.method === "GET" && pathname === "/api/sessions/projects") {
-    return json(response, 200, await state.sessions.projects({ includeSummaries: url.searchParams.get("summaries") === "1" }));
+    return json(response, 200, await state.sessions.projects({
+      includeSummaries: url.searchParams.get("summaries") === "1",
+      refresh: url.searchParams.get("refresh") === "1",
+    }));
   }
   const previewMatch = pathname.match(/^\/api\/sessions\/claude\/([^/]+)\/([^/]+)\/preview$/);
   if (request.method === "GET" && previewMatch) {
@@ -157,10 +1055,132 @@ async function api(request, response, url) {
       id: decodeURIComponent(previewMatch[2]),
     }));
   }
+  // 通用预览（query 形）：codex 的 scope 含日期层级斜杠，走 query 参数而非路径段；
+  // kimi/pi/cursor（v3.7 扩源）按 id 定位（kimi 走索引、pi 走限量扫描、cursor 走 vscdb 点查），无需 scope
+  if (request.method === "GET" && pathname === "/api/sessions/preview") {
+    const source = url.searchParams.get("source") ?? "claude";
+    const id = url.searchParams.get("id") ?? "";
+    if (source === "codex") {
+      return json(response, 200, await state.sessions.previewCodex({ scope: url.searchParams.get("scope") ?? "", id }));
+    }
+    if (source === "kimi") return json(response, 200, await state.sessions.previewKimi({ id }));
+    if (source === "pi") return json(response, 200, await state.sessions.previewPi({ id }));
+    if (source === "cursor") return json(response, 200, await state.sessions.previewCursor({ id }));
+    return json(response, 200, await state.sessions.preview({
+      project: url.searchParams.get("project") ?? "",
+      id,
+    }));
+  }
+
+  if (request.method === "GET" && pathname === "/api/adapter-templates") {
+    return json(response, 200, {
+      templates: adapterTemplateCatalog(),
+      providerApps: [...PROVIDER_APPS],
+    });
+  }
+  if (request.method === "GET" && pathname === "/api/runtime-seats") {
+    return json(response, 200, await runtimeSeatSnapshot());
+  }
+  if (request.method === "POST" && pathname === "/api/runtime-seats") {
+    const seat = buildCustomRuntimeSeat(await body(request));
+    const result = await mutateRuntimeSeats(`runtime-seat:create:${seat.id}`, (profiles) => {
+      if (profiles.some((profile) => profile.id === seat.id)) {
+        throw runtimeSeatError(`runtime seat already exists: ${seat.id}`, "RUNTIME_SEAT_EXISTS", { runtimeProfileId: seat.id });
+      }
+      profiles.push(seat);
+      return seat;
+    });
+    return json(response, 201, {
+      seat: configuredRuntimeSeatView(result.outcome),
+      transaction: result.transaction,
+    });
+  }
+  const runtimeSeatMatch = pathname.match(/^\/api\/runtime-seats\/([^/]+)$/);
+  if (runtimeSeatMatch) {
+    const runtimeProfileId = normalizeRuntimeSeatId(decodeURIComponent(runtimeSeatMatch[1]));
+    if (request.method === "GET") {
+      const snapshot = await runtimeSeatSnapshot();
+      const seat = snapshot.seats.find((item) => item.id === runtimeProfileId);
+      if (!seat) throw runtimeSeatError(`runtime seat not found: ${runtimeProfileId}`, "RUNTIME_SEAT_NOT_FOUND", { runtimeProfileId });
+      return json(response, 200, { seat, source: snapshot.source, runtime: snapshot.runtime });
+    }
+    if (request.method === "PUT") {
+      const patch = runtimeSeatPayload(await body(request));
+      if (patch.id != null && normalizeRuntimeSeatId(patch.id) !== runtimeProfileId) {
+        throw runtimeSeatError("runtime seat id is immutable");
+      }
+      const result = await mutateRuntimeSeats(`runtime-seat:update:${runtimeProfileId}`, (profiles) => {
+        const index = profiles.findIndex((profile) => profile.id === runtimeProfileId);
+        if (index < 0) {
+          throw runtimeSeatError(`runtime seat not found: ${runtimeProfileId}`, "RUNTIME_SEAT_NOT_FOUND", { runtimeProfileId });
+        }
+        const existing = profiles[index];
+        if (patch.builtin != null && patch.builtin !== existing.builtin) {
+          throw runtimeSeatError("runtime seat builtin status is immutable");
+        }
+        const candidate = { ...existing, ...patch, id: runtimeProfileId, builtin: existing.builtin === true };
+        const adapterChanged = String(existing.adapter || "").trim() !== String(candidate.adapter || "").trim();
+        if (adapterChanged) {
+          delete candidate.modelOptions;
+          delete candidate.effortLevels;
+        }
+        const template = runtimeSeatTemplate(String(candidate.adapter || "").trim(), runtimeProfileId);
+        const updated = normalizeRuntimeSeatControls(candidate, template);
+        profiles[index] = updated;
+        return updated;
+      });
+      return json(response, 200, {
+        seat: configuredRuntimeSeatView(result.outcome),
+        transaction: result.transaction,
+      });
+    }
+    if (request.method === "DELETE") {
+      const result = await mutateRuntimeSeats(`runtime-seat:delete:${runtimeProfileId}`, (profiles) => {
+        const index = profiles.findIndex((profile) => profile.id === runtimeProfileId);
+        if (index < 0) {
+          throw runtimeSeatError(`runtime seat not found: ${runtimeProfileId}`, "RUNTIME_SEAT_NOT_FOUND", { runtimeProfileId });
+        }
+        if (profiles[index].builtin === true) {
+          throw runtimeSeatError("builtin runtime seats cannot be deleted; copy or edit the seat instead", "FROZEN_BLOCK", { runtimeProfileId });
+        }
+        const references = runtimeSeatReferences(runtimeProfileId);
+        if (references.length) {
+          throw runtimeSeatError(`runtime seat is referenced by ${references.length} team member(s)`, "RUNTIME_SEAT_IN_USE", {
+            runtimeProfileId,
+            references,
+          });
+        }
+        profiles.splice(index, 1);
+        return { removed: runtimeProfileId };
+      });
+      return json(response, 200, { ...result.outcome, transaction: result.transaction });
+    }
+  }
 
   if (request.method === "GET" && pathname === "/api/teams") {
     // rejectedOnLoad 暴露给前端——团队被拒载必须可见，不许静默消失（烛 R11 建议）
-    return json(response, 200, { teams: state.teams.list(), rejectedOnLoad: state.teams.rejectedOnLoad });
+    return json(response, 200, {
+      teams: state.teams.list(),
+      rejectedOnLoad: state.teams.rejectedOnLoad,
+      storeStatus: state.teams.storeStatus,
+    });
+  }
+
+  if (request.method === "GET" && pathname === "/api/team-members") {
+    return json(response, 200, {
+      members: state.teamMembers.list(),
+      runtimeProfiles: state.runtimeCatalog,
+    });
+  }
+  if (request.method === "POST" && pathname === "/api/team-members") {
+    return json(response, 201, await state.teamMembers.create(await body(request)));
+  }
+  const memberMatch = pathname.match(/^\/api\/team-members\/([^/]+)$/);
+  if (memberMatch) {
+    const memberId = decodeURIComponent(memberMatch[1]);
+    if (request.method === "GET") return json(response, 200, state.teamMembers.get(memberId));
+    if (request.method === "PUT") return json(response, 200, await state.teamMembers.update(memberId, await body(request)));
+    if (request.method === "DELETE") return json(response, 200, await state.teamMembers.remove(memberId));
   }
   if (request.method === "POST" && pathname === "/api/teams") return json(response, 201, await state.teams.create(await body(request)));
   const teamMatch = pathname.match(/^\/api\/teams\/([^/]+)$/);
@@ -171,9 +1191,191 @@ async function api(request, response, url) {
     if (request.method === "DELETE") return json(response, 200, await state.teams.remove(teamId));
   }
 
-  if (request.method === "GET" && pathname === "/api/runs") return json(response, 200, { runs: state.orchestrator.list() });
-  if (request.method === "POST" && pathname === "/api/runs") return json(response, 202, await state.orchestrator.create(await body(request)));
+  // cc-switch 配置方式迁移：统一供应商档案 + 一键切换 live 配置（切换即备份）；list/live 永不含 apiKey 明文
+  if (request.method === "GET" && pathname === "/api/providers") {
+    return json(response, 200, { ...state.providers.list(), live: await state.providers.liveStatus() });
+  }
+  if (request.method === "POST" && pathname === "/api/providers") {
+    const input = await body(request);
+    return json(response, 201, await withRuntimeSeatMutation(() => state.providers.create(input)));
+  }
+  // cc-switch 3.18 预设供应商目录（claude/codex/gemini 三家，转换产物只读）
+  if (request.method === "GET" && pathname === "/api/providers/presets") {
+    return json(response, 200, await loadProviderPresets());
+  }
+  if (request.method === "POST" && pathname === "/api/providers/switch") {
+    const input = await body(request);
+    return json(response, 200, await state.providers.switchTo(String(input.app ?? ""), String(input.providerId ?? "")));
+  }
+  // 配置预览干跑：表单草稿经 applier 原逻辑跑一遍，回显「启用后完整文件」（不落盘；默认密钥掩码，reveal 显式取明文供编辑）
+  if (request.method === "POST" && pathname === "/api/providers/preview") {
+    const input = await body(request);
+    return json(response, 200, await state.providers.previewSwitch(String(input.app ?? ""), input.provider ?? {}, { reveal: input.reveal === true }));
+  }
+  // 团队绑定扩展：teamId → 逐 app 应用绑定供应商（部分失败如实回报，不吞）
+  if (request.method === "POST" && pathname === "/api/providers/apply-team") {
+    const input = await body(request);
+    return json(response, 200, await state.providers.applyTeamBindings(state.teams.get(String(input.teamId ?? "")), { apps: input.apps }));
+  }
+  // cc-switch 完全迁移第二波——网络服务面与队列面（literal 路由必须先于 :id 匹配）：
+  // 端点测速（speedtest.rs 复刻：并发 GET 热身+计时）
+  if (request.method === "POST" && pathname === "/api/providers/test-endpoints") {
+    const input = await body(request);
+    return json(response, 200, { results: await testEndpoints(input.urls ?? [], input.timeoutSecs) });
+  }
+  // 用量脚本内置模板（UsageScriptModal PRESET_TEMPLATES 搬运）
+  if (request.method === "GET" && pathname === "/api/providers/usage-templates") {
+    return json(response, 200, { templates: USAGE_TEMPLATES });
+  }
+  // 未保存脚本试跑（test_usage_script 复刻：凭据可临时覆盖，不落盘）
+  if (request.method === "POST" && pathname === "/api/providers/usage-test") {
+    const input = await body(request);
+    const provider = input.providerId ? state.providers.get(String(input.providerId)) : null;
+    if (input.providerId && !provider) return json(response, 404, { error: { code: "SOURCE_NOT_FOUND", message: "provider not found" } });
+    const script = {
+      code: String(input.code ?? ""),
+      apiKey: String(input.apiKey ?? "") || provider?.apiKey || "",
+      baseUrl: String(input.baseUrl ?? "") || provider?.baseUrl || "",
+      timeout: input.timeout ?? 10,
+      accessToken: String(input.accessToken ?? "") || provider?.meta?.usageScript?.accessToken || "",
+      userId: String(input.userId ?? "") || provider?.meta?.usageScript?.userId || "",
+      templateType: String(input.templateType ?? "custom"),
+    };
+    try {
+      return json(response, 200, await queryUsageScript(script));
+    } catch (error) {
+      return json(response, 200, { success: false, data: null, error: error.message, code: error.code ?? null });
+    }
+  }
+  // 排序（update_providers_sort_order 复刻）
+  if (request.method === "POST" && pathname === "/api/providers/sort") {
+    const input = await body(request);
+    return json(response, 200, await state.providers.sort(input.orderedIds, { app: input.app ?? null }));
+  }
+  // 导入导出（export/import config 复刻；默认掩码导出，includeSecrets 显式才带明文）
+  if (request.method === "GET" && pathname === "/api/providers/export") {
+    return json(response, 200, state.providers.exportProviders({ includeSecrets: url.searchParams.get("includeSecrets") === "1" }));
+  }
+  if (request.method === "POST" && pathname === "/api/providers/import") {
+    const input = await body(request);
+    return json(response, 200, await withRuntimeSeatMutation(() => (
+      state.providers.importProviders(input, { mode: String(input.mode ?? "merge") })
+    )));
+  }
+  if (request.method === "POST" && pathname === "/api/providers/parse-deeplink") {
+    const input = await body(request);
+    return json(response, 200, { resource: "provider", preview: maskSensitivePreview(parseDeeplink(String(input.url ?? ""))) });
+  }
+  // ccswitch:// 深链接导入（粘贴 URL 解析，不注册系统协议）
+  if (request.method === "POST" && pathname === "/api/providers/import-deeplink") {
+    const input = await body(request);
+    const parsed = parseDeeplink(String(input.url ?? ""));
+    return json(response, 201, await state.providers.create(parsed));
+  }
+  // 环境变量冲突检查（env_checker 514cc 化）
+  if (request.method === "GET" && pathname === "/api/providers/env-conflicts") {
+    return json(response, 200, state.providers.envConflicts());
+  }
+  // live 配置备份台账与一键回退（本机侧补齐远程 graph/backup 同款闭环；literal 段先于 :id）
+  if (request.method === "GET" && pathname === "/api/providers/backups") {
+    return json(response, 200, await state.providers.listBackups({ app: url.searchParams.get("app") || null }));
+  }
+  const backupMatch = pathname.match(/^\/api\/providers\/backups\/([^/]+)(\/restore)?$/);
+  if (backupMatch) {
+    const backupName = decodeURIComponent(backupMatch[1]);
+    if (request.method === "GET" && !backupMatch[2]) {
+      return json(response, 200, await state.providers.readBackup(backupName));
+    }
+    if (request.method === "POST" && backupMatch[2]) {
+      const input = await body(request);
+      return json(response, 200, await state.providers.restoreBackup(backupName, {
+        expectedDigest: typeof input?.expectedDigest === "string" ? input.expectedDigest : null,
+      }));
+    }
+    if (request.method === "DELETE" && !backupMatch[2]) {
+      return json(response, 200, await state.providers.removeBackup(backupName));
+    }
+  }
+  // common config snippet：per-app 通用片段（切换时并入 live 写入）
+  if (request.method === "GET" && pathname === "/api/providers/common-config") {
+    return json(response, 200, state.providers.commonConfigView({ includeSecrets: url.searchParams.get("includeSecrets") === "1" }));
+  }
+  if (request.method === "PUT" && pathname === "/api/providers/common-config") {
+    const input = await body(request);
+    return json(response, 200, await state.providers.setCommonConfig(String(input.app ?? ""), input.commonConfig ?? ""));
+  }
+  // failover 队列与自动转移开关（per app；literal 段带 app 参数）
+  const failoverMatch = pathname.match(/^\/api\/providers\/failover\/([^/]+)$/);
+  if (failoverMatch) {
+    const app = decodeURIComponent(failoverMatch[1]);
+    if (request.method === "GET") return json(response, 200, state.providers.getFailover(app));
+    if (request.method === "PUT") return json(response, 200, await state.providers.setFailover(app, await body(request)));
+  }
+  const providerMatch = pathname.match(/^\/api\/providers\/([^/]+)$/);
+  if (providerMatch) {
+    const providerId = decodeURIComponent(providerMatch[1]);
+    if (request.method === "GET") {
+      return json(response, 200, state.providers.view(providerId, { includeSecrets: url.searchParams.get("includeSecrets") === "1" }));
+    }
+    if (request.method === "PUT") {
+      const input = await body(request);
+      return json(response, 200, await withRuntimeSeatMutation(() => state.providers.update(providerId, input)));
+    }
+    if (request.method === "DELETE") {
+      return json(response, 200, await withRuntimeSeatMutation(() => state.providers.remove(providerId)));
+    }
+  }
+  // 连通性检查（stream_check.rs 复刻）：可达性探测 + autoFailover 开启时失败自动转移
+  const providerCheckMatch = pathname.match(/^\/api\/providers\/([^/]+)\/check$/);
+  if (request.method === "POST" && providerCheckMatch) {
+    const providerId = decodeURIComponent(providerCheckMatch[1]);
+    const provider = state.providers.get(providerId);
+    const input = await body(request).catch(() => ({}));
+    const testConfig = { ...provider.meta?.testConfig, ...(input.testConfig ?? {}) };
+    const result = await checkReachability(provider.baseUrl, testConfig);
+    let failover = null;
+    if (!result.success) {
+      for (const app of PROVIDER_APPS) {
+        if (!provider.apps[app] || state.providers.current[app] !== providerId) continue;
+        failover = await state.providers.failoverNext(app, providerId);
+        if (failover?.switched) break;
+      }
+    }
+    return json(response, 200, { ...result, failover });
+  }
+  // 模型可用性真实请求（testConfig.testModel 落地：回答鉴权/模型是否正确）
+  const providerModelTestMatch = pathname.match(/^\/api\/providers\/([^/]+)\/model-test$/);
+  if (request.method === "POST" && providerModelTestMatch) {
+    const providerId = decodeURIComponent(providerModelTestMatch[1]);
+    const provider = state.providers.get(providerId);
+    const input = await body(request).catch(() => ({}));
+    const app = String(input.app ?? "");
+    const effective = input.testConfig && typeof input.testConfig === "object"
+      ? { ...provider, meta: { ...(provider.meta ?? {}), testConfig: { ...(provider.meta?.testConfig ?? {}), ...input.testConfig } } }
+      : provider;
+    return json(response, 200, await testModelRequest(effective, app));
+  }
+  // 已保存用量脚本查询（query_usage 复刻）；无/未启用脚本时回落 one-api 计费端点缺省探测
+  const providerUsageMatch = pathname.match(/^\/api\/providers\/([^/]+)\/usage$/);
+  if (request.method === "POST" && providerUsageMatch) {
+    const providerId = decodeURIComponent(providerUsageMatch[1]);
+    const provider = state.providers.get(providerId);
+    const result = await queryProviderUsage(provider);
+    if (!result.success && (result.code === "USAGE_SCRIPT_MISSING" || result.code === "USAGE_DISABLED")) {
+      return json(response, 200, await defaultBillingProbe(provider));
+    }
+    return json(response, 200, result);
+  }
+
+  if (request.method === "GET" && pathname === "/api/runs") return json(response, 200, { runs: runsForPublic(state.orchestrator.list()) });
+  if (request.method === "POST" && pathname === "/api/runs") return json(response, 202, runForPublic(await state.orchestrator.create(await body(request))));
   if (request.method === "POST" && pathname === "/api/runs/clear-finished") return json(response, 200, await state.orchestrator.clearFinished());
+  // run 产物 diff（codeg 对标 P2）：逻辑在 src/run-diff.mjs（可注入 runner 单测）；超 2MB 如实 OUTPUT_LIMIT
+  const runDiffMatch = pathname.match(/^\/api\/runs\/([0-9a-fA-F-]+)\/diff$/);
+  if (request.method === "GET" && runDiffMatch) {
+    const run = state.orchestrator.get(runDiffMatch[1]);
+    return json(response, 200, await runDiffForRun(run));
+  }
   if (request.method === "POST" && pathname === "/api/system/pick-directory") {
     // 弹本机资源管理器目录选择框（Console 是 loopback 本地服务的特权面）。
     // 单例锁：同时只允许一个系统对话框，重复请求 409 而非叠窗。
@@ -236,8 +1438,8 @@ async function api(request, response, url) {
   }
   if (request.method === "POST" && pathname === "/api/sessions/reveal") {
     // 资源管理器中定位历史会话 jsonl（路径由服务端安全解析，不信任前端拼装）
-    const { project, id } = await body(request);
-    const filePath = await state.sessions.resolveFilePath({ project, id });
+    const { source, project, scope, id } = await body(request);
+    const filePath = await state.sessions.resolveFilePath({ source: source ?? "claude", project, scope, id });
     spawn("explorer.exe", [`/select,${filePath}`], { detached: true, stdio: "ignore", windowsHide: false }).unref();
     return json(response, 200, { revealed: filePath });
   }
@@ -279,31 +1481,43 @@ async function api(request, response, url) {
     // 项目侧栏偏好（置顶/重命名/隐藏）：dataRoot 下单文件，键=归一化项目路径
     const prefsPath = join(state.dataRoot, "project-prefs.json");
     if (request.method === "GET") {
-      try {
-        return json(response, 200, JSON.parse(await readFile(prefsPath, "utf8")));
-      } catch {
-        return json(response, 200, { projects: {} });
-      }
+      return json(response, 200, await readProjectPrefs(prefsPath));
     }
     if (request.method === "PUT") {
       const payload = await body(request);
-      const projects = payload?.projects;
-      if (!projects || typeof projects !== "object" || Array.isArray(projects)) {
-        throw Object.assign(new Error("projects object is required"), { code: "VALIDATION_FAILED" });
+      const baseRevision = Number(payload?.baseRevision);
+      if (!Number.isSafeInteger(baseRevision) || baseRevision < 0) {
+        throw Object.assign(new Error("baseRevision must be a non-negative safe integer"), { code: "VALIDATION_FAILED" });
       }
-      const clean = {};
-      for (const [key, value] of Object.entries(projects)) {
-        if (typeof key !== "string" || key.length > 500 || !value || typeof value !== "object") continue;
-        const entry = {};
-        if (value.pinned !== undefined) entry.pinned = Boolean(value.pinned);
-        if (value.hidden !== undefined) entry.hidden = Boolean(value.hidden);
-        if (typeof value.name === "string" && value.name.trim()) entry.name = value.name.trim().slice(0, 120);
-        if (Object.keys(entry).length) clean[key] = entry;
-      }
-      await mkdir(state.dataRoot, { recursive: true });
-      await writeFile(prefsPath, `${JSON.stringify({ projects: clean }, null, 2)}\n`, "utf8");
-      return json(response, 200, { projects: clean });
+      const clean = cleanProjectPrefs({ ...payload, revision: 0 });
+      const write = projectPrefsWriteChain.catch(() => {}).then(async () => {
+        const current = await readProjectPrefs(prefsPath);
+        if (current.revision !== baseRevision) {
+          throw Object.assign(new Error(`project prefs revision changed from ${baseRevision} to ${current.revision}`), {
+            code: "PREFS_REVISION_MISMATCH",
+            currentRevision: current.revision,
+          });
+        }
+        const nextPrefs = { revision: current.revision + 1, projects: clean.projects, sessions: clean.sessions };
+        await atomicWriteProjectPrefs(prefsPath, nextPrefs);
+        return nextPrefs;
+      });
+      projectPrefsWriteChain = write;
+      return json(response, 200, await write);
     }
+  }
+  if (request.method === "POST" && pathname === "/api/projects/delete-sessions") {
+    // 移除项目时的可选同步删除：会话文件移入 dataRoot/trash 隔离区（系统目录清空，仍可恢复）
+    const { project, path } = await body(request);
+    if (typeof project !== "string" || !project.trim()) {
+      throw Object.assign(new Error("project is required"), { code: "VALIDATION_FAILED" });
+    }
+    const result = await state.sessions.deleteProjectSessions({
+      project: project.trim(),
+      path: typeof path === "string" ? path : null,
+      trashRoot: join(state.dataRoot, "trash"),
+    });
+    return json(response, 200, result);
   }
   if (request.method === "POST" && pathname === "/api/projects/archive-finished") {
     const { cwd } = await body(request);
@@ -314,30 +1528,225 @@ async function api(request, response, url) {
   const runEventsMatch = pathname.match(/^\/api\/runs\/([^/]+)\/events$/);
   if (request.method === "GET" && runEventsMatch) {
     // per-run 全量事件回放——不受全局最近窗口限制，供前端重建长会话完整历史（含工具过程）
-    return json(response, 200, { events: await state.eventStore.listByRun(decodeURIComponent(runEventsMatch[1])) });
+    const runId = decodeURIComponent(runEventsMatch[1]);
+    return await runEventResponses.run(runId, response, async (signal) => {
+      let run = null;
+      try {
+        run = state.orchestrator.get(runId);
+      } catch (error) {
+        if (error?.code !== "RUN_NOT_FOUND") throw error;
+      }
+      const representation = selectRunHistoryRepresentation(request.headers.accept);
+      if (!representation) {
+        throw Object.assign(new Error("Accept does not allow application/json or application/x-ndjson"), {
+          code: "NOT_ACCEPTABLE",
+        });
+      }
+      const events = await state.eventStore.listByRun(runId, 5000, { signal });
+      const uiView = url.searchParams.get("view") === "ui";
+      const projectEvent = (event) => eventForPublic(event, run, uiView);
+      if (representation === "ndjson") {
+        return ndjson(response, events, { transform: projectEvent });
+      }
+      return json(response, 200, { events: events.map(projectEvent) });
+    }, { request });
+  }
+  const runBusMatch = pathname.match(/^\/api\/runs\/([^/]+)\/bus$/);
+  if (request.method === "GET" && runBusMatch) {
+    // v3.6 社会模拟编排：拓扑只消费有界尾部；诊断与 Mission Control 使用同一审计语义。
+    const runId = decodeURIComponent(runBusMatch[1]);
+    return await runEventResponses.run(`bus:${runId}`, response, async (signal) => {
+      // 先确认 run 存在（已清除的 run 不许继续读旧 bus）；runId 白名单在 bus.file() fail-closed。
+      const run = structuredClone(state.orchestrator.get(runId));
+      if (testBusTailGateEnabled) await testBusTailGate.wait(signal);
+      else if (testBusTailReadDelayMs > 0) await delay(testBusTailReadDelayMs, undefined, { signal });
+      const result = await state.orchestrator.bus.readTail(runId, {
+        maxBytes: MISSION_CONTROL_LIMITS.busBytes,
+        maxMessages: MISSION_CONTROL_LIMITS.busMessages,
+        signal,
+      });
+      return json(response, 200, {
+        messages: result.messages,
+        diagnostics: auditBusDiagnostics(run, result.diagnostics, result.messages.length),
+      });
+    }, { request });
+  }
+  const missionMatch = pathname.match(/^\/api\/runs\/([^/]+)\/mission$/);
+  if (request.method === "GET" && missionMatch) {
+    // Mission Control is a bounded read model, never a second orchestration state store.
+    // Confirm the run before touching auxiliary files so cleared/unknown runs cannot expose stale assets.
+    const runId = decodeURIComponent(missionMatch[1]);
+    return await runEventResponses.run(`mission:${runId}`, response, async (signal) => {
+      // Capture one immutable orchestration instant before auxiliary reads. A
+      // later bus marker must never be combined with an earlier ENOENT result.
+      const run = structuredClone(state.orchestrator.get(runId));
+      const relatedApprovals = structuredClone(state.approvalBroker.list().filter((item) => item.runId === runId));
+      const [busRead, events, health] = await Promise.all([
+        state.orchestrator.bus.readTail(runId, {
+          maxBytes: MISSION_CONTROL_LIMITS.busBytes,
+          maxMessages: MISSION_CONTROL_LIMITS.busMessages,
+          signal,
+        }),
+        state.eventStore.listByRun(runId, MISSION_CONTROL_LIMITS.events, { signal }),
+        (async () => {
+          if (testMissionHealthDelayMs > 0) await delay(testMissionHealthDelayMs, undefined, { signal });
+          return state.healthService.all({ signal });
+        })(),
+      ]);
+      return json(response, 200, projectMissionControl({
+        run,
+        busMessages: busRead.messages,
+        busDiagnostics: busRead.diagnostics,
+        events,
+        approvals: relatedApprovals,
+        health,
+        // The store deliberately reads at most 200. A full window is conservatively marked
+        // truncated because proving otherwise would require an unbounded/counting scan.
+        eventsMayBeTruncated: events.length === MISSION_CONTROL_LIMITS.events,
+      }));
+    }, { request });
+  }
+  const workspaceMatch = pathname.match(/^\/api\/runs\/([^/]+)\/workspace$/);
+  if (request.method === "GET" && workspaceMatch) {
+    const runId = decodeURIComponent(workspaceMatch[1]);
+    const run = state.orchestrator.get(runId);
+    return json(response, 200, await inspectRunWorkspace(run, { path: url.searchParams.get("path") ?? "" }));
+  }
+  // v3.7 Automations：composer 快照的保存/管理/触发（调度产生的 run 与手动同一治理链）
+  if (request.method === "GET" && pathname === "/api/automations") {
+    return json(response, 200, { automations: automationsForPublic(state.automations.list()), status: state.automations.status() });
+  }
+  if (request.method === "POST" && pathname === "/api/automations") {
+    return json(response, 201, automationForPublic(await state.automations.create(await body(request))));
+  }
+  const automationMatch = pathname.match(/^\/api\/automations\/([^/]+)(\/(?:run|cancel))?$/);
+  if (automationMatch) {
+    const automationId = decodeURIComponent(automationMatch[1]);
+    if (request.method === "POST" && automationMatch[2] === "/run") {
+      return json(response, 202, runForPublic(await state.automations.trigger(automationId, { source: "manual" })));
+    }
+    if (request.method === "POST" && automationMatch[2] === "/cancel") {
+      return json(response, 200, runForPublic(await state.automations.cancel(automationId)));
+    }
+    if (!automationMatch[2]) {
+      if (request.method === "GET") return json(response, 200, automationForPublic(state.automations.get(automationId)));
+      if (request.method === "PATCH") return json(response, 200, automationForPublic(await state.automations.update(automationId, await body(request))));
+      if (request.method === "DELETE") return json(response, 200, await state.automations.remove(automationId));
+    }
+  }
+  if (request.method === "GET" && pathname === "/api/roster") {
+    // 运行时 roster：谁在线、持有什么会话（socialLoop 逐 turn 登记；无文件时回空表）
+    try {
+      return json(response, 200, JSON.parse(await readFile(join(state.dataRoot, "roster.json"), "utf8")));
+    } catch {
+      return json(response, 200, { agents: {} });
+    }
+  }
+  if (request.method === "GET" && pathname === "/api/agents/models") {
+    // 动态模型/推理档位目录：CLI 原生发现（codex debug models / grok models / claude models），
+    // 5min 缓存；发现失败如实回退 models.json 静态目录（source 字段标明出处）
+    const agentId = url.searchParams.get("agent") ?? "";
+    if (!agentId) throw Object.assign(new Error("agent is required"), { code: "VALIDATION_FAILED" });
+    const runtimeProfileId = runtimeProfileIdForMember(agentId);
+    const catalog = await state.modelDiscovery.forAgent(runtimeProfileId);
+    return json(response, 200, {
+      ...catalog,
+      context: { ...(catalog.context || {}), memberId: agentId, runtimeProfileId },
+    });
+  }
+  if (request.method === "POST" && pathname === "/api/agents/actions") {
+    const input = await body(request);
+    const agentId = String(input?.agent ?? input?.memberId ?? "").trim();
+    const actionId = String(input?.action ?? input?.actionId ?? "").trim();
+    if (!agentId || !actionId) {
+      throw Object.assign(new Error("agent and action are required"), { code: "VALIDATION_FAILED" });
+    }
+    if (!/^[a-z][a-z0-9-]{0,47}$/.test(actionId)) {
+      throw Object.assign(new Error("action id must use 1-48 lowercase letters, digits or hyphens"), { code: "VALIDATION_FAILED" });
+    }
+    return json(response, 200, await runAgentControlAction(agentId, actionId));
   }
   if (request.method === "POST" && pathname === "/api/router/preview") {
     const input = await body(request);
     delete input.allowedProviders; // 白名单只能由服务端从 teamId 推导，不信客户端直提（烛 R10 致命2）
     // 缺省解析内置团队——预览与 orchestrator.create 完全同契约（烛 R11 建议）
-    input.allowedProviders = [...state.teams.get(String(input.teamId || "team-514cc")).members];
-    return json(response, 200, await state.router.preview(input));
+    const team = state.teams.get(String(input.teamId || "team-514cc"));
+    const requestedProvider = input.requestedProvider == null ? null : String(input.requestedProvider).trim();
+    const requestedProviderMember = requestedProvider && team.members.includes(requestedProvider)
+      ? state.teamMembers.get(requestedProvider)
+      : null;
+    const requestedAgentIds = normalizeRequestedAgentIds(input.requestedAgentIds, team.members);
+    const startAgentId = resolveStartAgentId(input.startAgentId, team.members, requestedAgentIds[0] || team.coordinator);
+    const preferredMemberIds = [
+      requestedProviderMember?.id,
+      startAgentId,
+      ...requestedAgentIds,
+      team.coordinator,
+    ].filter(Boolean);
+    input.requestedAgentIds = requestedAgentIds;
+    input.allowedProviders = [...new Set(team.members.map(runtimeProfileIdForMember))];
+    input.requestedProvider = requestedProviderMember?.runtimeProfileId || requestedProvider || undefined;
+    return json(response, 200, projectRouteToTeamMembers(await state.router.preview(input), team, preferredMemberIds));
   }
   if (request.method === "GET" && pathname === "/api/approvals") return json(response, 200, { approvals: state.approvalBroker.list() });
+  if (request.method === "GET" && pathname === "/api/leases") {
+    return json(response, 200, { leases: state.orchestrator.listCapabilityLeases() });
+  }
 
   let match = pathname.match(/^\/api\/approvals\/([^/]+)\/resolve$/);
-  if (request.method === "POST" && match) return json(response, 200, await state.approvalBroker.resolve(decodeURIComponent(match[1]), await body(request)));
+  if (request.method === "POST" && match) {
+    const resolution = await state.approvalBroker.resolve(decodeURIComponent(match[1]), await body(request));
+    let lease = null;
+    if (resolution.decision === "approve" && resolution.method === "control/runBuild/requestApproval" && resolution.runId) {
+      // The approval promise wakes Orchestrator asynchronously. Return only its authoritative,
+      // persisted execution lease; never synthesize a second display-only lease in the broker.
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        lease = state.orchestrator.capabilityLeaseView(state.orchestrator.get(resolution.runId));
+        if (lease?.approvalId === resolution.id) break;
+        lease = null;
+        await delay(10);
+      }
+    }
+    return json(response, 200, { ...resolution, lease });
+  }
+
+  match = pathname.match(/^\/api\/runs\/([^/]+)\/lease\/revoke$/);
+  if (request.method === "POST" && match) {
+    return json(response, 200, await state.orchestrator.revokeCapabilityLeaseForRun(
+      decodeURIComponent(match[1]),
+      await body(request),
+    ));
+  }
 
   match = pathname.match(/^\/api\/runs\/([^/]+)$/);
-  if (request.method === "GET" && match) return json(response, 200, state.orchestrator.get(decodeURIComponent(match[1])));
+  if (request.method === "GET" && match) return json(response, 200, runForPublic(state.orchestrator.get(decodeURIComponent(match[1]))));
   match = pathname.match(/^\/api\/runs\/([^/]+)\/(cancel|messages)$/);
   if (request.method === "POST" && match) {
     const id = decodeURIComponent(match[1]);
-    return json(response, 200, match[2] === "cancel" ? await state.orchestrator.cancel(id) : await state.orchestrator.continue(id, await body(request)));
+    return json(response, 200, runForPublic(match[2] === "cancel"
+      ? await state.orchestrator.cancel(id)
+      : await state.orchestrator.continue(id, await body(request))));
+  }
+  match = pathname.match(/^\/api\/runs\/([^/]+)\/sources$/);
+  if (request.method === "POST" && match) {
+    const input = await body(request);
+    return json(response, 200, runForPublic(await state.orchestrator.addSources(decodeURIComponent(match[1]), input?.sources)));
   }
   match = pathname.match(/^\/api\/runs\/([^/]+)\/meta$/);
   if (request.method === "PATCH" && match) {
-    return json(response, 200, await state.orchestrator.updateMeta(decodeURIComponent(match[1]), await body(request)));
+    return json(response, 200, runForPublic(await state.orchestrator.updateMeta(decodeURIComponent(match[1]), await body(request))));
+  }
+  match = pathname.match(/^\/api\/runs\/([^/]+)\/controls$/);
+  if (request.method === "PATCH" && match) {
+    // 会话中热改 模型/Effort/权限（白名单迁移），审计事件 run.control_changed；
+    // recovery_required 时 body.acknowledgeRecovery===true 随热改一次性携带恢复确认
+    const input = await body(request) ?? {};
+    const { acknowledgeRecovery, ...patch } = input;
+    return json(response, 200, runForPublic(await state.orchestrator.updateRunControls(
+      decodeURIComponent(match[1]),
+      patch,
+      { actor: "operator", acknowledgeRecovery: acknowledgeRecovery === true },
+    )));
   }
 
   match = pathname.match(/^\/api\/config\/(.+?)\/versions\/([^/]+)\/content$/);
@@ -354,116 +1763,182 @@ async function api(request, response, url) {
       const input = await body(request);
       if (action === "validate") return json(response, 200, await state.configManager.validate(id, input.content));
       if (action === "plan") return json(response, 200, await state.configManager.plan(id, input.content, input.baseSha256));
-      if (action === "apply") return json(response, 200, await state.configManager.apply(id, input));
-      if (action === "rollback") return json(response, 200, await state.configManager.rollback(id, input));
+      if (action === "apply") {
+        const operation = () => state.configManager.apply(id, input);
+        return json(response, 200, await (id === RUNTIME_SEAT_SOURCE_ID ? withRuntimeSeatMutation(operation) : operation()));
+      }
+      if (action === "rollback") {
+        const operation = () => state.configManager.rollback(id, input);
+        return json(response, 200, await (id === RUNTIME_SEAT_SOURCE_ID ? withRuntimeSeatMutation(operation) : operation()));
+      }
     }
   }
   match = pathname.match(/^\/api\/config\/(.+)$/);
   if (request.method === "GET" && match) return json(response, 200, await state.configManager.read(decodeURIComponent(match[1])));
 
   if (request.method === "GET" && pathname === "/api/events") {
+    // RT-03：显式 stream epoch——客户端可检测控制面重启并重置 Last-Event-ID 回放游标
+    const streamEpoch = state.streamEpoch || (state.streamEpoch = `epoch-${Date.now().toString(36)}`);
     response.writeHead(200, {
       ...securityHeaders,
       "content-type": "text/event-stream; charset=utf-8",
       "cache-control": "no-cache, no-transform",
       connection: "keep-alive",
+      "x-514cc-stream-epoch": streamEpoch,
     });
     const requestedAfter = Number(url.searchParams.get("after") || request.headers["last-event-id"] || 0);
     const afterSequence = Number.isSafeInteger(requestedAfter) && requestedAfter >= 0 ? requestedAfter : 0;
-    const maxPendingChunks = 1024;
+    const uiView = url.searchParams.get("view") === "ui";
+    const maxPendingEvents = 2048;
+    const maxPendingBytes = 2 * 1024 * 1024;
     let replaying = true;
     let lastSequence = afterSequence;
-    let blocked = false;
     let closed = false;
     let heartbeat = null;
-    const pendingChunks = [];
-    const queuedEvents = [];
+    let pumping = false;
+    let queuedBytes = 0;
+    let queueHead = 0;
+    let liveQueue = [];
     let unsubscribe = () => {};
+    const replayAbort = new AbortController();
     const closeStream = () => {
       if (closed) return;
       closed = true;
       if (heartbeat) clearInterval(heartbeat);
       unsubscribe();
-      response.off("drain", flushChunks);
+      replayAbort.abort();
+      liveQueue = [];
+      queueHead = 0;
+      queuedBytes = 0;
     };
-    const writeChunk = (chunk) => {
+    const writeChunk = async (chunk) => {
       if (closed) return false;
-      if (blocked) {
-        if (pendingChunks.length >= maxPendingChunks) {
-          closeStream();
-          response.destroy();
-          return false;
-        }
-        pendingChunks.push(chunk);
-        return true;
-      }
       try {
-        blocked = !response.write(chunk);
-        return true;
+        if (response.write(chunk)) return true;
       } catch {
         closeStream();
         return false;
       }
+      // response.write(false) means the kernel/userland buffer is full. Replay must pause here,
+      // otherwise a slow browser turns one disk scan into an unbounded JS heap queue.
+      return new Promise((resolveDrain) => {
+        const settle = (value) => {
+          response.off("drain", onDrain);
+          response.off("close", onClose);
+          response.off("error", onClose);
+          resolveDrain(value);
+        };
+        const onDrain = () => settle(!closed);
+        const onClose = () => settle(false);
+        response.once("drain", onDrain);
+        response.once("close", onClose);
+        response.once("error", onClose);
+        if (closed) settle(false);
+      });
     };
-    function flushChunks() {
-      if (closed) return;
-      blocked = false;
-      while (pendingChunks.length) {
-        try {
-          if (!response.write(pendingChunks.shift())) {
-            blocked = true;
-            return;
-          }
-        } catch {
-          closeStream();
-          return;
+    const eventChunk = (event) => {
+      let run = null;
+      const runId = String(event?.runId || "").trim();
+      if (runId) {
+        try { run = state.orchestrator.get(runId); } catch {}
+      }
+      const visibleEvent = eventForPublic(event, run, uiView);
+      return `id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(visibleEvent)}\n\n`;
+    };
+    const compactQueue = () => {
+      if (queueHead >= 1024 && queueHead * 2 >= liveQueue.length) {
+        liveQueue = liveQueue.slice(queueHead);
+        queueHead = 0;
+      }
+    };
+    const discardReplayDuplicates = () => {
+      while (queueHead < liveQueue.length) {
+        const sequence = Number(liveQueue[queueHead].event?.sequence) || 0;
+        if (!sequence || sequence > lastSequence) break;
+        queuedBytes -= liveQueue[queueHead++].bytes;
+      }
+      compactQueue();
+    };
+    const enqueue = (item) => {
+      if (closed) return false;
+      const pendingCount = liveQueue.length - queueHead;
+      if (pendingCount >= maxPendingEvents || queuedBytes + item.bytes > maxPendingBytes) {
+        // The client reconnects with its last delivered event id; destroying is safer than silently
+        // dropping a middle event or retaining arbitrary data while it is not reading.
+        closeStream();
+        response.destroy();
+        return false;
+      }
+      liveQueue.push(item);
+      queuedBytes += item.bytes;
+      if (!replaying) void pumpQueue();
+      return true;
+    };
+    const enqueueEvent = (event) => {
+      if ((Number(event.sequence) || 0) <= lastSequence) return;
+      const chunk = eventChunk(event);
+      enqueue({ event, chunk, bytes: Buffer.byteLength(chunk) });
+    };
+    const enqueueRaw = (chunk) => enqueue({ event: null, chunk, bytes: Buffer.byteLength(chunk) });
+    async function pumpQueue() {
+      if (pumping || replaying || closed) return;
+      pumping = true;
+      try {
+        while (!closed && queueHead < liveQueue.length) {
+          const item = liveQueue[queueHead++];
+          queuedBytes -= item.bytes;
+          compactQueue();
+          const sequence = Number(item.event?.sequence) || 0;
+          if (sequence && sequence <= lastSequence) continue;
+          if (!(await writeChunk(item.chunk))) break;
+          if (sequence) lastSequence = sequence;
         }
+      } finally {
+        pumping = false;
+        if (!closed && queueHead < liveQueue.length) queueMicrotask(() => void pumpQueue());
       }
     }
-    const writeEvent = (event) => {
-      if ((Number(event.sequence) || 0) <= lastSequence) return;
-      lastSequence = Number(event.sequence) || lastSequence;
-      writeChunk(`id: ${event.sequence}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+    const writeReplayEvent = async (event) => {
+      const sequence = Number(event.sequence) || 0;
+      if (sequence <= lastSequence) return true;
+      if (!(await writeChunk(eventChunk(event)))) return false;
+      lastSequence = sequence;
+      // createReadStream can observe appends made during replay. Those events also entered the live
+      // safety queue via subscribe(); discard the now-delivered head copies so duplicates cannot
+      // consume the bounded queue and force a reconnect under sustained activity.
+      discardReplayDuplicates();
+      return true;
     };
     unsubscribe = state.eventStore.subscribe((event) => {
-      if (replaying) {
-        if (queuedEvents.length >= maxPendingChunks) {
-          writeChunk(`event: replay_gap\ndata: ${JSON.stringify({ code: "LIVE_REPLAY_OVERFLOW", afterSequence: lastSequence })}\n\n`);
-          closeStream();
-          response.end();
-          return;
-        }
-        queuedEvents.push(event);
-      }
-      else writeEvent(event);
+      enqueueEvent(event);
     });
-    response.on("drain", flushChunks);
     response.once("error", closeStream);
     response.once("close", closeStream);
-    writeChunk(`retry: 3000\nevent: ready\ndata: ${JSON.stringify({ requestId: randomUUID(), afterSequence })}\n\n`);
+    if (!(await writeChunk(`retry: 3000\nevent: ready\ndata: ${JSON.stringify({ requestId: randomUUID(), afterSequence, streamEpoch })}\n\n`))) return;
     try {
       if (afterSequence > 0) {
-        let cursor = afterSequence;
-        while (!closed) {
-          const page = await state.eventStore.replay(cursor, 2000);
-          for (const event of page.events) writeEvent(event);
-          if (!page.hasMore || !page.events.length) break;
-          cursor = Number(page.events.at(-1)?.sequence) || cursor;
+        for await (const event of state.eventStore.iterate({ afterSequence, signal: replayAbort.signal })) {
+          if (closed) break;
+          if (!(await writeReplayEvent(event))) break;
         }
       } else {
-        for (const event of await state.eventStore.list(50)) writeEvent(event);
+        for (const event of await state.eventStore.list(50)) {
+          if (!(await writeReplayEvent(event))) break;
+        }
       }
     } catch (error) {
-      writeChunk(`event: replay_error\ndata: ${JSON.stringify({ code: "EVENT_REPLAY_FAILED", message: error.message })}\n\n`);
+      if (!closed) await writeChunk(`event: replay_error\ndata: ${JSON.stringify({ code: "EVENT_REPLAY_FAILED", message: error.message })}\n\n`);
       closeStream();
       response.end();
       return;
     }
+    if (closed) return;
     replaying = false;
-    for (const event of queuedEvents) writeEvent(event);
-    heartbeat = setInterval(() => writeChunk(": heartbeat\n\n"), 20_000);
+    void pumpQueue();
+    heartbeat = setInterval(() => enqueueRaw(": heartbeat\n\n"), 20_000);
     return;
   }
+  if (await dispatchSurfaceRoute(request, response, url)) return;
   return json(response, 404, { error: { code: "NOT_FOUND", message: "API route not found" } });
 }
 
@@ -471,6 +1946,14 @@ const server = createServer(async (request, response) => {
   const requestId = randomUUID();
   try {
     const url = new URL(request.url || "/", `http://${request.headers.host || host}`);
+    if (request.method === "POST" && url.pathname === "/auth/bootstrap") {
+      const payload = await body(request, 4 * 1024);
+      if (bootstrapConsumed || Date.now() > bootstrapExpiresAt || !secretEquals(payload.nonce, bootstrapNonce)) {
+        return json(response, 401, { error: { code: "BOOTSTRAP_INVALID", message: "Bootstrap token is invalid, expired, or already used", requestId } });
+      }
+      bootstrapConsumed = true;
+      return json(response, 200, { token });
+    }
     if (url.pathname.startsWith("/api/")) {
       if (!authorized(request)) return json(response, 401, { error: { code: "UNAUTHORIZED", message: "Missing or invalid local access token", requestId } });
       return await api(request, response, url);
@@ -478,7 +1961,18 @@ const server = createServer(async (request, response) => {
     if (request.method === "GET" && (await serveStatic(url.pathname, response))) return;
     return json(response, 404, { error: { code: "NOT_FOUND", message: "Not found", requestId } });
   } catch (error) {
+    const disconnected = error?.code === "CLIENT_DISCONNECTED" || (
+      error?.name === "AbortError" && Boolean(request.aborted || request.destroyed || response.destroyed)
+    );
+    if (disconnected || response.destroyed || response.writableEnded) return;
     await state.eventStore.emit("server.error", { requestId, code: error.code || null, message: error.message }, { sensitivity: "internal" }).catch(() => {});
+    if (response.headersSent) {
+      response.destroy();
+      return;
+    }
+    if (["EVENT_INDEX_BUSY", "HEALTH_PROBE_BUSY", "AGENT_ACTION_CAPACITY", "MODEL_DISCOVERY_CAPACITY"].includes(error.code) && !response.headersSent) {
+      response.setHeader("retry-after", "1");
+    }
     return json(response, statusFor(error), {
       error: {
         code: error.code || "INTERNAL_ERROR",
@@ -486,18 +1980,26 @@ const server = createServer(async (request, response) => {
         requestId,
         validation: error.validation,
         currentSha256: error.currentSha256,
+        currentRevision: error.currentRevision,
         candidates: error.candidates,
+        references: error.references,
+        conflicts: error.conflicts,
+        runtimeProfileId: error.runtimeProfileId,
+        eligibilityReason: error.eligibilityReason,
+        automationStatus: error.automationStatus,
+        capabilityStatus: error.capabilityStatus,
       },
     });
   }
 });
 
+let actualPort = null;
 server.listen(port, host, () => {
   const address = server.address();
-  const actualPort = typeof address === "object" && address ? address.port : port;
-  const url = `http://${host}:${actualPort}/#token=${token}`;
+  actualPort = typeof address === "object" && address ? address.port : port;
+  const url = `http://${host}:${actualPort}/#bootstrap=${bootstrapNonce}`;
   process.stdout.write(`514cc Control Center: ${url}\n`);
-  process.stdout.write(`API token is ephemeral and will be invalid after restart.\n`);
+  process.stdout.write("Bootstrap link is single-use and expires after two minutes; the API bearer is not written to logs.\n");
   if (process.env.CONTROL_CENTER_OPEN === "1") {
     const opener = process.platform === "win32"
       ? ["rundll32.exe", ["url.dll,FileProtocolHandler", url]]
@@ -510,14 +2012,57 @@ server.listen(port, host, () => {
   }
 });
 
-async function shutdown(signal) {
-  process.stdout.write(`Shutting down (${signal})...\n`);
-  const serverClosed = new Promise((resolveClosed) => server.close(resolveClosed));
-  server.closeAllConnections?.();
-  await state.close();
-  await serverClosed;
-  process.exit(0);
+async function closeHttpTransport() {
+  if (!server.listening) return;
+  await new Promise((resolveClosed, rejectClosed) => {
+    server.close((error) => {
+      if (error) rejectClosed(error);
+      else resolveClosed();
+    });
+    server.closeAllConnections?.();
+  });
 }
 
-process.once("SIGINT", () => void shutdown("SIGINT"));
-process.once("SIGTERM", () => void shutdown("SIGTERM"));
+async function reopenHttpTransport() {
+  if (!Number.isInteger(actualPort) || actualPort <= 0) {
+    throw Object.assign(new Error("Control Center HTTP port is unavailable for shutdown rollback"), {
+      code: "CONTROL_CENTER_HTTP_REOPEN_FAILED",
+    });
+  }
+  await new Promise((resolveListening, rejectListening) => {
+    const onError = (error) => {
+      server.off("listening", onListening);
+      rejectListening(error);
+    };
+    const onListening = () => {
+      server.off("error", onError);
+      resolveListening();
+    };
+    server.once("error", onError);
+    server.once("listening", onListening);
+    server.listen(actualPort, host);
+  });
+}
+
+const shutdownController = createShutdownController({
+  closeTransport: closeHttpTransport,
+  reopenTransport: reopenHttpTransport,
+  closeState: () => state.close(),
+  onClosed: () => process.exit(0),
+  onError(error, signal) {
+    const code = error?.code || "CONTROL_CENTER_SHUTDOWN_FAILED";
+    const reopen = error?.transportReopenError
+      ? `; HTTP reopen failed: ${error.transportReopenError.message || error.transportReopenError}`
+      : "";
+    process.stderr.write(`Shutdown failed (${signal}, ${code}): ${error?.message || error}${reopen}\n`);
+    if (shouldSetShutdownFailureExitCode(error)) process.exitCode = 1;
+  },
+  log: (message) => process.stdout.write(message),
+});
+
+function requestShutdown(signal) {
+  shutdownController.request(signal);
+}
+
+process.on("SIGINT", () => requestShutdown("SIGINT"));
+process.on("SIGTERM", () => requestShutdown("SIGTERM"));

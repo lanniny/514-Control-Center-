@@ -1,1 +1,1 @@
-{}
+{"ccswitch-native-bridge":{"identifier":"ccswitch-native-bridge","description":"Allow the 514cc loopback control-center page to call the explicit desktop bridge commands.","remote":{"urls":["http://127.0.0.1:51400/*"]},"local":false,"windows":["main"],"permissions":["allow-get-native-capabilities","allow-get-auto-launch-status","allow-set-auto-launch","allow-restart-app","allow-is-portable-mode","allow-copy-text-to-clipboard","allow-set-window-theme","allow-update-tray-menu","allow-enter-lightweight-mode","allow-exit-lightweight-mode","allow-is-lightweight-mode"]}}

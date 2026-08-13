@@ -1,0 +1,135 @@
+/* ==========================================================================
+   G4 协作星图英雄页（Awwwards 艺术面）—— 全屏 canvas + 实验排版。
+   独立视图容器，不触碰任何工具面样式；reduced-motion 全降级。
+   ========================================================================== */
+
+#view-hero {
+  /* 撑满主区，去掉工具面内边距，canvas 直达边缘 */
+  padding: 0;
+  overflow: hidden;
+  position: relative;
+}
+
+.hero-stage {
+  position: relative;
+  width: 100%;
+  height: calc(100vh - var(--topbar-height, 56px) - 28px);
+  min-height: 480px;
+  overflow: hidden;
+}
+
+.hero-canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  cursor: crosshair;
+}
+
+/* —— hover 名称卡（DOM 层，排版精度高于 canvas 文字） —— */
+.hero-tip {
+  position: absolute;
+  left: var(--hero-tip-x, -999px);
+  top: var(--hero-tip-y, -999px);
+  transform: translate(-50%, -100%);
+  padding: 5px 12px;
+  border-radius: 9999px;
+  background: color-mix(in oklab, var(--card, #fff) 80%, transparent);
+  -webkit-backdrop-filter: blur(10px) saturate(150%);
+  backdrop-filter: blur(10px) saturate(150%);
+  box-shadow: inset 0 0 0 1px var(--border, #e4e1ea);
+  color: var(--foreground, #1c1917);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--dur-med, 150ms) var(--ease-out, ease);
+}
+.hero-tip.is-visible {
+  opacity: 1;
+}
+
+/* —— 实验排版：左侧竖排巨字 + 拉丁小标 —— */
+.hero-type {
+  position: absolute;
+  left: clamp(18px, 4vw, 64px);
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: flex-start;
+  gap: clamp(10px, 1.6vw, 22px);
+  pointer-events: none;
+  user-select: none;
+}
+
+.hero-type-vertical {
+  writing-mode: vertical-rl;
+  font-family: "Songti SC", "Noto Serif SC", "SimSun", serif;
+  font-size: clamp(64px, 11vh, 128px);
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  line-height: 1;
+  /* 描边空心字：色淡而不夺 canvas 主体 */
+  color: transparent;
+  -webkit-text-stroke: 1.5px color-mix(in oklch, var(--foreground, #1c1917) 34%, transparent);
+}
+
+.hero-type-latin {
+  writing-mode: vertical-rl;
+  font-size: clamp(10px, 1.2vh, 13px);
+  font-weight: 600;
+  letter-spacing: 0.42em;
+  line-height: 1.7;
+  color: color-mix(in oklch, var(--muted-foreground, #78716c) 80%, transparent);
+}
+
+/* —— 右下巨型计数（实验排版第二极） —— */
+.hero-count {
+  position: absolute;
+  right: clamp(18px, 4vw, 64px);
+  bottom: clamp(16px, 4vh, 48px);
+  display: flex;
+  align-items: baseline;
+  gap: 14px;
+  pointer-events: none;
+  user-select: none;
+}
+
+.hero-count-num {
+  font-size: clamp(96px, 20vh, 220px);
+  font-weight: 800;
+  line-height: 0.9;
+  letter-spacing: -0.05em;
+  color: transparent;
+  -webkit-text-stroke: 2px color-mix(in oklch, var(--primary) 55%, transparent);
+  font-variant-numeric: tabular-nums;
+}
+
+.hero-count-label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.3em;
+  line-height: 1.8;
+  color: color-mix(in oklch, var(--muted-foreground, #78716c) 75%, transparent);
+}
+
+/* —— reduced-motion：静态构图（JS 已停 raf），排版无过渡 —— */
+@media (prefers-reduced-motion: reduce) {
+  .hero-tip {
+    transition: none;
+  }
+  .hero-canvas {
+    cursor: default;
+  }
+}
+
+/* 窄屏：排版让位 canvas */
+@media (max-width: 720px) {
+  .hero-type-vertical {
+    font-size: 56px;
+  }
+  .hero-count-num {
+    font-size: 88px;
+  }
+}

@@ -1,36 +1,48 @@
-// Kimi Code CLI 适配器（前端工程师成员，2026-07-19 本机 0.27.0 实测）：
+// Kimi Code CLI 适配器（前端工程师成员，当前本机 0.31.1）：
 // headless `kimi -p <prompt> --output-format stream-json`，事件两型：
 //   {"role":"assistant","content":"..."} 文本段 /
 //   {"role":"meta","type":"session.resume_hint","session_id":"session_xxx",...} 会话 ID。
 // 续轮 `-S <sessionId>`（实测续接保留上下文）；session 绑定创建目录——resume 必须在同 cwd，
 // run.cwd 固化不变恰好天然满足该约束。会话由 kimi 自身持久化（~/.kimi-code）。
-// 权限映射：plan/read-only 轮 --plan（只读规划）；经审批的 workspace-write 轮 --auto（auto permission）。
+// 权限映射：plan/read-only 轮显式 --plan；--auto 会取消逐工具确认，不能表达受控
+// workspace-write，因此写权限继续 fail-closed。
+// effort 接线（2026-08-09 LO）：kimi headless 没有 --effort argv 开关，走官方 env
+// KIMI_MODEL_THINKING_EFFORT 逐轮注入（仅 kimi provider 生效、thinking 开启时上线；
+// 会绕过模型声明的 support_efforts——kimi-for-coding 这类未列档位的模型可能被服务端
+// 拒绝或回退默认档，档位目录因此只放 managed k3 实测的 low/high/max）。
 import { randomUUID } from "node:crypto";
 import { runProcess } from "../process-runner.mjs";
-import { createLfCollector } from "./stream-utils.mjs";
+import { createBoundedTaskTracker, createLfCollector } from "./stream-utils.mjs";
 
-export function buildKimiArgs({ prompt, sessionId = null, model = null }) {
-  // kimi 0.27.0 实测：-p 与 --plan/--auto/--yolo 全部互斥——headless 只能用 CLI 默认权限行为。
-  // workspace-write 轮无法机械授予受控写权限，由 send() 前置 fail-closed 拒绝（不静默降级）。
+export function buildKimiArgs({ prompt, sessionId = null, model = null, permissionMode = "plan" }) {
   const args = ["-p", prompt, "--output-format", "stream-json"];
+  if (permissionMode !== "workspace-write") args.push("--plan");
   if (sessionId) args.push("-S", sessionId);
   if (model) args.push("-m", model);
   return args;
 }
 
+export function buildKimiEnv({ effort = null } = {}) {
+  const normalized = String(effort ?? "").trim().toLowerCase();
+  return normalized ? { KIMI_MODEL_THINKING_EFFORT: normalized } : {};
+}
+
 export class KimiCliAdapter {
-  constructor({ command = "kimi", model = null, eventStore, cwd }) {
+  supportsPerTurnCwd = true; // 每 turn spawn，cwd 真实生效（写盘轮本身已被 UNSUPPORTED_PERMISSION 拦截）
+
+  constructor({ command = "kimi", model = null, eventStore, cwd, runProcessImpl = runProcess }) {
     this.id = "kimi-headless-resume";
     this.command = command;
     this.model = model;
     this.eventStore = eventStore;
     this.cwd = cwd;
+    this.runProcessImpl = runProcessImpl;
   }
 
-  async send({ sessionId, prompt, runId, signal, permissionMode = "plan", timeoutMs = 15 * 60_000, cwd = null, onSessionStarted, onTurnSubmitting }) {
-    // 受控写权限 fail-closed：-p 模式无任何权限旗标可用，授不出去就不假装授了
+  async send({ sessionId, prompt, runId, agentId = "kimi-frontend", signal, permissionMode = "plan", model = null, effort = null, timeoutMs = 15 * 60_000, cwd = null, onSessionStarted, onTurnSubmitting }) {
+    // 受控写权限 fail-closed：--auto 是全自动批准，不等价于 514cc 的限工作区写权限。
     if (permissionMode === "workspace-write") {
-      const error = new Error("kimi headless prompt mode cannot grant controlled write permission (-p excludes --plan/--auto/--yolo); dispatch write turns to codex or claude instead");
+      const error = new Error("kimi --auto removes per-tool confirmation and cannot express scoped workspace-write; dispatch write turns to codex or claude instead");
       error.code = "UNSUPPORTED_PERMISSION";
       throw error;
     }
@@ -40,53 +52,64 @@ export class KimiCliAdapter {
       error.code = "INVALID_PROMPT";
       throw error;
     }
-    const args = buildKimiArgs({ prompt, sessionId, model: this.model });
+    const args = buildKimiArgs({ prompt, sessionId, model: model || this.model, permissionMode });
     let resolvedSessionId = sessionId || null;
     const textParts = [];
-    const pendingEvents = [];
+    const pendingTasks = createBoundedTaskTracker();
     const collector = createLfCollector(
       (event) => {
         if (event?.role === "assistant" && typeof event.content === "string" && event.content) {
           textParts.push(event.content);
-          pendingEvents.push(
-            this.eventStore.emit("assistant.message", { text: event.content }, { runId, sessionId: resolvedSessionId, agentId: "kimi-frontend" }),
-          );
+          pendingTasks.run(() =>
+            this.eventStore.emit("assistant.message", { text: event.content }, { runId, sessionId: resolvedSessionId, agentId }));
           return;
         }
         if (event?.role === "meta" && event.type === "session.resume_hint" && event.session_id) {
           const previousSessionId = resolvedSessionId;
           resolvedSessionId = event.session_id;
           if (resolvedSessionId !== previousSessionId) {
-            pendingEvents.push(onSessionStarted?.({ sessionId: resolvedSessionId, protocol: "kimi-headless-resume" }));
+            pendingTasks.run(() => onSessionStarted?.({ sessionId: resolvedSessionId, protocol: "kimi-headless-resume" }));
           }
           return;
         }
         // 未知事件形态（未来的工具/状态型 role）宽容降级为工具活动行，不静默丢弃
         if (event?.role && event.role !== "assistant" && event.role !== "meta") {
-          pendingEvents.push(
+          pendingTasks.run(() =>
             this.eventStore.emit(
               "tool.event",
               { tool: String(event.role), status: String(event.type || ""), command: String(event.content ?? "").slice(0, 200) },
-              { runId, sessionId: resolvedSessionId, agentId: "kimi-frontend" },
-            ),
-          );
+              { runId, sessionId: resolvedSessionId, agentId },
+            ));
         }
       },
-      (error) =>
-        pendingEvents.push(
-          this.eventStore.emit("adapter.parse_error", { adapter: this.id, message: error.message }, { runId, agentId: "kimi-frontend" }),
-        ),
+      (error) => pendingTasks.run(() =>
+        this.eventStore.emit("adapter.parse_error", { adapter: this.id, message: error.message }, { runId, agentId })),
     );
     if (sessionId) await onSessionStarted?.({ sessionId, protocol: "kimi-headless-resume" });
     await onTurnSubmitting?.({ sessionId: sessionId || null, protocol: "kimi-headless-resume", clientUserMessageId: randomUUID() });
-    const result = await runProcess(this.command, args, {
-      cwd: cwd || this.cwd, // 会话项目地址（kimi session 绑定创建目录，同 run 恒同 cwd）
-      timeoutMs,
-      signal,
-      onStdout: (chunk) => collector.push(chunk),
-    });
-    collector.end();
-    await Promise.all(pendingEvents);
+    let result;
+    let processError = null;
+    try {
+      result = await this.runProcessImpl(this.command, args, {
+        cwd: cwd || this.cwd, // 会话项目地址（kimi session 绑定创建目录，同 run 恒同 cwd）
+        env: buildKimiEnv({ effort }), // effort 只走 env 线；空对象不改变既有环境裁剪行为
+        provider: "kimi",
+        timeoutMs,
+        signal,
+        onStdout: (chunk) => collector.push(chunk),
+      });
+    } catch (error) {
+      processError = error;
+    } finally {
+      collector.end();
+    }
+    const persistence = await pendingTasks.drain();
+    if (processError) throw processError;
+    if (persistence.timedOut || persistence.pending || persistence.dropped || persistence.errors.length) {
+      const error = persistence.errors[0] || new Error("Kimi event persistence did not settle within its bounded drain window");
+      if (!error.code) error.code = "EVENT_PERSISTENCE_INCOMPLETE";
+      throw error;
+    }
     if (result.code !== 0 || !resolvedSessionId) {
       let message = result.stderr.trim() || `kimi exited ${result.code} without a session id`;
       if (/login|auth|unauthorized|expired/i.test(message)) {

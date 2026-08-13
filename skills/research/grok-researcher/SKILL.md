@@ -79,6 +79,7 @@ $r.choices[0].message.content
 路径：`.ai-shared/handoff/grok-to-claude__{topic}__{YYYYMMDD-HHmm}.md`
 
 ```markdown
+<!-- 514cc-session-id: {session_id_from_route_gate} -->
 # 织·情报：{topic}
 
 - **资料范围**：{文件/URL 清单}
@@ -102,8 +103,15 @@ $r.choices[0].message.content
 ### 建议召唤
 ### 风险信号
 
-__DELTA__: {调研对象} | {0=无新增事实 / 1=补强已知 / 2=推翻主驾假设} | {证据：事实#X 或出处}
+__DELTA__: 织(Grok) | 1 | 证据：file:line 说明新增发现
 ```
+
+handoff 无 YAML frontmatter 时，文件首行必须逐字复制本轮 route-gate 注入的 session
+marker；存在合法 YAML frontmatter 时，marker 必须紧随 closing `---`。不得猜测
+session id，也不得保留 marker 占位符。上行 DELTA 是语法合法示例：按事实替换对象和证据，并且
+只选择单个数字 `0`=无新增事实、`1`=补强已知、`2`=推翻主驾假设。不得填写
+`0/1/2`、`{0/1/2}`、`1补强`、`2推翻` 等占位或带标签值；存在多条 DELTA 时
+每一条都必须合法。
 
 ### 5. 返回主驾
 简报 ≤ 200 字：调研目标 + handoff 路径 + 事实数/缺口数 + 关键发现。

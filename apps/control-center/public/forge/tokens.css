@@ -1,0 +1,213 @@
+/* ==========================================================================
+   514 Forge — v4.0 design tokens (OKLCH)
+   Light = :root, Dark = [data-theme="dark"].
+   Loads AFTER styles.css: equal-specificity overrides of shared var names
+   (--border etc.) are intentional; legacy --surface/--text/* stay untouched.
+   ========================================================================== */
+
+:root {
+  /* —— Core surfaces & ink（Claude 人文风：暖米白纸面 + 深棕墨）—— */
+  --background: oklch(0.978 0.004 95);   /* #faf9f5 暖米白 */
+  --foreground: oklch(0.265 0.012 60);   /* #2a2620 深棕黑 */
+  --card: oklch(0.995 0.002 90);         /* #fdfcf9 暖白纸卡 */
+  --card-foreground: oklch(0.265 0.012 60);
+  --muted: oklch(0.952 0.006 90);        /* #efede4 暖灰米 */
+  --muted-foreground: oklch(0.50 0.015 65); /* #6f6a5e 暖灰 */
+  --border: oklch(0.912 0.007 85);       /* #e4e2d6 暖淡边 */
+  --input: oklch(0.912 0.007 85);
+
+  /* —— Brand primary: Claude 铜橙（人文暖铜，弃玫瑰；OKLCH-faithful #D97757）—— */
+  --primary: oklch(0.672 0.131 38.7);
+  --primary-foreground: oklch(0.99 0.003 80);
+  --primary-hover: oklch(0.60 0.13 35);  /* darken, not lighten — keeps white-text contrast */
+  --primary-soft: color-mix(in oklch, var(--primary) 10%, var(--background));
+  --ring: var(--primary);
+
+  /* —— Semantic —— */
+  --success: oklch(0.62 0.17 155);
+  --warning: oklch(0.68 0.16 70);
+  --danger: oklch(0.577 0.215 27.3);
+  --info: oklch(0.546 0.215 262.9);
+  --success-soft: color-mix(in oklch, var(--success) 13%, var(--background));
+  --warning-soft: color-mix(in oklch, var(--warning) 15%, var(--background));
+  --danger-soft: color-mix(in oklch, var(--danger) 11%, var(--background));
+  --info-soft: color-mix(in oklch, var(--info) 11%, var(--background));
+
+  /* —— Agent brand (OKLCH-faithful conversions) —— */
+  --agent-claude: oklch(0.672 0.131 38.7);  /* #D97757 */
+  --agent-codex: oklch(0.713 0.149 267.7);  /* #7A9DFF */
+  --agent-grok: oklch(0.709 0.159 293.5);   /* violet */
+  --agent-kimi: oklch(0.796 0.134 81.4);    /* gold */
+  --agent-pi: oklch(0.785 0.133 182);       /* teal */
+  --agent-cursor: oklch(0.712 0.013 286);   /* graphite */
+
+  /* —— Radius scale —— */
+  --radius: 0.625rem; /* 10px base */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --radius-xl: 14px;
+  --radius-2xl: 18px;
+  --radius-3xl: 22px;
+  --radius-4xl: 26px;
+
+  /* —— Elevation —— */
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.07), 0 2px 4px -2px rgb(0 0 0 / 0.06);
+  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.08), 0 4px 6px -4px rgb(0 0 0 / 0.06);
+  --shadow-xl: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.06);
+  --shadow-2xl: 0 25px 50px -12px rgb(0 0 0 / 0.25);
+
+  /* —— Type scale (headings: weight 600, letter-spacing -0.02em) —— */
+  --text-xs: 11px;
+  --text-sm: 12.5px;
+  --text-base: 14px;
+  --text-lg: 16px;
+  --text-xl: 20px;
+  --text-2xl: 24px;
+  --text-3xl: 30px;
+
+  /* —— z-index scale (toast=1100 / skip-link=1000 already in app) —— */
+  --z-base: 0;
+  --z-raised: 10;
+  --z-dropdown: 100;
+  --z-sticky: 200;
+  --z-overlay: 300;
+  --z-drawer: 900;
+  --z-modal: 1000;
+  --z-toast: 1100;
+  --z-palette: 1200;
+  --z-tooltip: 1300;
+}
+
+[data-theme="dark"] {
+  /* Claude 人文暗色：暖棕黑纸面，非纯黑 */
+  --background: oklch(0.19 0.008 60);    /* #1e1c17 */
+  --foreground: oklch(0.93 0.008 85);    /* #ece9e0 暖米白 */
+  --card: oklch(0.235 0.010 62);         /* #282520 */
+  --card-foreground: oklch(0.93 0.008 85);
+  --muted: oklch(0.275 0.010 62);
+  --muted-foreground: oklch(0.685 0.015 70);
+  --border: oklch(0.93 0.008 85 / 12%);
+  --input: oklch(0.93 0.008 85 / 16%);
+
+  /* 铜橙暗态提亮 */
+  --primary: oklch(0.72 0.12 40);
+  --primary-foreground: oklch(0.19 0.012 50);
+  --primary-hover: oklch(0.77 0.11 42);
+  --primary-soft: color-mix(in oklch, var(--primary) 16%, var(--background));
+  --ring: var(--primary);
+
+  --success: oklch(0.72 0.16 155);
+  --warning: oklch(0.79 0.15 75);
+  --danger: oklch(0.704 0.191 22.2);
+  --info: oklch(0.707 0.165 254.6);
+  --success-soft: color-mix(in oklch, var(--success) 16%, var(--background));
+  --warning-soft: color-mix(in oklch, var(--warning) 17%, var(--background));
+  --danger-soft: color-mix(in oklch, var(--danger) 15%, var(--background));
+  --info-soft: color-mix(in oklch, var(--info) 15%, var(--background));
+
+  --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.5);
+  --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.5), 0 2px 4px -2px rgb(0 0 0 / 0.5);
+  --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.55), 0 4px 6px -4px rgb(0 0 0 / 0.5);
+  --shadow-xl: 0 20px 25px -5px rgb(0 0 0 / 0.6), 0 8px 10px -6px rgb(0 0 0 / 0.5);
+  --shadow-2xl: 0 25px 50px -12px rgb(0 0 0 / 0.7);
+}
+
+/* —— Token-driven utilities —— */
+
+/* Tabular numerals for metrics/timestamps/counters. */
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Heading discipline: 600 weight, tight tracking. */
+.forge-h1,
+.forge-h2,
+.forge-h3 {
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--foreground);
+}
+
+.forge-h1 {
+  font-size: var(--text-3xl);
+  line-height: 1.2;
+}
+
+.forge-h2 {
+  font-size: var(--text-2xl);
+  line-height: 1.25;
+}
+
+.forge-h3 {
+  font-size: var(--text-xl);
+  line-height: 1.3;
+}
+
+/* ==========================================================================
+   Legacy bridge — styles.css 旧变量族的人性化换血（tokens.css 后加载，
+   同特 :root 覆盖赢；styles.css 一万行零改动，全部旧引用自动转暖）。
+   ========================================================================== */
+
+:root {
+  /* 纸面与墨（旧冷白系 → Claude 暖米系） */
+  --void: #f0eee7;
+  --bg: #faf9f5;
+  --surface: #fdfcf9;
+  --surface-muted: #f0eee7;
+  --surface-strong: #e6e3d9;
+  --surface-glass: rgba(253, 252, 249, 0.92);
+  --text: #3d382e;
+  --text-strong: #2a2620;
+  --text-muted: #6f6a5e;
+  --text-soft: #8a857a;
+
+  /* 旧玫瑰族 → Claude 铜橙（变量名保留，值换血） */
+  --rose: #d97757;
+  --rose-bright: #e8916f;
+  --rose-deep: #b85c3e;
+  --rose-fill: #d97757;
+  --rose-fill-bright: #e8916f;
+  --rose-soft: rgba(217, 119, 87, 0.10);
+  --rose-line: rgba(217, 119, 87, 0.34);
+  --rose-glow: rgba(217, 119, 87, 0.15);
+
+  /* 状态栏：玫瑰底 → 深棕墨底 */
+  --statusbar: #2a2620;
+
+  /* 旧深色侧栏轨 → 暖米族（灭 run-rail 等处的深色泄漏） */
+  --sidebar: #f4f1ea;
+  --sidebar-hover: #ece8de;
+  --sidebar-active: #e4dfd2;
+}
+
+[data-theme="dark"] {
+  --void: #14120e;
+  --bg: #1e1c17;
+  --surface: #282520;
+  --surface-muted: #232019;
+  --surface-strong: #332f27;
+  --surface-glass: rgba(40, 37, 32, 0.92);
+  --text: #d8d4c9;
+  --text-strong: #ece9e0;
+  --text-muted: #a8a294;
+  --text-soft: #8a857a;
+
+  --rose: #e8916f;
+  --rose-bright: #f0a483;
+  --rose-deep: #d97757;
+  /* styles.css 暗色块未定义 --rose-fill 族（继承亮主题 #b4234d 玫瑰红），
+     亮 bridge 有、暗 bridge 漏 → 暗色下选中卡/发送钮/徽标全玫瑰粉，此处补坑 */
+  --rose-fill: #d97757;
+  --rose-fill-bright: #e8916f;
+  --rose-soft: rgba(232, 145, 111, 0.14);
+  --rose-line: rgba(232, 145, 111, 0.40);
+  --rose-glow: rgba(232, 145, 111, 0.18);
+
+  --statusbar: #14120e;
+
+  --sidebar: #17140f;
+  --sidebar-hover: #221e17;
+  --sidebar-active: #2c2820;
+}

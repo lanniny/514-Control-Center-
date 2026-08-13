@@ -1,0 +1,1908 @@
+/* ==========================================================================
+ * 514 Forge · workbench.css（v4.0 Forge 波次）
+ * 协作台视觉核心：消息流胶囊 / 工具卡 / composer / run rail / 页签 / 状态条。
+ * 加载顺序在 styles.css 之后——同优先级后者胜；令牌取自 forge/tokens.css，
+ * 旧 atelier 变量全部作为回退，令牌未落位时页面不破。
+ * ========================================================================== */
+
+/* ---- agent 品牌色槽：.is-agent-* 在任何组件上都解析出 --forge-agent ------- */
+.is-agent-claude-fable { --forge-agent: var(--agent-claude, var(--rose)); }
+.is-agent-codex-technical { --forge-agent: var(--agent-codex, var(--blue)); }
+.is-agent-grok-search,
+.is-agent-grok-build { --forge-agent: var(--agent-grok, var(--aqua)); }
+.is-agent-kimi-frontend { --forge-agent: var(--agent-kimi, var(--violet)); }
+.is-agent-pi-resident { --forge-agent: var(--agent-pi, var(--amber)); }
+.is-agent-gemini-research { --forge-agent: var(--agent-pi, var(--amber)); }
+
+/* ==========================================================================
+ * 1. 消息流：用户右对齐胶囊 / 助手全宽无边框 / 圆形 Lucide 头像 + 品牌环
+ * ========================================================================== */
+
+.message-row {
+  margin-bottom: 20px;
+}
+
+.message-avatar {
+  border: 1.5px solid var(--forge-agent, var(--border));
+  border-radius: 999px;
+  background: var(--card, var(--surface-muted));
+  color: var(--forge-agent, var(--muted-foreground, var(--text-soft)));
+  box-shadow: var(--shadow-sm, 0 1px 2px rgba(0, 0, 0, 0.06));
+}
+
+.message-avatar .icon.lucide {
+  width: 15px;
+  height: 15px;
+}
+
+/* 品牌徽标头像（cli-logo）保持原尺寸，环色照常 */
+.message-avatar.has-cli-avatar {
+  border-color: var(--forge-agent, var(--border));
+}
+
+/* 用户消息：整行右对齐，正文收成右侧胶囊 */
+.message-row.is-user {
+  grid-template-columns: minmax(0, 1fr) 30px;
+}
+
+.message-row.is-user .message-avatar {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+.message-row.is-user .message-content {
+  grid-column: 1;
+  grid-row: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+}
+
+.message-row.is-user .message-head {
+  flex-direction: row-reverse;
+}
+
+.message-row.is-user .message-body {
+  width: fit-content;
+  max-width: 88%;
+  padding: 9px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-2xl, 18px);
+  border-bottom-right-radius: var(--radius-md, 8px);
+  background: var(--muted, var(--surface-muted));
+  font-size: var(--text-base, 12.5px);
+}
+
+/* 助手消息：全宽、无边框——阅读主权交给排版而不是卡片框 */
+.message-row:not(.is-user):not(.is-tool):not(.is-system) .message-body {
+  font-size: var(--text-base, 12.5px);
+}
+
+/* 群聊分组行（同人 3 分钟连发）：悬停时间戳淡入 */
+.message-row.is-grouped {
+  margin-top: -12px;
+}
+
+.message-row.is-grouped .hover-time {
+  opacity: 0;
+  transition: opacity var(--dur-fast, 100ms) var(--ease-out, ease);
+}
+
+.message-row.is-grouped:hover .hover-time {
+  opacity: 1;
+}
+
+/* 长代码块：限高 + 底部渐隐提示还有更多，悬停/聚焦时放全 */
+.md-body pre {
+  max-height: 340px;
+  overflow: auto;
+  border-radius: var(--radius-lg, 10px);
+  -webkit-mask-image: linear-gradient(to bottom, #000 0%, #000 calc(100% - 40px), transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 0%, #000 calc(100% - 40px), transparent 100%);
+}
+
+.md-body pre:hover,
+.md-body pre:focus-within {
+  -webkit-mask-image: none;
+  mask-image: none;
+}
+
+/* ==========================================================================
+ * 2. 工具卡：圆角边卡 + 每工具族左侧色条 + Lucide 状态图标 + 可折叠结果
+ * ========================================================================== */
+
+.tool-call.tool-card {
+  --tool-accent: var(--primary, var(--rose));
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--tool-accent);
+  border-radius: var(--radius-lg, 10px);
+  background: var(--card, var(--surface));
+  box-shadow: var(--shadow-sm, 0 1px 2px rgba(0, 0, 0, 0.05));
+  font-size: var(--text-sm, 12px);
+  transition: border-color var(--dur-med, 150ms) var(--ease-out, ease),
+    box-shadow var(--dur-med, 150ms) var(--ease-out, ease);
+}
+
+.tool-call.tool-card:hover {
+  border-color: var(--tool-accent);
+  box-shadow: var(--shadow-md, 0 2px 8px rgba(0, 0, 0, 0.08));
+}
+
+/* 工具族色条：读写=信息蓝 / 检索=紫 / 子代理=绿 / 待办=成功绿 */
+.tool-card[data-tool="read"],
+.tool-card[data-tool="write"],
+.tool-card[data-tool="edit"],
+.tool-card[data-tool="notebookedit"] { --tool-accent: var(--info, var(--blue, #1c7ed6)); }
+
+.tool-card[data-tool="glob"],
+.tool-card[data-tool="grep"],
+.tool-card[data-tool="websearch"],
+.tool-card[data-tool="webfetch"] { --tool-accent: var(--agent-kimi, var(--violet, #7048e8)); }
+
+.tool-card[data-tool="task"] { --tool-accent: var(--agent-codex, var(--blue, #1c7ed6)); }
+
+.tool-card[data-tool="todowrite"],
+.tool-card[data-tool="todoread"] { --tool-accent: var(--success, #2b8a3e); }
+
+.tool-glyph {
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  color: var(--tool-accent, var(--primary, var(--rose)));
+}
+
+.tool-glyph .icon.lucide {
+  width: 14px;
+  height: 14px;
+}
+
+.tool-call.tool-card strong {
+  flex: 0 0 auto;
+  font-size: var(--text-sm, 12px);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.tool-call.tool-card .tool-args {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: var(--text-xs, 11px);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 状态图标三态：完成绿 / 错误红 / 进行琥珀旋转（进行态留给未来 live 扩展） */
+.tool-status {
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+}
+
+.tool-status .icon.lucide {
+  width: 13px;
+  height: 13px;
+}
+
+.tool-status.is-done { color: var(--success, #2b8a3e); }
+.tool-status.is-error { color: var(--danger, var(--red, #b4231f)); }
+.tool-status.is-running { color: var(--warning, var(--amber, #e8590c)); }
+
+.tool-status.is-running .icon.lucide {
+  animation: forge-tool-spin 1s linear infinite;
+}
+
+@keyframes forge-tool-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* 工具结果：同款卡片 + 150ms 淡入折叠体 */
+.tool-result.tool-card {
+  margin-top: 4px;
+  overflow: hidden;
+  border-radius: var(--radius-lg, 10px);
+  background: var(--card, var(--surface));
+}
+
+.tool-result.tool-card summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 10px;
+  font-size: var(--text-xs, 11px);
+  transition: background var(--dur-fast, 100ms) var(--ease-out, ease);
+}
+
+.tool-result.tool-card summary:hover {
+  background: var(--muted, var(--surface-muted));
+}
+
+.tool-result.tool-card[open] > pre,
+.tool-result.tool-card[open] > .payload-render-guard {
+  animation: forge-tool-reveal var(--dur-med, 150ms) var(--ease-out, ease);
+}
+
+@keyframes forge-tool-reveal {
+  from { opacity: 0; transform: translateY(-2px); }
+  to { opacity: 1; transform: none; }
+}
+
+.tool-result.tool-card pre {
+  max-height: 260px;
+  font-size: var(--text-xs, 11px);
+}
+
+/* ==========================================================================
+ * 3. Composer：圆角壳 + 焦点环 + 紧凑工具行 + 会话活跃 conic 旋转环
+ * ========================================================================== */
+
+.task-composer .composer-shell {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl, 14px);
+  background: var(--card, var(--surface));
+  transition: border-color var(--dur-med, 150ms) var(--ease-out, ease),
+    box-shadow var(--dur-med, 150ms) var(--ease-out, ease);
+}
+
+.task-composer .composer-shell:focus-within {
+  border-color: var(--ring, var(--rose));
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--ring, var(--rose)) 16%, transparent),
+    var(--shadow-md, 0 8px 28px rgba(31, 27, 22, 0.1));
+}
+
+/* 底部工具行：5 个下拉收成紧凑 pill 组，title 悬停即 tooltip */
+.composer-shell .composer-footer {
+  gap: 6px;
+}
+
+.composer-footer .model-pick {
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 8px);
+  background: var(--muted, transparent);
+  font-size: var(--text-xs, 11px);
+  transition: border-color var(--dur-fast, 100ms) var(--ease-out, ease),
+    background var(--dur-fast, 100ms) var(--ease-out, ease);
+}
+
+.composer-footer .model-pick:hover {
+  border-color: var(--ring, var(--rose));
+  background: var(--card, var(--surface));
+}
+
+.composer-footer .model-pick select {
+  font-size: inherit;
+}
+
+.composer-footer .key-hint {
+  font-size: var(--text-xs, 11px);
+  opacity: 0.7;
+}
+
+.composer-shell .send-button {
+  border-radius: var(--radius-md, 8px);
+  transition: transform var(--dur-fast, 100ms) var(--ease-out, ease),
+    box-shadow var(--dur-fast, 100ms) var(--ease-out, ease);
+}
+
+.composer-shell .send-button:active {
+  transform: translateY(1px);
+}
+
+/* 会话活跃环：conic 渐变绕壳旋转（2.5s 线性无限）；
+   --forge-angle 的 @property 注册在 forge/motion.css。聚焦输入时隐去不抢戏。 */
+.task-form.is-session-active .composer-shell::before {
+  content: "";
+  position: absolute;
+  z-index: 2;
+  inset: -2px;
+  padding: 2px;
+  border-radius: calc(var(--radius-xl, 14px) + 2px);
+  background: conic-gradient(from var(--forge-angle, 0deg),
+    transparent 0deg,
+    var(--primary, var(--rose)) 70deg,
+    transparent 150deg,
+    transparent 180deg,
+    var(--info, var(--blue, #1c7ed6)) 260deg,
+    transparent 330deg);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  pointer-events: none;
+  animation: forge-angle-spin 2.5s linear infinite;
+  transition: opacity var(--dur-slow, 240ms) var(--ease-out, ease);
+}
+
+.task-form.is-session-active .composer-shell:focus-within::before {
+  opacity: 0;
+}
+
+@keyframes forge-angle-spin {
+  to { --forge-angle: 360deg; }
+}
+
+/* 附件 chip：图标对齐 */
+.attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.attach-chip > .icon.lucide {
+  width: 12px;
+  height: 12px;
+  color: var(--muted-foreground, var(--text-soft));
+}
+
+.attach-chip button {
+  display: inline-grid;
+  place-items: center;
+}
+
+.attach-chip button .icon.lucide {
+  width: 11px;
+  height: 11px;
+}
+
+/* ==========================================================================
+ * 4. Run rail：状态点三态 / 分区眉题（sticky eyebrow）
+ * ========================================================================== */
+
+.rail-status-dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+}
+
+.rail-status-dot.is-live {
+  background: var(--warning, var(--amber, #e8590c));
+  animation: forge-dot-pulse 1.6s var(--ease-out, ease) infinite;
+}
+
+.rail-status-dot.is-amber { background: var(--warning, var(--amber, #e8590c)); }
+.rail-status-dot.is-green { background: var(--success, #2b8a3e); }
+.rail-status-dot.is-red { background: var(--danger, var(--red, #b4231f)); }
+.rail-status-dot.is-neutral { background: var(--muted-foreground, var(--text-soft)); }
+
+@keyframes forge-dot-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in oklch, var(--warning, #e8590c) 45%, transparent); }
+  50% { box-shadow: 0 0 0 5px transparent; }
+}
+
+/* 分区眉题：11px 大写 eyebrow，吸附在栏顶 */
+.rail-section > .pane-heading {
+  position: sticky;
+  z-index: 3;
+  top: 0;
+  font-size: var(--text-xs, 11px);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted-foreground, var(--text-soft));
+  background: var(--background, var(--surface));
+}
+
+.rail-run-button {
+  border-radius: var(--radius-md, 8px);
+  transition: background var(--dur-fast, 100ms) var(--ease-out, ease);
+}
+
+/* ==========================================================================
+ * 5. 成员条：品牌色点 chip / 页签：pill 分段控件
+ * ========================================================================== */
+
+.member-strip {
+  gap: 6px;
+}
+
+.member-strip-label {
+  font-size: var(--text-xs, 11px);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted-foreground, var(--text-soft));
+}
+
+.member-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--card, var(--surface));
+  transition: border-color var(--dur-fast, 100ms) var(--ease-out, ease),
+    background var(--dur-fast, 100ms) var(--ease-out, ease);
+}
+
+/* 无官方徽标的 chip 用品牌色点补身份（有 cli-logo 的不重复加点） */
+.member-chip:not(:has(.cli-logo))::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--forge-agent, var(--muted-foreground, var(--text-soft)));
+}
+
+.member-chip:hover {
+  border-color: var(--forge-agent, var(--ring, var(--rose)));
+}
+
+.member-chip.is-active {
+  border-color: var(--forge-agent, var(--primary, var(--rose)));
+  background: color-mix(in oklch, var(--forge-agent, var(--primary, var(--rose))) 10%, var(--card, var(--surface)));
+}
+
+.member-chip .cli-logo {
+  width: 14px;
+  height: 14px;
+}
+
+/* 页签栏：整体收进一个 muted 轨道，活跃页签浮成白 pill */
+.conv-tabs {
+  align-items: center;
+  gap: 4px;
+  padding: 6px;
+  border-bottom: 1px solid var(--border);
+  background: var(--muted, var(--surface-muted));
+}
+
+.conv-tab {
+  border: 1px solid transparent;
+  border-radius: var(--radius-md, 8px);
+  transition: background var(--dur-fast, 100ms) var(--ease-out, ease),
+    box-shadow var(--dur-fast, 100ms) var(--ease-out, ease);
+}
+
+.conv-tab.is-active {
+  border-color: var(--border);
+  border-radius: var(--radius-md, 8px);
+  background: var(--card, var(--surface));
+  box-shadow: var(--shadow-sm, 0 1px 3px rgba(0, 0, 0, 0.08));
+}
+
+/* pill 形态不再需要"盖住栏边框"的连通伪元素 */
+.conv-tab.is-active::after {
+  content: none;
+}
+
+.conv-tab-main {
+  padding: 6px 4px 6px 10px;
+}
+
+/* ==========================================================================
+ * 6. 状态条：等宽数字 + 主色图标
+ * ========================================================================== */
+
+.rail-statusline {
+  font-size: var(--text-xs, 11px);
+  font-variant-numeric: tabular-nums;
+  background: var(--muted, var(--surface-muted));
+  color: var(--muted-foreground, var(--text-muted));
+}
+
+.rail-statusline .sl-icon {
+  color: var(--primary, var(--rose));
+}
+
+.rail-statusline .sl-icon .icon.lucide {
+  width: 12px;
+  height: 12px;
+}
+
+/* ==========================================================================
+ * 7. 动效节制：系统要求减少动效时，全部旋转/脉冲/淡入降级为静态呈现
+ * ========================================================================== */
+
+@media (prefers-reduced-motion: reduce) {
+  .task-form.is-session-active .composer-shell::before {
+    animation: none;
+  }
+
+  .tool-status.is-running .icon.lucide,
+  .rail-status-dot.is-live {
+    animation: none;
+  }
+
+  .tool-result.tool-card[open] > pre,
+  .tool-result.tool-card[open] > .payload-render-guard {
+    animation: none;
+  }
+
+  .message-row.is-grouped .hover-time {
+    transition: none;
+  }
+}
+
+/* ==========================================================================
+   Wave G — 可拖分栏把手（splitter.js 配套；codeg 面板拖柄的 forge 等价）
+   ========================================================================== */
+
+.forge-splitter-handle {
+  position: relative;
+  flex: 0 0 5px;
+  cursor: col-resize;
+  background: transparent;
+  transition: background var(--dur-fast, 100ms) var(--ease-out, ease);
+  /* 把手在 grid 里自成一轨：由 splitter.js 插入左右栏之间 */
+  align-self: stretch;
+  outline: none;
+}
+.forge-splitter-handle:hover,
+.forge-splitter-handle:focus-visible {
+  background: color-mix(in oklch, var(--primary) 22%, transparent);
+}
+.forge-splitter-handle::after {
+  /* 中央 2px 指示条：常态淡、hover 显 */
+  content: "";
+  position: absolute;
+  inset: 0 1.5px;
+  border-radius: 2px;
+  background: color-mix(in oklch, var(--muted-foreground) 26%, transparent);
+  opacity: 0;
+  transition: opacity var(--dur-fast, 100ms) var(--ease-out, ease);
+}
+.forge-splitter-handle:hover::after,
+.forge-splitter-handle:focus-visible::after,
+.forge-splitting .forge-splitter-handle::after {
+  opacity: 1;
+}
+
+/* 拖动中：全局 col-resize 光标 + 禁文本选择 */
+.forge-splitting,
+.forge-splitting * {
+  cursor: col-resize !important;
+  user-select: none !important;
+}
+
+/* 三栏容器带把手时：grid 轨道由 JS 显式设置（grid-template-columns 内联），
+   把手不占轨——绝对定位贴缝，避免挤压 minmax 中栏 */
+.workbench-shell {
+  position: relative;
+}
+.workbench-shell > .forge-splitter-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 5px;
+  z-index: 30;
+}
+.workbench-shell > .forge-splitter-handle.is-left {
+  left: calc(var(--forge-split-left, 248px) - 2px);
+}
+.workbench-shell > .forge-splitter-handle.is-right {
+  right: calc(var(--forge-split-right, 292px) - 2px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .forge-splitter-handle,
+  .forge-splitter-handle::after {
+    transition: none;
+  }
+}
+
+/* ==========================================================================
+ * 布局优化波（2026-07-26，LO「深度思考优化前端布局」）
+ * 三栏比例：run-rail 205→232（会话条目不再挤字），context-rail 300→312；
+ * 覆盖 styles.css:1210 旧模板（本文件后加载，同特后者胜）。
+ * ========================================================================== */
+
+.workbench-shell {
+  grid-template-columns: 232px minmax(420px, 1fr) 312px;
+}
+
+/* ==========================================================================
+ * 布局模仿波（2026-07-26）：codeg/LiveAgent 工作区 DNA 移植
+ * ① 底部终端 dock（codeg 签名）② Mission Control 右栏折叠 ③ run-rail 分组折叠
+ * ========================================================================== */
+
+/* 中栏行模板加第七条（终端 dock 轨）。注意本格子的孩子全带显式 grid-row
+   （styles.css:7374-7462：tabs=1 strip=2 heading=3 stream=4 recovery=5 composer=6），
+   dock 必须显式 grid-row:7——否则 auto-placement 会抢占第一空位跑顶上去。 */
+.conversation-pane {
+  grid-template-rows: auto auto minmax(54px, auto) minmax(240px, 1fr) auto auto auto;
+}
+
+/* ── ② Mission Control 右栏折叠 ──────────────────────── */
+
+.mc-collapse-button {
+  width: 26px;
+  height: 26px;
+  margin-left: auto;
+  color: var(--muted-foreground, #6f6a5e);
+}
+
+.mc-collapse-button:hover {
+  color: var(--foreground, #2a2620);
+}
+
+.mc-expand-strip {
+  display: none;
+}
+
+/* 折叠态：栏内正常内容全隐，只留 34px 细条 + 纵向展开钮 */
+.workbench-shell.mc-collapsed .context-rail > *:not(.mc-expand-strip) {
+  display: none;
+}
+
+.workbench-shell.mc-collapsed .context-rail {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 8px;
+}
+
+.workbench-shell.mc-collapsed .mc-expand-strip {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--radius-md, 8px);
+  background: transparent;
+  color: var(--muted-foreground, #6f6a5e);
+  cursor: pointer;
+}
+
+.workbench-shell.mc-collapsed .mc-expand-strip:hover {
+  background: color-mix(in oklab, var(--muted-foreground, #6f6a5e) 9%, transparent);
+  color: var(--foreground, #2a2620);
+}
+
+.workbench-shell.mc-collapsed .mc-expand-strip .icon {
+  width: 15px;
+  height: 15px;
+}
+
+/* 折叠期右 splitter 失效（codeg：collapsed 时 handle pointer-events none） */
+.workbench-shell.mc-collapsed .forge-splitter-handle.is-right {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* ── ③ run-rail 分组折叠 ─────────────────────────────── */
+
+.rail-group-chevron {
+  display: inline-flex;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  margin-left: -4px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm, 6px);
+  background: transparent;
+  color: var(--muted-foreground, #6f6a5e);
+  cursor: pointer;
+  transition:
+    background-color var(--dur-fast, 120ms) var(--ease-out, cubic-bezier(0.4, 0, 0.2, 1)),
+    color var(--dur-fast, 120ms) var(--ease-out, cubic-bezier(0.4, 0, 0.2, 1));
+}
+
+.rail-group-chevron:hover {
+  background: color-mix(in oklab, var(--muted-foreground, #6f6a5e) 10%, transparent);
+  color: var(--foreground, #2a2620);
+}
+
+.rail-group-chevron .icon {
+  width: 13px;
+  height: 13px;
+  transition: transform var(--dur-fast, 150ms) var(--ease-out, cubic-bezier(0.4, 0, 0.2, 1));
+}
+
+.rail-block.is-group-collapsed .rail-group-chevron .icon {
+  transform: rotate(-90deg);
+}
+
+.rail-block.is-group-collapsed > .run-rail-list,
+.rail-block.is-group-collapsed > .team-tree {
+  display: none;
+}
+
+/* 折叠后块只留头（rail-block 次轨 minmax(0,1fr) 自动归零） */
+.rail-block.is-group-collapsed {
+  grid-template-rows: 36px 0fr;
+}
+
+/* ==========================================================================
+ * 工程逻辑波（2026-07-26，LO「布局太乱没有工程逻辑」）
+ * codeg 纪律映射：一面板一职责一标题；重复信息只在一个 chrome 层出现；
+ * 主内容宽度优先。只做覆盖，不动 styles.css 一万行存量。
+ * ========================================================================== */
+
+/* ① 栅格重分配：rail 232→216、MC 312→288，会话区让出 ~40px（codeg 18/64/18） */
+.workbench-shell {
+  grid-template-columns: 216px minmax(420px, 1fr) 288px;
+}
+
+/* ② 视图内 hero 行瘦身：h1/eyebrow/描述与全局面包屑（协作 / 协作台）重复，
+   CLI 脉搏与全局状态栏 global-team-pulse 重复——只留 run 状态徽标 */
+#view-workbench .workbench-heading > div:first-child {
+  display: none;
+}
+
+#view-workbench .workbench-heading {
+  min-height: 0;
+  margin-bottom: 4px;
+  padding: 0 2px;
+}
+
+#view-workbench .workbench-heading-meta {
+  margin-left: auto;
+}
+
+#workbench-team-pulse {
+  display: none;
+}
+
+/* ③ 团队筛选行：4 toggle 收进独立折叠行（默认收起），标题行只留 筛选/设置/计数 */
+.rail-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  padding: 4px 2px 6px 24px;
+  border-bottom: 1px dashed var(--border, #e4e1ea);
+  margin-bottom: 4px;
+}
+
+.rail-filters[hidden] {
+  display: none;
+}
+
+#rail-filters-toggle.is-active {
+  color: var(--accent, #b85c3e);
+  background: var(--accent-soft, rgba(217, 119, 87, 0.12));
+}
+
+/* ④ composer hint 并入 bookmarks 行（4 行 chrome → 3 行）：右推对齐 */
+.composer-bookmarks .composer-hint {
+  margin: 0 0 0 auto;
+  flex: 0 0 auto;
+}
+
+/* ⑤ 会话标题行降高：tabs/strip/heading 三条堆叠收紧（54→44） */
+.conversation-pane {
+  grid-template-rows: auto auto minmax(44px, auto) minmax(240px, 1fr) auto auto auto;
+}
+
+/* ⑥ rail 底部 statusline 紧凑化：五段在 216px 内不再挤三行 */
+.run-rail > .rail-statusline {
+  padding: 5px 8px;
+  gap: 2px 10px;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+/* ==========================================================================
+ * 成熟应用布局波（2026-07-26，LO「模仿 cursor claude codex 成熟应用」）
+ * Claude 签名：消息流与 composer 共享同一居中阅读栏（720px，composer-shell
+ * 已是 min(720px,100%) 浮动卡——本波只把流内容对齐到同一栏宽）；
+ * 去第三重 CLI 徽标（member-strip / statusbar 之外 heading 里的 chips 行）。
+ * ========================================================================== */
+
+.conversation-stream {
+  padding: 20px 24px;
+}
+
+.conversation-stream > * {
+  max-width: 720px;
+  margin-inline: auto;
+}
+
+/* 阅读节奏：Claude 式行距与消息间距（字号不动，工具输出密度优先） */
+.message-row {
+  margin-bottom: 22px;
+}
+
+.message-head strong {
+  font-size: 12px;
+}
+
+.message-body {
+  line-height: 1.7;
+}
+
+/* heading 里的参与 chips 是第三重 CLI 徽标（member-strip 页签 + 全局状态栏已在） */
+#view-workbench .conversation-agents {
+  display: none;
+}
+
+/* ========================================================================== 
+ * 唯一发送目标 + CLI 专属 Composer（2026-08-04）
+ * 目标标签是直接收件人的唯一入口；团队标签交给主脑编排，成员标签直达该成员。
+ * ========================================================================== */
+
+.conversation-pane {
+  grid-template-rows: auto minmax(44px, auto) minmax(240px, 1fr) auto auto auto;
+}
+
+.conversation-heading { grid-row: 2; }
+.conversation-stream { grid-row: 3; }
+.recovery-bar { grid-row: 4; }
+.task-composer { grid-row: 5; }
+
+.task-composer {
+  min-width: 0;
+  max-width: 100%;
+  padding: 9px 16px 12px;
+  border-top: 1px solid var(--border);
+  background: var(--surface-muted);
+}
+
+.composer-target-tabs {
+  display: flex;
+  width: min(840px, 100%);
+  max-width: 100%;
+  min-height: 34px;
+  align-items: center;
+  gap: 4px;
+  margin: 0 auto;
+  padding: 0 0 7px;
+  overflow-x: auto;
+  border: 0;
+  background: transparent;
+  scrollbar-width: thin;
+}
+
+.composer-target-tabs .member-strip-label {
+  padding: 0 5px 0 1px;
+  white-space: nowrap;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.composer-target-tabs .member-chip {
+  min-height: 28px;
+  padding: 4px 9px;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+
+.composer-target-tabs .member-chip.is-active {
+  box-shadow: inset 0 -2px 0 currentColor;
+}
+
+.task-composer .composer-shell {
+  --composer-target-color: var(--rose);
+  position: relative;
+  width: min(840px, 100%);
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 9px 11px 8px;
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--composer-target-color);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow-low);
+}
+
+.task-composer .composer-shell[data-target-mode="member"][data-target-agent="codex-technical"] { --composer-target-color: var(--blue); }
+.task-composer .composer-shell[data-target-mode="member"][data-target-agent="grok-search"],
+.task-composer .composer-shell[data-target-mode="member"][data-target-agent="grok-build"] { --composer-target-color: var(--aqua); }
+.task-composer .composer-shell[data-target-mode="member"][data-target-agent="kimi-frontend"] { --composer-target-color: var(--violet); }
+.task-composer .composer-shell[data-target-mode="member"][data-target-agent="gemini-research"],
+.task-composer .composer-shell[data-target-mode="member"][data-target-agent="pi-resident"] { --composer-target-color: var(--amber); }
+
+.task-composer .composer-shell:focus-within {
+  border-color: var(--composer-target-color);
+  border-left-color: var(--composer-target-color);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--composer-target-color) 18%, transparent);
+}
+
+.composer-target-head {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 7px;
+  border-bottom: 1px solid var(--border);
+}
+
+.composer-target-summary {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.composer-target-logo {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 30px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--composer-target-color) 32%, var(--border));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--composer-target-color) 10%, var(--surface));
+  color: var(--composer-target-color);
+}
+
+.composer-target-logo .cli-logo,
+.composer-target-logo .icon {
+  width: 17px;
+  height: 17px;
+}
+
+.composer-target-copy {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.composer-target-copy > span {
+  color: var(--text-soft);
+  font-size: 9.5px;
+  line-height: 1.2;
+}
+
+.composer-target-copy strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-target-cli,
+.composer-target-route,
+.composer-session-controls {
+  flex: 0 0 auto;
+  padding: 3px 7px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface-muted);
+  color: var(--text-muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.composer-target-cli {
+  border-color: color-mix(in srgb, var(--composer-target-color) 28%, var(--border));
+  color: var(--composer-target-color);
+}
+
+.composer-context-actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+}
+
+.composer-context-actions .model-pick,
+.composer-context-actions .composer-cwd,
+.composer-context-actions .composer-new-task,
+.composer-context-actions .composer-automation {
+  min-height: 28px;
+  border-radius: 5px;
+}
+
+.composer-context-actions .composer-automation {
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+}
+
+.composer-context-actions .composer-new-task {
+  padding: 0 8px;
+  border: 1px solid var(--border);
+}
+
+.composer-cli-console {
+  min-width: 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.composer-cli-console-bar {
+  display: flex;
+  min-height: 32px;
+  align-items: center;
+  gap: 8px;
+}
+
+.composer-cli-console-toggle {
+  display: flex;
+  min-width: 0;
+  min-height: 30px;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 2px;
+  border: 0;
+  background: transparent;
+  color: var(--text-soft);
+  cursor: pointer;
+  text-align: left;
+}
+
+.composer-cli-console-toggle:hover,
+.composer-cli-console-toggle:focus-visible {
+  color: var(--text);
+}
+
+.composer-cli-console-toggle > .icon:first-child {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
+  color: var(--composer-target-color);
+}
+
+.composer-cli-console-title {
+  flex: 0 1 auto;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 10.5px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-cli-console-summary {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 9.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-cli-console-chevron {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 13px;
+  transition: transform 140ms ease;
+}
+
+.composer-cli-console-toggle[aria-expanded="true"] .composer-cli-console-chevron {
+  transform: rotate(180deg);
+}
+
+.composer-cli-console-state {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-size: 9.5px;
+  white-space: nowrap;
+}
+
+.composer-cli-console-state.is-warning {
+  color: var(--amber);
+}
+
+.composer-cli-console-panel {
+  max-height: min(300px, 36vh);
+  overflow: auto;
+  padding: 0 0 8px;
+}
+
+.composer-cli-console-panel[hidden],
+.composer-cli-console-page[hidden] {
+  display: none;
+}
+
+.composer-cli-console-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-bottom: 1px solid var(--border);
+}
+
+.composer-cli-console-tabs button {
+  min-height: 27px;
+  padding: 3px 8px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.composer-cli-console-tabs button[aria-selected="true"] {
+  border-bottom-color: var(--composer-target-color);
+  color: var(--text);
+  font-weight: 700;
+}
+
+.composer-cli-console-body {
+  min-width: 0;
+  padding-top: 7px;
+}
+
+.composer-cli-command-list {
+  display: grid;
+  gap: 7px;
+}
+
+.composer-cli-command-group {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 74px minmax(0, 1fr);
+  align-items: start;
+  gap: 7px;
+}
+
+.composer-cli-command-group-label {
+  padding-top: 4px;
+  color: var(--text-muted);
+  font-size: 9.5px;
+}
+
+.composer-cli-command-chips {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.composer-cli-command {
+  min-height: 25px;
+  max-width: 100%;
+  padding: 3px 7px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface-muted);
+  color: var(--text-soft);
+  cursor: pointer;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-cli-command code {
+  color: inherit;
+  font-size: 9.5px;
+}
+
+.composer-cli-command:hover:not(:disabled),
+.composer-cli-command:focus-visible:not(:disabled),
+.composer-cli-command.is-selected {
+  border-color: color-mix(in srgb, var(--composer-target-color) 48%, var(--border));
+  background: color-mix(in srgb, var(--composer-target-color) 9%, var(--surface));
+  color: var(--composer-target-color);
+}
+
+.composer-cli-command:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
+.composer-cli-console-note,
+.composer-cli-console-empty {
+  margin: 7px 0 0 81px;
+  color: var(--text-muted);
+  font-size: 9.5px;
+  line-height: 1.45;
+}
+
+.composer-cli-default-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+  align-items: end;
+  gap: 7px;
+}
+
+.composer-cli-default-grid label {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  color: var(--text-muted);
+  font-size: 9.5px;
+}
+
+.composer-cli-default-grid select {
+  width: 100%;
+  min-width: 0;
+  height: 29px;
+  padding: 0 23px 0 7px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface);
+  color: var(--text-soft);
+  text-overflow: ellipsis;
+}
+
+.composer-cli-default-save {
+  min-height: 29px;
+  white-space: nowrap;
+}
+
+.composer-cli-config-row,
+.composer-cli-connection-head {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 9.5px;
+}
+
+.composer-cli-config-row > span,
+.composer-cli-connection-head > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.composer-cli-connection-actions {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 5px;
+}
+
+.composer-cli-diagnostic-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 8px;
+}
+
+.composer-cli-diagnostic-actions .button {
+  min-height: 28px;
+  padding: 4px 8px;
+}
+
+.composer-cli-diagnostic-output {
+  max-height: 150px;
+  margin: 8px 0 0;
+  padding: 8px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface-muted);
+  color: var(--text-soft);
+  font-size: 9.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.composer-cli-diagnostic-output[data-status="ok"] {
+  border-color: color-mix(in srgb, var(--success) 42%, var(--border));
+}
+
+.composer-cli-diagnostic-output[data-status="failed"] {
+  border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
+  color: var(--danger);
+}
+
+.composer-cli-console[data-busy="true"] .composer-cli-console-body {
+  opacity: 0.76;
+}
+
+.task-composer .composer-shell textarea {
+  min-height: 62px;
+  padding: 9px 3px 5px;
+}
+
+.composer-session-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.composer-session-controls .icon {
+  width: 13px;
+  height: 13px;
+}
+
+.composer-collaborators {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 2px 0;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.composer-collaborators[hidden] {
+  display: none;
+}
+
+.composer-collaborator-label,
+.composer-collaborator-chip {
+  display: inline-flex;
+  min-height: 24px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.composer-collaborator-label {
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.composer-collaborator-label .icon,
+.composer-collaborator-chip .icon,
+.composer-collaborator-chip .cli-logo {
+  width: 13px;
+  height: 13px;
+}
+
+.composer-collaborator-chip {
+  padding: 2px 3px 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--surface-muted);
+  color: var(--text-soft);
+  font-size: 10px;
+}
+
+.composer-collaborator-chip button {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  place-items: center;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.composer-collaborator-chip button:hover,
+.composer-collaborator-chip button:focus-visible {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.composer-shell .composer-footer {
+  align-items: center;
+}
+
+.composer-footer .model-pick {
+  max-width: 230px;
+  border-radius: 5px;
+}
+
+.composer-footer .model-pick select {
+  max-width: 160px;
+  text-overflow: ellipsis;
+}
+
+.composer-shell .send-button {
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+  border-radius: 6px;
+  background: var(--composer-target-color);
+}
+
+.task-composer .mention-menu,
+.task-composer .slash-menu {
+  box-sizing: border-box;
+  max-width: 100%;
+  border-radius: 8px;
+}
+
+@media (max-width: 560px) {
+  .task-composer {
+    padding: 7px 8px 9px;
+  }
+
+  .composer-target-tabs {
+    width: 100%;
+    padding-bottom: 6px;
+  }
+
+  .composer-target-tabs .member-strip-label {
+    display: none;
+  }
+
+  .task-composer .composer-shell {
+    width: 100%;
+    padding: 8px;
+  }
+
+  .task-composer .mention-menu,
+  .task-composer .slash-menu {
+    right: auto;
+    left: 0;
+    bottom: calc(100% + 2px);
+    width: min(calc(100vw - 32px), 100%);
+    max-width: calc(100vw - 32px);
+  }
+
+  .composer-target-head {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+  }
+
+  .composer-target-summary {
+    width: 100%;
+  }
+
+  .composer-target-route {
+    display: none;
+  }
+
+  .composer-target-cli {
+    max-width: 42%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .composer-context-actions {
+    justify-content: flex-start;
+    overflow-x: auto;
+    padding-bottom: 1px;
+  }
+
+  .composer-context-actions .composer-team-pick {
+    max-width: calc(100% - 72px);
+  }
+
+  .composer-context-actions .composer-team-pick select {
+    max-width: 150px;
+  }
+
+  .composer-cli-console-summary {
+    display: none;
+  }
+
+  .composer-cli-console-panel {
+    max-height: min(330px, 42vh);
+  }
+
+  .composer-cli-command-group {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+  }
+
+  .composer-cli-command-group-label {
+    padding-top: 0;
+  }
+
+  .composer-cli-console-note,
+  .composer-cli-console-empty {
+    margin-left: 0;
+  }
+
+  .composer-cli-default-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .composer-cli-default-save {
+    width: 100%;
+  }
+
+  .composer-cli-config-row,
+  .composer-cli-connection-head {
+    align-items: flex-start;
+  }
+
+  .composer-cli-connection-head {
+    flex-direction: column;
+  }
+
+  .composer-cli-connection-actions {
+    width: 100%;
+    justify-content: flex-start;
+  }
+
+  .task-composer .composer-shell textarea {
+    min-height: 68px;
+  }
+
+  .composer-shell .composer-footer {
+    display: grid;
+    grid-template-columns: 32px minmax(0, 1fr) minmax(0, 1fr) 34px;
+    gap: 5px;
+  }
+
+  .composer-footer .model-pick {
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+  }
+
+  .composer-footer .model-pick select {
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+  }
+
+  .composer-footer .model-pick:nth-of-type(3),
+  .composer-session-controls {
+    grid-column: 2 / 4;
+  }
+
+  .composer-session-controls {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .composer-footer .send-button {
+    grid-column: 4;
+    grid-row: 1;
+  }
+}
+
+/* ==========================================================================
+ * 布局对照波（2026-08-02）：会话流 chrome
+ * ① 回到底部浮钮（LiveAgent ChatTranscript / codeg message-thread 同款）——
+ *    sticky 哨兵 height:0 不撑排版，脱底才由 JS 揭 hidden；按钮抬离底缘浮在内容上。
+ * ② 超长用户消息折叠（codeg collapsible-user-message）——is-clamped 钳高 +
+ *    底部渐隐遮罩；渐隐终点与气泡同变量，明暗主题都不穿帮。
+ * ========================================================================== */
+
+.jump-to-latest {
+  position: sticky;
+  bottom: 0;
+  z-index: 6;
+  display: flex;
+  height: 0;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.jump-to-latest-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--surface-glass, var(--surface));
+  color: var(--text-soft);
+  box-shadow: var(--shadow-md, 0 4px 12px rgba(0, 0, 0, 0.12));
+  cursor: pointer;
+  opacity: 0.85;
+  pointer-events: auto;
+  transform: translateY(-14px);
+  transition: opacity var(--dur-fast, 100ms) var(--ease-out, ease);
+}
+
+.jump-to-latest-button:hover {
+  opacity: 1;
+  color: var(--text);
+}
+
+.jump-to-latest-button .icon.lucide {
+  width: 16px;
+  height: 16px;
+}
+
+/* 用户气泡折叠：body 需要定位上下文给渐隐遮罩锚定 */
+.message-row.is-user .message-body {
+  position: relative;
+}
+
+.message-row.is-user .message-body.is-clamped {
+  max-height: 240px;
+  overflow: hidden;
+}
+
+.message-row.is-user .message-body.is-clamped::after {
+  content: "";
+  position: absolute;
+  inset-inline: 0;
+  bottom: 0;
+  height: 52px;
+  background: linear-gradient(
+    to bottom,
+    color-mix(in oklab, var(--muted, var(--surface-muted)) 0%, transparent),
+    var(--muted, var(--surface-muted))
+  );
+  border-radius: 0 0 var(--radius-2xl, 18px) var(--radius-md, 8px);
+  pointer-events: none;
+}
+
+/* 展开/收起钮：user 行 content 列已 align-items:flex-end，自动对齐气泡右缘 */
+.msg-expand-toggle {
+  margin-top: 4px;
+  font-size: 11px;
+}
+
+/* ③ 消息行 hover 复制钮（codeg hover copy / LiveAgent RowActions）——
+   绝对定位脱格（message-row 是 grid，不参与行布局），hover/focus-within 才显 */
+.message-row {
+  position: relative;
+}
+
+.msg-row-copy {
+  position: absolute;
+  top: -4px;
+  right: 0;
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 6px);
+  background: var(--surface);
+  color: var(--text-soft);
+  box-shadow: var(--shadow-sm, 0 1px 2px rgba(0, 0, 0, 0.06));
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--dur-fast, 100ms) var(--ease-out, ease);
+}
+
+.message-row:hover .msg-row-copy,
+.message-row:focus-within .msg-row-copy {
+  opacity: 1;
+}
+
+.msg-row-copy:hover {
+  color: var(--text);
+}
+
+.msg-row-copy.is-copied {
+  border-color: var(--green);
+  color: var(--green);
+  opacity: 1;
+}
+
+.msg-row-copy .icon.lucide {
+  width: 13px;
+  height: 13px;
+}
+
+/* ④ Mission Control tab 状态徽标（LiveAgent RightDockTabStrip：label + 状态点/计数） */
+.registry-tab-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 4px;
+  border-radius: 50%;
+  vertical-align: 1px;
+}
+
+.registry-tab-dot.is-running {
+  background: var(--green);
+}
+
+.registry-tab-dot.is-attention {
+  background: var(--amber);
+}
+
+.registry-tab-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 13px;
+  height: 13px;
+  margin-left: 4px;
+  padding: 0 3px;
+  border-radius: 999px;
+  background: var(--surface-muted);
+  color: var(--text-soft);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  vertical-align: 1px;
+}
+
+/* ==========================================================================
+ * 侧栏工程波（2026-08-09，LO「完善左侧栏逻辑 并做美观外观」）
+ * ① 根因修复：styles.css:6225 给 .rail-block-team 两行 grid 模板，但它有
+ *   heading / filters / tree 三个直接孩子——filters 落进 1fr 被整块剩余高度
+ *   拉伸（实测「已隐藏」芯片悬空、树被挤进隐式行），本波补成三行模板。
+ * ② 筛选 toggle 芯片化（原生 checkbox 隐身保可访问性，:has 上态）。
+ * ③ 树缩进导线；会话行 baseline→center；时间戳标题去重（.is-date-title）。
+ * ④ 计数徽标 pill 化；选中行左 accent；新建任务钮降噪为虚线入口。
+ * 只做覆盖，不动 styles.css 一万二存量（本文件后加载，同特后者胜）。
+ * ========================================================================== */
+
+/* ① 团队区三行模板：heading / filters / tree —— filters 不再吃 1fr */
+.rail-block.rail-block-team {
+  grid-template-rows: minmax(36px, auto) auto minmax(0, 1fr);
+}
+
+/* 团队块整组折叠时 filters 一并收起（旧规则只隐 .team-tree） */
+.rail-block-team.is-group-collapsed > .rail-filters {
+  display: none;
+}
+
+/* ② 筛选行：紧凑芯片排，去掉旧 24px 左缩进与虚线分隔 */
+.rail-filters {
+  gap: 4px;
+  padding: 2px 12px 8px;
+  border-bottom: 0;
+  margin-bottom: 0;
+}
+
+.rail-filters .rail-toggle {
+  position: relative;
+  margin: 0;
+  padding: 3px 9px;
+  border: 1px solid var(--border, #e4e1ea);
+  border-radius: 999px;
+  background: var(--surface, #ffffff);
+  color: var(--text-soft, #6f6a5e);
+  font-size: 10.5px;
+  line-height: 1.4;
+  user-select: none;
+  transition:
+    border-color var(--dur-fast, 120ms) var(--ease-out, cubic-bezier(0.4, 0, 0.2, 1)),
+    background-color var(--dur-fast, 120ms) var(--ease-out, cubic-bezier(0.4, 0, 0.2, 1)),
+    color var(--dur-fast, 120ms) var(--ease-out, cubic-bezier(0.4, 0, 0.2, 1));
+}
+
+.rail-filters .rail-toggle:hover {
+  border-color: var(--border-strong, #cfcbc4);
+  color: var(--text, #2a2620);
+}
+
+/* 原生 checkbox 隐身但保留语义：label 点击照常 toggle，焦点环落在芯片上 */
+.rail-filters .rail-toggle input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  border: 0;
+  white-space: nowrap;
+}
+
+.rail-filters .rail-toggle:focus-within {
+  outline: 2px solid var(--accent-soft, rgba(217, 119, 87, 0.35));
+  outline-offset: 1px;
+}
+
+.rail-filters .rail-toggle:has(input:checked) {
+  border-color: var(--accent, #b85c3e);
+  background: var(--accent-soft, rgba(217, 119, 87, 0.12));
+  color: var(--accent, #b85c3e);
+  font-weight: 620;
+}
+
+/* ③ 树缩进导线：项目 → 会话 一级加左侧引导线（团队 → 项目 保持无线，少一层噪） */
+.team-projects .project-node > .project-sessions {
+  margin-left: 6px;
+  padding: 0 0 4px 10px;
+  border-left: 1px solid var(--border, #e4e1ea);
+}
+
+/* 会话行基线对齐改居中对齐：多徽标（未读/子/live）时不再上下错位 */
+.session-link {
+  align-items: center;
+  gap: 6px;
+}
+
+/* 时间戳标题（原生历史默认 label）与右侧时间同源——隐藏右侧，避免一行两个日期 */
+.session-link.is-date-title .session-time {
+  display: none;
+}
+
+/* 选中行左 accent 条：比整块背景多一层定位信号 */
+.session-link.is-selected {
+  box-shadow: inset 2px 0 0 var(--rose, #b85c3e);
+}
+
+/* ④ 计数徽标 pill 化（团队/置顶/会话/正在工作/自动化/已归档共用末位 span 约定） */
+.rail-block > .pane-heading > span:last-child {
+  min-width: 16px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--surface-muted, #f3f1ec);
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 新建任务：虚线降噪入口，hover 才上品牌色（它是一天按一次的入口，不该常驻抢视线） */
+.newtask-button {
+  border-style: dashed;
+  background: transparent;
+  color: var(--text-soft, #6f6a5e);
+}
+
+.newtask-button:hover {
+  border-style: solid;
+}
+
+/* 筛选钮非默认态常驻高亮之外，面板展开时也给持续态（aria-expanded 语义直连） */
+#rail-filters-toggle[aria-expanded="true"] {
+  color: var(--accent, #b85c3e);
+}
+
+/* ⑤ 左下角状态条降噪：去分段竖线（换行后竖线是主要杂乱源）、图标收窄降色、
+   团队长段独占一行并省略（全量信息在 bar.title 悬停即得）、告警段保留色温 */
+.run-rail > .rail-statusline {
+  gap: 3px 2px;
+  padding: 7px 10px;
+  border-top: 1px solid var(--border, #e4e1ea);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.rail-statusline .sl-seg {
+  min-width: 0;
+  max-width: 100%;
+  gap: 4px;
+  padding: 0 8px 0 0;
+}
+
+.rail-statusline .sl-seg + .sl-seg {
+  border-left: 0;
+}
+
+.rail-statusline .sl-icon {
+  display: inline-flex;
+  width: 11px;
+  flex: 0 0 auto;
+  justify-content: center;
+  color: var(--text-soft, #6f6a5e);
+}
+
+.rail-statusline .sl-icon .icon,
+.rail-statusline .sl-icon svg {
+  width: 10px;
+  height: 10px;
+}
+
+.rail-statusline .sl-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 团队名最长——独占一行省略展示，不再把别的段挤得满栏换行 */
+.rail-statusline .sl-seg-team {
+  flex: 1 1 100%;
+  order: 10;
+  padding-right: 0;
+  color: var(--text-soft, #6f6a5e);
+}
+
+.rail-statusline .sl-seg[data-project-prefs-lock] .sl-icon {
+  color: var(--amber, #b58900);
+}
+
+/* ⑥ 底部状态栏团队脉搏：芯片宽随内容（styles.css:9057/9101 固定 24/18px 宽，
+ * 而 :9408 又给了 padding+gap 装名字——名字必溢出叠到下一枚芯片上）。
+ * 现在名字完整落在框内；icon 与文字同处一框，计数 pill 保持右对齐。 */
+.team-pulse-chip {
+  width: auto;
+  min-width: 24px;
+  box-sizing: border-box;
+}
+
+.statusbar-team-pulse .team-pulse-chip {
+  width: auto;
+  min-width: 18px;
+  height: 18px;
+  border-radius: 999px;
+}
+
+.statusbar-team-pulse .team-pulse-name {
+  font-size: 9px;
+}
+
+/* 状态栏 chips 与计数 pill 间距收窄，长团队名册优先保完整名字 */
+.statusbar-team-pulse {
+  gap: 3px;
+}
+
+.statusbar-team-pulse .team-pulse-count {
+  flex: 0 0 auto;
+}

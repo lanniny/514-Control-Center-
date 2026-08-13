@@ -2,9 +2,10 @@ import { randomUUID } from "node:crypto";
 import { runProcess } from "../process-runner.mjs";
 import { createLfCollector, publicCodexEvent } from "./stream-utils.mjs";
 
-export function buildCodexArgs({ sessionId = null, cwd, model = null }) {
+export function buildCodexArgs({ sessionId = null, cwd, model = null, effort = null }) {
   const args = ["exec", "-s", "read-only", "-C", cwd];
   if (model) args.push("-m", model);
+  if (effort) args.push("-c", `model_reasoning_effort=${JSON.stringify(effort)}`);
   if (sessionId) args.push("resume");
   args.push("--json", "--skip-git-repo-check");
   if (sessionId) args.push(sessionId);
@@ -13,16 +14,33 @@ export function buildCodexArgs({ sessionId = null, cwd, model = null }) {
 }
 
 export class CodexCliAdapter {
-  constructor({ command = "codex", model = null, eventStore, cwd }) {
+  supportsPerTurnCwd = true;
+
+  constructor({ command = "codex", model = null, eventStore, cwd, runProcessImpl = runProcess }) {
     this.id = "codex-exec-json";
     this.command = command;
     this.model = model;
     this.eventStore = eventStore;
     this.cwd = cwd;
+    this.runProcessImpl = runProcessImpl; // v41：远程 run 注入 SSH 桥（默认本机 runProcess）
   }
 
-  async send({ sessionId, prompt, runId, signal, timeoutMs = 20 * 60_000, onSessionStarted, onTurnSubmitting }) {
-    const args = buildCodexArgs({ sessionId, cwd: this.cwd, model: this.model });
+  canResume(sessionId) {
+    return Boolean(sessionId);
+  }
+
+  resumeCommand(sessionId) {
+    return sessionId ? `codex exec resume ${sessionId}` : null;
+  }
+
+  async send({ sessionId, prompt, runId, agentId = "codex-technical", signal, model = null, effort = null, cwd = null, timeoutMs = 20 * 60_000, onSessionStarted, onTurnSubmitting }) {
+    const effectiveCwd = cwd || this.cwd;
+    const args = buildCodexArgs({
+      sessionId,
+      cwd: effectiveCwd,
+      model: model || this.model,
+      effort,
+    });
     let resolvedSessionId = sessionId || null;
     let finalText = "";
     const pendingEvents = [];
@@ -40,16 +58,16 @@ export class CodexCliAdapter {
           this.eventStore.emit(normalized.type, normalized, {
             runId,
             sessionId: resolvedSessionId,
-            agentId: "codex-technical",
+            agentId,
           }),
         );
       },
-      (error) => pendingEvents.push(this.eventStore.emit("adapter.parse_error", { adapter: this.id, message: error.message }, { runId, agentId: "codex-technical" })),
+      (error) => pendingEvents.push(this.eventStore.emit("adapter.parse_error", { adapter: this.id, message: error.message }, { runId, agentId })),
     );
     if (sessionId) await onSessionStarted?.({ sessionId, protocol: "exec-json-resume" });
     await onTurnSubmitting?.({ sessionId: sessionId || null, protocol: "exec-json-resume", clientUserMessageId: randomUUID() });
-    const result = await runProcess(this.command, args, {
-      cwd: this.cwd,
+    const result = await this.runProcessImpl(this.command, args, {
+      cwd: effectiveCwd,
       input: prompt,
       timeoutMs,
       signal,

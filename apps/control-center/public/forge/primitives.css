@@ -1,0 +1,453 @@
+/* ==========================================================================
+   514 Forge — v4.0 primitives: forge-layer overrides for the app's EXISTING
+   generic controls. Loads after styles.css; selectors mirror the originals
+   at equal specificity so the cascade (not !important) does the work.
+   ========================================================================== */
+
+/* —— Buttons: h-9 pill, press dip, 3px ring/50 focus —— */
+
+.button {
+  min-height: 36px;
+  padding: 8px 16px;
+  border-radius: var(--radius-4xl);
+  font-size: var(--text-sm);
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
+}
+
+.button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--ring) 50%, transparent);
+}
+
+.button.primary {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: var(--primary-foreground);
+  box-shadow: var(--shadow-sm);
+}
+
+.button.primary:hover:not(:disabled) {
+  border-color: var(--primary-hover);
+  background: var(--primary-hover);
+}
+
+.button.secondary {
+  border-color: var(--border);
+  background: var(--muted);
+  color: var(--foreground);
+}
+
+.button.secondary:hover:not(:disabled) {
+  border-color: color-mix(in oklch, var(--primary) 35%, var(--border));
+  background: color-mix(in oklch, var(--muted) 70%, var(--foreground) 4%);
+  color: var(--foreground);
+}
+
+.button.danger {
+  border-color: var(--danger);
+  background: var(--danger);
+  color: oklch(0.985 0 0);
+}
+
+.button.danger:hover:not(:disabled) {
+  border-color: color-mix(in oklch, var(--danger) 88%, black);
+  background: color-mix(in oklch, var(--danger) 88%, black);
+}
+
+.icon-button {
+  border-color: var(--border);
+  border-radius: var(--radius-4xl);
+  background: var(--card);
+  color: var(--muted-foreground);
+  transition:
+    background-color var(--dur-fast) var(--ease-out),
+    border-color var(--dur-fast) var(--ease-out),
+    color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out),
+    transform var(--dur-fast) var(--ease-out);
+}
+
+.icon-button:hover:not(:disabled) {
+  border-color: var(--border);
+  background: var(--muted);
+  color: var(--foreground);
+}
+
+.icon-button:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.icon-button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--ring) 50%, transparent);
+}
+
+.icon-button.danger-quiet:hover:not(:disabled) {
+  border-color: color-mix(in oklch, var(--danger) 40%, transparent);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.text-button {
+  color: var(--primary);
+  font-size: var(--text-xs);
+}
+
+.text-button:hover {
+  color: var(--primary-hover);
+}
+
+/* —— Cards: rounded-2xl, border + shadow-sm, hover lift —— */
+
+.metric-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-2xl);
+  background: var(--card);
+  box-shadow: var(--shadow-sm);
+  transition:
+    border-color var(--dur-slow) var(--ease-out),
+    transform var(--dur-slow) var(--ease-out),
+    box-shadow var(--dur-slow) var(--ease-out);
+}
+
+.metric-card:hover {
+  border-color: color-mix(in oklch, var(--primary) 35%, var(--border));
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
+}
+
+/* New-surface card primitive for forge views (team, observability…). */
+.forge-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-2xl);
+  background: var(--card);
+  color: var(--card-foreground);
+  box-shadow: var(--shadow-sm);
+}
+
+.forge-card-interactive {
+  cursor: pointer;
+  transition:
+    border-color var(--dur-slow) var(--ease-out),
+    transform var(--dur-slow) var(--ease-out),
+    box-shadow var(--dur-slow) var(--ease-out);
+}
+
+.forge-card-interactive:hover {
+  border-color: color-mix(in oklch, var(--primary) 35%, var(--border));
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
+}
+
+/* —— Dialogs: rounded-4xl, ring-1 border, shadow-2xl, blurred black overlay —— */
+
+.action-dialog,
+.command-palette {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-4xl);
+  background: var(--card);
+  box-shadow: var(--shadow-2xl);
+}
+
+.action-dialog::backdrop,
+.command-palette::backdrop {
+  background: rgb(0 0 0 / 0.8);
+  backdrop-filter: blur(4px);
+}
+
+/* —— Inputs: rounded-lg, border, focus ring —— */
+
+textarea,
+input[type="search"],
+input[type="text"],
+input[type="number"],
+input[type="password"],
+input[type="url"],
+input[type="email"],
+select {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--background);
+  color: var(--foreground);
+  transition:
+    border-color var(--dur-fast) var(--ease-out),
+    box-shadow var(--dur-fast) var(--ease-out);
+}
+
+textarea:hover:not(:disabled),
+input[type="search"]:hover:not(:disabled),
+input[type="text"]:hover:not(:disabled),
+input[type="number"]:hover:not(:disabled),
+input[type="password"]:hover:not(:disabled),
+input[type="url"]:hover:not(:disabled),
+input[type="email"]:hover:not(:disabled),
+select:hover:not(:disabled) {
+  border-color: color-mix(in oklch, var(--primary) 35%, var(--border));
+}
+
+textarea:focus,
+input[type="search"]:focus,
+input[type="text"]:focus,
+input[type="number"]:focus,
+input[type="password"]:focus,
+input[type="url"]:focus,
+input[type="email"]:focus,
+select:focus {
+  border-color: var(--ring);
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--ring) 30%, transparent);
+}
+
+textarea::placeholder,
+input::placeholder {
+  color: var(--muted-foreground);
+}
+
+/* —— Scrollbars: 6px, grows to 8px on hover, rounded, var-driven ——
+   Generic rule is the default everywhere (incl. new forge views);
+   the container list below only adds the hover-grow behavior. */
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: color-mix(in oklch, var(--foreground) 22%, transparent);
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in oklch, var(--foreground) 34%, transparent);
+  background-clip: padding-box;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.conversation-stream:hover::-webkit-scrollbar,
+.run-rail-list:hover::-webkit-scrollbar,
+.project-tree:hover::-webkit-scrollbar,
+.team-picker:hover::-webkit-scrollbar,
+.timeline:hover::-webkit-scrollbar,
+.context-rail:hover::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.conversation-stream,
+.run-rail-list,
+.project-tree,
+.team-picker,
+.timeline,
+.context-rail {
+  scrollbar-color: color-mix(in oklch, var(--foreground) 25%, transparent) transparent;
+  scrollbar-width: thin;
+}
+
+/* —— kbd chips —— */
+
+kbd {
+  display: inline-block;
+  padding: 2px 6px;
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-sm);
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-family: var(--mono);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+}
+
+/* —— Glass surface utility —— */
+
+.forge-glass {
+  border: 1px solid color-mix(in oklch, var(--foreground) 8%, transparent);
+  background: color-mix(in oklch, var(--card) 72%, transparent);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+/* —— Badge / pill base + semantic variants —— */
+
+.forge-badge,
+.forge-pill {
+  display: inline-flex;
+  min-height: 20px;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.forge-badge .icon,
+.forge-pill .icon {
+  width: 12px;
+  height: 12px;
+}
+
+.forge-badge-primary {
+  border-color: color-mix(in oklch, var(--primary) 35%, transparent);
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+
+.forge-badge-success {
+  border-color: color-mix(in oklch, var(--success) 35%, transparent);
+  background: var(--success-soft);
+  color: var(--success);
+}
+
+.forge-badge-warning {
+  border-color: color-mix(in oklch, var(--warning) 35%, transparent);
+  background: var(--warning-soft);
+  color: var(--warning);
+}
+
+.forge-badge-danger {
+  border-color: color-mix(in oklch, var(--danger) 35%, transparent);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.forge-badge-info {
+  border-color: color-mix(in oklch, var(--info) 35%, transparent);
+  background: var(--info-soft);
+  color: var(--info);
+}
+
+/* —— Reduced motion: no lifts, no press dips, no transitions —— */
+
+@media (prefers-reduced-motion: reduce) {
+  .button,
+  .icon-button,
+  .metric-card,
+  .forge-card-interactive {
+    transition: none;
+  }
+
+  .button:active:not(:disabled),
+  .icon-button:active:not(:disabled),
+  .metric-card:hover,
+  .forge-card-interactive:hover {
+    transform: none;
+  }
+}
+
+/* ==========================================================================
+   Wave G — codeg 移植批：磨砂表面族 / 快捷键徽章 / 即时折叠
+   数值对齐 codeg globals.css（--ws-surface-blur 8px / --ws-msg-alpha 0.5 /
+   SHORTCUT_BADGE 几何），token 全部走 tokens.css 语义变量，明暗自动跟随。
+   ========================================================================== */
+
+/* —— 磨砂表面族（chrome 面板级，对齐 topbar 既有 86%/blur14/saturate150 触感）—— */
+:root {
+  --forge-glass-alpha: 86%;
+  --forge-glass-blur: 14px;
+  --forge-glass-msg-alpha: 50%;
+}
+
+.forge-glass {
+  background: color-mix(in oklab, var(--card, #fff) var(--forge-glass-alpha), transparent);
+  -webkit-backdrop-filter: blur(var(--forge-glass-blur)) saturate(150%);
+  backdrop-filter: blur(var(--forge-glass-blur)) saturate(150%);
+}
+
+.forge-glass-muted {
+  background: color-mix(in oklab, var(--muted, #f5f4f2) var(--forge-glass-alpha), transparent);
+  -webkit-backdrop-filter: blur(var(--forge-glass-blur)) saturate(150%);
+  backdrop-filter: blur(var(--forge-glass-blur)) saturate(150%);
+}
+
+/* 消息内小面（卡片/胶囊/气泡）：固定 50% 染色 + 1px ring 描边，不磨砂（codeg ws-msg 契约） */
+.forge-msg-surface {
+  background: color-mix(in oklab, var(--muted, #f5f4f2) var(--forge-glass-msg-alpha), transparent);
+  box-shadow: inset 0 0 0 1px var(--border, #e4e1ea);
+}
+
+/* 侧栏玻璃化：选择器对齐 shell.css 的 .atelier .sidebar（同特 0,2,0），但 shell.css 后加载会赢，
+   故此处只留工具族，真正生效的规则在 shell.css 内联修正。 */
+.forge-glass-sidebar {
+  background: color-mix(in oklab, var(--card, #fff) var(--forge-glass-alpha), transparent);
+  -webkit-backdrop-filter: blur(var(--forge-glass-blur)) saturate(150%);
+  backdrop-filter: blur(var(--forge-glass-blur)) saturate(150%);
+}
+
+/* 行内代码 pill（codeg inline-code 契约：全圆角 + box-decoration-break:clone 跨行不断豁口）；
+   pre/.md-code 内的 code 由 markdown.css 更高特规则重置，不受影响 */
+.md-body code {
+  border-radius: 9999px;
+  padding-inline: 0.4em;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
+/* —— 快捷键徽章（codeg SHORTCUT_BADGE 几何：15px 高 / 5px 圆角 / primary 10% / mono 10px）—— */
+.forge-kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 15px;
+  padding: 0 4px;
+  border-radius: 5px;
+  background: color-mix(in oklch, var(--primary) 10%, transparent);
+  color: var(--primary);
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+/* hover/focus 揭示（父行挂 .forge-kbd-parent；默认隐藏防视觉噪音） */
+.forge-kbd-reveal {
+  opacity: 0;
+  transition: opacity var(--dur-med, 150ms) var(--ease-out, ease);
+}
+.forge-kbd-parent:hover .forge-kbd-reveal,
+.forge-kbd-parent:focus-visible .forge-kbd-reveal {
+  opacity: 1;
+}
+
+/* —— 即时折叠（codeg InstantCollapsible 的 vanilla 等价：grid 0fr/1fr 过渡，零 JS 测量）—— */
+.forge-collapsible-content {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--dur-slow, 240ms) var(--ease-out, ease);
+}
+.forge-collapsible[data-state="open"] > .forge-collapsible-content {
+  grid-template-rows: 1fr;
+}
+.forge-collapsible-content > .forge-collapsible-inner {
+  overflow: hidden;
+  min-height: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .forge-collapsible-content {
+    transition: none;
+  }
+  .forge-kbd-reveal {
+    transition: none;
+  }
+}

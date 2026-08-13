@@ -1796,3 +1796,1131 @@ R3 核心竞态方案 → R4 生命周期三洞 → R5 真实失败路径三洞 
 - Console 全链路：continue 派 kimi-frontend → succeeded + 原生 session 捕获 → **第二轮同 sessionId 复用且记得上轮推荐（答"Flexbox."）**
 - 权限互斥三连实测（--plan/--auto/-y 均 "Cannot combine"）→ fail-closed 路径由首次 E2E 500 真实触发后修正
 - node --test 112/112；rules.md §四 + CLAUDE.md 落账
+
+---
+
+### D-2026-07-20-001 · v3.6 积压独立评审：烛 CHANGES_REQUESTED 十致命全修
+
+- **date**: 2026-07-20
+- **topic**: v36-backlog-candle-review-and-fixes
+- **triggered_by**: LO「继续」——v3.6 社会编排 P1-P3 + child-registry 全部由 kimi 烛面自写自测（132/132），从未过独立评审；主驾按 §三 🔴 补召唤
+- **decision_maker**: 烛(Codex CLI review profile) 评审 + Cursor 主驾修复
+- **adopted**: true
+- **source_handoff**: codex-to-claude__v36-backlog-review__20260720-1200.md（含四节评审原文 + 主驾修复回执 + __DELTA__）
+
+#### 评审结论
+
+烛 CHANGES_REQUESTED，10 条致命——不是边角：①child-registry 同镜像 pid 复用误杀（镜像名≠进程身份）+ ②台账残留放大 ③bus API ../events 路径穿越（探针实证）④脱敏盲区（JSON 键值/Bearer 短值/refs/run.turns 持久化）⑤ask 轮顶永久 waiting_agent ⑥双 answer 并发竞态 ⑦worktree 对 codex app-server 假隔离（cwd 参数被忽略仍授 workspace-write）⑧pipeline/无 cwd 绕过 worktree ⑨预算非全 agent 硬闸 ⑩清 run 不回收 bus/worktree/roster。**kimi 自测 132/132 全绿掩盖全部十条——"测试绿"与"承诺成立"是两回事（mock 只验证参数递到，不验证参数生效）。**
+
+#### 修复（全部落地，见 handoff 回执逐条）
+
+pid 双判据（镜像+创建时间，PowerShell StartTime）fail-closed / 收割即清账+close flush / runId UUID 白名单+run 存在校验 / 脱敏单一信源收敛 redaction.mjs（sanitizeForPersistence 全字符串过 scrub）/ ask 硬状态转换+轮顶预留回答轮 / resumePendingAsk 同 tick 占位+执行尾窗 steer 即回答 / supportsPerTurnCwd 声明 fail-closed / worktree 上收 execute 入口+skip 事件 / run 级累计成本闸 / clearFinished 回收三资产。主驾自查另修：deleteProjectSessions 跨盘 rename EXDEV（探针实证 C:→I: 必炸，cp+rm 回退）、.ps1 台账镜像名登记错、validator/observability 裸 spawn 收编。
+
+#### 验证
+
+- node --test 139/139（132 存量 + 9 新边界 - 2 旧 registry 用例重写）
+- qa:ui --suite=all ok:true 0 JS 错误（layout+workbench 双 viewport）
+- 遗留如实：qa:ui 依赖全局 playwright + PLAYWRIGHT_BROWSERS_PATH 显式指定（本地 node_modules 为空）；无成本回执的 CLI（codex/grok/kimi）预算闸测不到单轮成本，轮次闸兜底；build 无 cwd 是否强制留 LO 拍板
+
+__DELTA__: 烛(Codex) | 2 | 证据：child-registry.mjs pid 复用误杀、ensureRunWorktree 对常驻适配器假隔离、bus API 路径穿越——主驾此前视 kimi 自测 132/132 为可收口，被推翻
+
+---
+
+### D-2026-07-20-002 · 重启爆内存修复（LO 报障：收割失效回归 + 健康检查拉满 MCP 树）
+
+- **date**: 2026-07-20
+- **topic**: restart-memory-blowup-fix
+- **triggered_by**: LO「现在重启服务之后会产生非常大量的内存占用导致爆内存，导致中断」
+- **decision_maker**: 主驾直达（报障紧急诊断，取证→根因→修复→实机验证）
+- **adopted**: true
+- **source_handoff**: synthesis__restart-memory-blowup-fix__20260720-1430.md
+
+#### 根因（诚实账）
+
+①**主驾当日上午修烛致命1 引入回归**：pid 双判据对旧格式台账（无 registeredAt）全体 fail-closed 跳过→孤儿收割静默失效且台账清空覆盖后旧树成幽灵②grok-search health() 每次 bootstrap createThread→拉起 disableMcp:false 的满 MCP codex 树（GB 级，v3.5 结构债）——收割一失效新旧树叠加即爆③HealthService 全 profile Promise.all 探针风暴无并发去重。
+
+#### 修复
+
+旧台账回退文件级 updatedAt 时间判据 / 批量身份探针（单次 PowerShell 查全台账）/ grok-mcp health 惰性化（host 未启动报 dormant 不拉树）/ health 限并发 2+inflight 去重。
+
+#### 验证
+
+实机端到端：7 条僵尸台账全清、bootstrap 后 codex.exe 零进程、server 54MB；139/139。
+
+#### 教训固化
+
+**修 fail-closed 类安全判据时必须对"磁盘上既存旧格式数据"做兼容推演**——上午对烛十致命的修复只推演了新写入路径，没推演过渡态，当天即被 LO 报障打脸。fail-closed 的另一面是 fail-silent：跳过不杀=正确的安全方向，但"跳过"必须对旧数据可判定，否则安全修复本身变成功能回归。
+
+__DELTA__: 主驾自评(Cursor) | 2 | 证据：child-registry.mjs 旧台账兼容缺失=主驾上午"已修好"判断被推翻；grok-mcp.mjs health 拉树坐实爆内存大头
+
+---
+
+### D-2026-07-20-003 · v3.7 codeg 对标 P1：Automations + 会话聚合扩源
+
+- **date**: 2026-07-20
+- **topic**: v37-codeg-parity-p1
+- **triggered_by**: LO「参考 github.com/xintaofei/codeg 全面优化完善体系——基础要求做到其全部功能并在 UI 上学习完善，拓展要求进一步优化协作体系」
+- **decision_maker**: 主驾直达（codeg README 实时抓取 + v3.5 调研存档 + 本机双 CLI 格式实测）
+- **adopted**: true
+- **source_handoff**: proposals/v37-codeg-parity-design.md（17 项 gap 全景对照）
+
+#### 决策
+
+①**诚实 gap 账**：codeg 17 项功能——6 项 514cc 已有等价或更强（多 agent 协作反向优势：codeg 手动 delegate vs 514cc 异构自动路由+社会编排）、1 项核心缺口（Automations）本轮落地、2 项低成本补齐（Kimi/Pi 扩源+日志过滤候选）、5 项拓展候选待 LO 拍板（Office/Chat Channels/Project Boot/MCP 市场/Skills 矩阵页）、3 项架构性不做（内置 IDE 工程环/Git 凭据管理/自更新）
+②**Automations**：composer 快照定时（every:<n>m|h|d 间隔制不自研 cron）/手动 headless 执行；run 走 orchestrator 全治理链（定时 build 照挂审批门）；并发防叠+失败留痕+密钥拒入库+原子写盘+close 先停调度；定时基线=创建时刻（实测踩到"保存即执行"最小惊讶反例后修正）
+③**扩源如实边界**：Kimi/Pi 本机有 CLI 有数据→实测格式后接入（kimi 索引制含篡改限根防护；pi 与 codex 同构复用管线）；OpenCode/Cline/Hermes/CodeBuddy/OpenClaw 未装无数据→不做假接口（Integrity Gate）；Gemini 本机无会话存储如实跳过
+④**锁域修复**：实例锁 repoRoot 固定路径→dataRoot 域（清烛 v3.6 建议2 债：锁与台账同命名空间；http-e2e 从此不与 live server 撞锁）
+
+#### 验证
+
+新增 7 测试全绿；全量 146/146（含此前撞锁的 http-e2e）；qa:ui ok:true；Playwright 实测创建自动化→左栏渲染→调度器真实触发 plan run（调度链端到端实锤）。
+
+#### 拓展候选（待 LO 拍板，见 proposal §三）
+
+Automation×社会编排（定时体检异常时 ask 卡报告）/ Office 文档集成 / Chat Channels（安全面大需单独拍板）/ MCP 市场 / run 产物 diff 查看。
+
+__DELTA__: 主驾自评(Cursor) | 1 | 证据：proposals/v37-codeg-parity-design.md 17 项对照+本机 kimi/pi 格式实测（proposal §一表格）；Automations 调度器实测触发真实 run
+
+---
+
+### D-2026-07-20-004 · v3.7 拓展：体检脉搏（Automation×社会编排闭环）
+
+- **date**: 2026-07-20
+- **topic**: v37-pulse-check-loop
+- **triggered_by**: LO「根据你的推荐继续完善」（推荐项=Automation×社会编排：定时体检+异常 ask 卡报告）
+- **decision_maker**: 主驾直达
+- **adopted**: true
+- **source_handoff**: proposals/v37-codeg-parity-design.md §三.1 + DESIGN-NOTES 2026-07-20 第五轮
+
+#### 决策
+
+①pulse 聚合端点（治理数据面 redUnsummoned/DELTA/handoff + 运行时 failedLast24h/unhealthyComponents 等合一）②{{PULSE}} 占位符注入（数据源失败如实注入不可用，严禁伪造健康）③内置「体系体检」幂等播种（**默认 manual 不擅自定时**——定时=费用是 LO 决策）④体检 prompt 教判读五类信号+「异常才 [[msg:lo]]」。
+
+#### 验证（活体闭环）
+
+手动触发→grok 判断（铁律1未破/dormant 非异常/发现 kimi missing+failed=2+DELTA invalid 24/140 真实异常）→[[msg:lo]] 报告→run 挂起「等你回答」→ask 卡呈现——**体检 run 留在页面等 LO 拍板，交付即演示**。148/148 + qa ok:true。
+
+#### 意外收获（qa 抓真实布局 bug）
+
+左栏 rail-block-team 可被兄弟区块压塌到 1px（活跃 run 多时团队树消失）——min-height 保底+三区有界收缩修复。另实测修正：claude OAuth 过期（体检起始改 grok-build；claude 待 LO /login）、「上次运行」判据 lastRunAt→lastRunId。
+
+__DELTA__: 主驾自评(Cursor) | 1 | 证据：体检闭环活体运行（run 16c10e00 挂起等答）；qa 抓 rail-block-team 塌陷真 bug（styles.css min-height 修复）
+
+---
+
+### D-2026-07-22-001 · 注册表与仓库真值收敛（正式版 3.5.0 + 漂移机械门）
+
+- **date**: 2026-07-22
+- **topic**: registry-source-truth-convergence
+- **triggered_by**: 514cc 全面审计发现正式版本入口、Codex skill 注册表、Console adapter 清单和短期上下文互相漂移
+- **decision_maker**: 烛（Codex 技术执行）+ 主驾最终复核
+- **adopted**: true
+- **source_handoff**: codex-to-claude__registry-source-truth__20260722-0053.md
+
+#### 决策
+
+1. 正式 framework version 以 `rules.md` §八和 `CHANGELOG.md` 最新条目为真源，当前统一为 `3.5.0`；历史工作记录里的 v3.6/v3.7 只表示未发布功能波次。
+2. `module.yaml` 必须登记磁盘上的全部 Claude/Codex skill 和 Console adapter；测试结果只写验证命令，不在注册表或短期上下文固化易漂移总数。
+3. `npm run validate` 从“四份 JSON 能解析”提升为 module schema + skill 集合差 + adapter 实现/装配 + model profile 接线 + 正式版本入口一致性门禁。
+4. Python 3.11+、PyYAML、jsonschema 是配置校验的显式项目依赖；缺依赖或 UTF-8 解码失败必须 fail closed。
+
+#### 历史重复 ID 纠错映射（append-only）
+
+既有标题不改写，第一组 `D-2026-07-17-002/003/004` 保持原 ID；同日后出现的重复标题从现在起使用以下唯一别名：
+
+| 历史重复标题 | 唯一引用别名 |
+|---|---|
+| `D-2026-07-17-002 · 协作台左栏「会话 + 项目树」+ 历史会话只读预览` | `D-2026-07-17-006` |
+| `D-2026-07-17-003 · Console 前端：人文暖纸主题 + 顶栏导航 + Claude 式侧栏` | `D-2026-07-17-007` |
+| `D-2026-07-17-004 · Console 团队体系：会话级能力配比 + 内置 514cc 冻结` | `D-2026-07-17-008` |
+
+未来新增决策必须先扫描现有标题，不再复用编号。历史证据中的原编号保持原样；新引用使用上表别名。
+
+#### 验证
+
+- `npm run validate`：module schema、21 个 skill、8 个 adapter、model wiring、7 个正式版本入口全部通过。
+- 新增治理定向测试 3/3；Console 全量回归 191 通过、0 失败、1 个既有 opt-in 测试跳过。
+- 未执行 runtime sync，未把仓库源状态冒充为用户运行时已部署。
+
+__DELTA__: 烛(Codex) | 1 | 证据：module.yaml + schemas/module.schema.json + apps/control-center/src/validator.mjs 将版本/注册表一致性从文档纪律下沉为 npm run validate 机械门
+
+---
+
+### D-2026-07-22-002 · Control Center 卡顿治理：有界事件面、流式历史与协作式挂载
+
+- **date**: 2026-07-22
+- **topic**: control-center-performance-hardening
+- **triggered_by**: LO「继续，并解决这个项目的卡顿问题」及后续「继续完善」
+- **decision_maker**: 烛（Codex 技术执行）+ 独立 performance review
+- **verdict**: optimized-and-verified
+- **adopted**: true
+- **source_handoff**: codex-to-claude__control-center-performance-hardening__20260723-0047.md
+- **tags**: control-center, performance, bounded-memory, streaming, scheduler-yield, playwright
+
+#### 决策
+
+1. 浏览器事件面按条数和估算驻留字节双预算收敛；会话 DOM 固定为 160 条窗口，历史通过有界分页访问，不再把 5000 条审计记录一次挂进 DOM。
+2. 历史接口优先增量 NDJSON；浏览器按条解析、按 5000 事件/16 MiB 上限缓存，支持 abort、实时尾部合并和 render generation 所有权校验。乱序非会话事件不再触发会话索引全量重建。
+3. 超大正文只渲染有界元数据，不先对全文做 redact/Markdown/escape；UI 事件投影设置节点/深度/数组预算，并固定优先保留顶层协议身份字段，避免 data-first 宽树耗尽预算后丢失 `eventId/type/runId`。
+4. 分批 DOM 挂载、历史规范化和响应解析统一通过 `scheduler.yield()` 协作式让步，兼容回退到 `MessageChannel`，最后才使用 timer，避免后台标签页把 `setTimeout(0)` 节流到约 1 秒。
+5. 性能承诺下沉为 Playwright 机械门：5000 事件分页、4.19M 字符载荷保护、挂载期 SSE、焦点/阅读锚点、陈旧 generation、MessageChannel 挂载期让步均进入 `--suite=all`。
+
+#### 验证（2026-07-23 当轮读盘）
+
+- `node scripts/qa-ui.mjs ... --suite=all`：`ok: true`；MessageChannel 总让步 19 次、挂载期 12 次，96/96 消息完成且 `aria-busy` 清除。
+- 5000 事件场景 DOM 上限 160、阅读锚点位移 0、挂载期 SSE 可见；4,194,417 字符载荷未进入 DOM、secret 不可见，本轮无 long task。
+- `npm test`：267 项，266 通过、0 失败、1 个明确 opt-in 跳过；`npm run validate`：12/12；全仓 JS/MJS `node --check`：86/86。
+- 治理回归：15/15、4/4、21/21；六张最终截图已逐张读取，PNG 签名与布局正常。
+
+#### 边界
+
+- 正式版本保持 `3.5.0`。本轮未 commit、未 push、未执行 runtime sync；仓库源优化不得冒充用户运行时已同步。
+- 早期同条件性能 QA 曾观测到一次 58 ms long task，随后原样复跑及最终完整套件均为 0；按测量抖动如实留档，不表述为“从未出现”。
+
+---
+
+### D-2026-07-24-001 · Codeg/LiveAgent 深度融合 Wave UI-A（多 CLI 团队首屏 + 命令面板）
+
+- **date**: 2026-07-24
+- **topic**: codeg-liveagent-ui-team-wave
+- **triggered_by**: LO（参照 codeg + LiveAgent 下载源码深度完善；全功能对标+多CLI特色+创新+前端观感）
+- **decision_maker**: Grok Build（织面执行）+ 既有 convergence 账本
+- **verdict**: wave-ui-a-landed
+- **adopted**: true
+- **source_proposal**: proposals/v38-codeg-liveagent-depth-ui.md
+- **tags**: control-center, multi-cli, codeg, liveagent, ui, command-palette, mention
+
+#### 决策
+
+1. **不 fork 上游**：继续组合式内核（Node 控制面 + 异构 adapter），拒绝整仓 Codeg、拒绝 LiveAgent Gateway 当内核。
+2. **诚实 parity**：能力账本 85 行中仍有大量 blocked；本波禁止宣称「已具备两项目全部功能」。
+3. **特色前置**：多 CLI 团队协作是 514 差异化核心——欢迎页团队星图、@ 点名、团队会诊模板、官方 CLI 徽标身份色先于「补齐全部 IDE 功能」。
+4. **Wave UI-A 落地**：命令面板 Ctrl/⌘+K、@ 成员提及、欢迎星图 + 4 模板（含团队会诊绑定起始 agent）、CSS 视觉强化；源码在 `.scratch/codeg` 与 `.scratch/LiveAgent`。
+
+#### 验证
+
+- `node --check public/app.js` 通过
+- `node --test tests/mission-control-ui-contract.test.mjs` 6/6 通过（含 Wave UI-A 契约）
+
+#### 边界
+
+- 正式版本仍为 `3.5.0`；未 runtime sync；Office/Channels/PTY/Gateway/持久委派树未做。
+- 上游源码零拷贝进产品；仅交互模式借鉴。
+
+__DELTA__: 织(Grok) | 1 | 证据：apps/control-center/public/{app.js,index.html,styles.css} + proposals/v38-codeg-liveagent-depth-ui.md 把多 CLI 团队特色焊进首屏并补命令面板/@提及
+
+---
+
+### D-2026-07-24-002 · Wave B/C/D 续推（Review + 委派投影 + 自动化管理 + 租约可见面）
+
+- **date**: 2026-07-24
+- **topic**: codeg-liveagent-wave-bcd
+- **triggered_by**: LO「请你一直完善到达到我的要求再停止」+「继续」
+- **decision_maker**: Grok Build
+- **verdict**: wave-bcd-landed
+- **adopted**: true
+- **source_proposal**: proposals/v38-codeg-liveagent-depth-ui.md
+- **tags**: review-mode, delegation-projection, automations-ui, capability-lease, multi-cli
+
+#### 决策
+
+1. **EX-01B Review**：`permissionMode=review` 正式可创建，不走审批、不写盘；策略写权限非 false 时 fail-closed。
+2. **AG-12B/13 读模型**：Mission snapshot 增加 `tasks[]` / `delegations[]`（attempt + message-route 派生），UI 显示子任务与有向委派。
+3. **IN-02B/03**：自动化 `runHistory` + `POST /cancel` + 管理对话框（编辑/历史/立即跑/取消）。
+4. **EX-05 读模型**：审批卡改称能力租约（TTL/哈希/作用域/签发·吊销）；适配器强制执行仍 blocked。
+5. **空闲 Connections**：`loadIdleRoster` 在无选中 run 时展示当前团队成员与 health。
+
+#### 验证
+
+- `node --test tests/orchestrator.test.mjs`（含 review 两测）
+- `node --test tests/automations.test.mjs`（含 history/cancel）
+- `node --test tests/mission-control*.test.mjs`
+
+#### 边界
+
+- 正式版本仍 `3.5.0`；未 runtime sync。
+- 安全门后置：PTY/SSH/Channels/Office/Gateway/市场安装不做。
+- 跨 run 持久 TaskAttempt DAG 未做。
+
+__DELTA__: 织(Grok) | 1 | 证据：orchestrator review + mission tasks/delegations + automations cancel/history + lease UI + idle roster
+
+---
+
+### D-2026-07-24-003 · 多 CLI 脉搏 + 工作树结算入口
+
+- **date**: 2026-07-24
+- **topic**: multi-cli-pulse-settlement
+- **triggered_by**: LO「继续」
+- **decision_maker**: Grok Build
+- **verdict**: pulse-settlement-landed
+- **adopted**: true
+- **tags**: multi-cli, worktree, settlement, statusbar, ui
+
+#### 决策
+
+1. 协作台页头与全局状态栏增加 **团队 CLI 脉搏**（官方徽标 + 健康色 + 本会话参与态）。
+2. 终态隔离工作树增加 **结算卡**（核对 diff / 新工作树继续 / 复制路径），明确不自动 merge。
+3. 左栏 statusline 补权限模式、成员数、worktree 叶名。
+
+#### 验证
+
+- mission-control-ui-contract / mission-control / automations 测试
+
+__DELTA__: 织(Grok) | 1 | 证据：public/app.js renderTeamPulse + worktreeSettlementMarkup；index 页头/底栏脉搏节点
+
+---
+
+### D-2026-07-24-004 · 要点续推：级联取消可见 + 会话头 CLI 条 + 桌面壳 node 解析
+
+- **date**: 2026-07-24
+- **topic**: multi-cli-cancel-desktop-harden
+- **triggered_by**: LO「继续完善要点」
+- **decision_maker**: Grok Build
+- **verdict**: points-hardened
+- **adopted**: true
+- **tags**: cancel-cascade, multi-cli, desktop, node-path
+
+#### 决策
+
+1. **取消 = 多 CLI 级联可见**：`orchestrator.cancel` 事件/返回体带 `cancelCascade.agents|sessions|scope`；前端确认框列出将中止成员。
+2. **会话头身份条**：本 run 成员徽标（leader/已发言/有原生会话）。
+3. **桌面壳**：`resolve_node_binary`（CC_NODE / where / 常见路径）+ 内核 `--experimental-sqlite`，修快捷方式 PATH 空导致秒退。
+
+#### 验证
+
+- cancel cascade 单测通过；UI 契约 6/6；`cargo build --release` 成功
+
+__DELTA__: 织(Grok) | 1 | 证据：orchestrator.cancel cascade + conversation-agents + desktop resolve_node_binary
+
+---
+
+### D-2026-07-24-005 · 收敛自检：产品边界内完成，安全门后置不算软债
+
+- **date**: 2026-07-24
+- **topic**: codeg-liveagent-completion-gate
+- **triggered_by**: LO「继续下一批直到达到所有要求；自行探讨是否真正完成或收敛」
+- **decision_maker**: Grok Build
+- **verdict**: converged-within-product-boundary
+- **adopted**: true
+- **source**: proposals/v38-completion-assessment.md
+- **tags**: completion-gate, multi-cli, lease, task-graph, stream-epoch
+
+#### 决策
+
+1. **收敛定义**：非 LO 安全门、非架构拒绝的主路径 = 入口+实现+验证；其余写死 blocker。
+2. **本轮收口实现**：Capability Lease 事件/返回体；run.taskGraph 根任务；SSE streamEpoch；前批多 CLI UI/桌面壳。
+3. **不宣称**：Channels/SSH/Office/PTY 全量 IDE / 跨 run 反事实分支「已全部实现」。
+
+#### 验证
+
+- mission-control + approval-lock + UI contract：24/24
+
+__DELTA__: 织(Grok) | 1 | 证据：proposals/v38-completion-assessment.md + lease/taskGraph/streamEpoch 实现
+
+---
+
+### D-2026-07-24-006 · LO 拍板：接受产品边界内收敛（选项 1）
+
+- **date**: 2026-07-24
+- **topic**: codeg-liveagent-convergence-accepted
+- **triggered_by**: LO 对完成度三选一回复「1」
+- **decision_maker**: LO
+- **verdict**: accepted-closeout
+- **adopted**: true
+- **source**: proposals/v38-completion-assessment.md
+- **tags**: closeout, multi-cli, product-boundary
+
+#### 决策
+
+LO 选择 **1. 接受收敛**：当前 514 产品边界（本地控制面 + 异构 CLI 团队 + 治理）即 Codeg/LiveAgent 深度对标波次收口。
+
+明确：
+
+1. 不宣称「两个上游每一个功能 1:1 全实现」。
+2. Channels / 远程 Gateway / Office / 完整 PTY IDE 等 **不自动开工**，需 LO 另开授权波次。
+3. 增强债（跨 run 证据图、反事实验证、Skill 硬隔离等）按日常优先级迭代，不阻塞本波收口。
+4. 正式 framework 版本仍以 `rules.md` / `CHANGELOG` 真源为准；本波为未单独升版的功能收敛。
+
+#### 边界
+
+- 未 runtime sync 要求、未要求 commit/push（除非 LO 另说）。
+- 桌面壳 release 已含 node 路径与 sqlite 旗标修复；部署以本机 exe 为准。
+
+__DELTA__: 织(Grok) | 0 | 证据：LO 拍板接受 proposals/v38-completion-assessment.md 收敛定义，本波收口无新增实现
+
+---
+
+### D-2026-07-24-007 · Wave H：上游再审计 + 多 CLI 前端观感跃迁
+
+- **date**: 2026-07-24
+- **topic**: codeg-liveagent-wave-h-frontend
+- **triggered_by**: LO「参照 codeg / LiveAgent 下载源码深度完善；全功能+加强；多 CLI 团队特色；必须创新；前端不好看」
+- **decision_maker**: 主驾（洛琪希）在 v38 收敛边界内推进
+- **verdict**: wave-h-landed
+- **adopted**: true
+- **source**: proposals/v39-wave-h-frontend-multicli.md
+- **tags**: codeg, liveagent, multi-cli, frontend, wave-h, control-center
+
+#### 决策
+
+1. 上游固定修订再确认：`.scratch/codeg` → `692d6eb`（0.21.6）、`.scratch/LiveAgent` → `0a7bb97`；机制可借鉴，**零源码拷贝**。
+2. 架构红线不变：不 fork Codeg；不换 LiveAgent Gateway 作内核；组合式 Node 控制面。
+3. 「全部功能」仍按能力账本类别对标 + 明确 blocker；不宣称 1:1。
+4. 本波强化 **多 CLI 团队可见性** 与 **前端观感**：
+   - Welcome tip（codeg WelcomeTip 模式）
+   - 星图舞台 + 图例 + CLI 标签
+   - 模板起始成员徽标
+   - 消息 CLI 徽标 / 角色副标
+   - 会话头 L·起·言 芯片
+   - 脉搏身份色 + 短码
+5. 验证：`node --check public/app.js`；`node --test tests/mission-control-ui-contract.test.mjs` → **6/6 pass**。
+
+#### 边界
+
+- 未做 Channels/Office/SSH/PTY/Gateway/Skills 市场（仍属 Wave G，需 LO 另授权）。
+- 未做 React/shadcn 重写；未拆 `app.js` monolith（Wave J）。
+- 未 git commit / push。
+
+__DELTA__: 主驾 | 1 | 证据：public/app.js welcomeTip+constellation-stage+message-cli-badge；styles.css Wave H；tests 6/6；proposals/v39-wave-h-frontend-multicli.md
+
+---
+
+### D-2026-07-24-008 · Wave I/J/G 顺序落地（内核 + 模块 + 安全门）
+
+- **date**: 2026-07-24
+- **topic**: wave-i-j-g-full-sequence
+- **triggered_by**: LO「按照顺序全部进行」
+- **decision_maker**: 主驾
+- **verdict**: landed-with-boundaries
+- **adopted**: true
+- **source**: proposals/v39-wave-ijg-kernel-modules-gates.md
+- **tags**: multi-cli, lease, taskgraph, stream-epoch, modularization, remote-gates, security
+
+#### 决策
+
+1. **Wave I**：Capability Lease 强制（签发/TTL/吊销）+ social 权威 taskGraph 边 + cancel 标边 + 异构 resume 提示 + SSE streamEpoch 客户端重置。
+2. **Wave J**：抽出 `public/modules/{stream-epoch,welcome-tips}.js`，server 静态白名单放行；不 React 化、不大爆炸拆 monolith。
+3. **Wave G**：仅 fail-closed 骨架 `remote-gates` + API；Channels/Gateway/Office/PTY/SSH 等默认 501，**不实现**远程能力本身。
+4. 架构红线不变：不 fork Codeg；不换 LiveAgent Gateway 内核。
+
+#### 验证
+
+`node --test` orchestrator + approval-lock + mission-control-ui-contract + remote-gates + welcome-stream-modules → **67 pass / 0 fail**。
+
+#### 边界
+
+- 未 git commit/push。
+- 未 runtime sync / 未宣称跨 run 子树真递归 cancel 完成。
+- Wave G 真实实现需 LO 另开授权与安全设计。
+
+__DELTA__: 主驾 | 1 | 证据：orchestrator lease/taskGraph/resumeHints；public/modules/*；server remote-gates API；tests 67/67
+
+---
+
+### D-2026-07-24-009 · Wave K：UI 接内核 + Evidence 可导航
+
+- **date**: 2026-07-24
+- **topic**: wave-k-ui-evidence
+- **triggered_by**: LO「继续完善直到达到我的要求」
+- **decision_maker**: 主驾
+- **verdict**: landed
+- **adopted**: true
+- **source**: proposals/v39-wave-k-ui-evidence.md
+- **tags**: multi-cli, resume, remote-gates, evidence, frontend
+
+#### 决策
+
+1. recovery / 结算卡露出 **provider-native resume 命令**（Claude/Codex/Kimi），可复制；禁止跨 CLI 静默 resume。
+2. 安全诊断页展示 **remote-gates fail-closed 清单**（Channels/Gateway/Office/PTY/SSH…）。
+3. Mission Evidence 节点可点击定位会话流；messageRoutes 透传 `sourceAttemptId`。
+4. 继续模块化：`resume-hints.js` + `agent-roles.js`；静态白名单扩展。
+
+#### 验证
+
+`node --test` 相关套件 **82 pass / 0 fail**。
+
+#### 边界
+
+- 跨 run 递归 cancel / Counterfactual / Wave G 真实现仍 blocked。
+- 未 git commit。
+
+__DELTA__: 主驾 | 1 | 证据：resume-hints 模块；security remote-gates UI；evidence click-to-stream；tests 82/82
+
+---
+
+### D-2026-07-27-001 · CC-Switch 3.18.0 完整迁移与桌面原生信任边界收口
+
+- **date**: 2026-07-27
+- **topic**: ccswitch-3.18.0-complete-migration
+- **triggered_by**: LO「继续 kimi 的任务，完成 ccswitch 的完整迁移」及后续「继续」
+- **decision_maker**: 烛（Codex 技术执行与独立复核）
+- **verdict**: complete-with-external-trust-boundary
+- **adopted**: true
+- **source_handoff**: codex-to-claude__ccswitch-complete-migration__20260727-1248.md
+- **tags**: ccswitch, provider-store, proxy, desktop, tauri, capability, oauth, workspace, security, migration
+
+#### 决策
+
+1. 以 CC-Switch `3.18.0` 注册表为覆盖真源，固定 SHA-256 `50f6b4ec0c072d70d1cc2d7c3d811f68f15e9fa9b8e7c734fbc8f8c5a7d82c6c`；机械账本覆盖 `287 commands::* + update_tray_menu`，状态为 157 equivalent、128 adapted、3 blocked_external_trust。生成文档不写入依赖 `.scratch` 的动态验真状态；有上游树时额外核验哈希、数量和逐命令覆盖，无上游树时账本仍可验证。
+2. 保持 514cc 组合式内核，不整体 fork CC-Switch。八应用 ProviderStore、代理与故障转移、用量脚本、领域资源、同步、OAuth、workspace、深链及桌面壳均接入现有 Control Center 边界。
+3. 用一次性 Worker、空环境、资源上限、禁用字符串/WASM 代码生成和父进程硬超时封住 usage script 的 `node:vm` constructor/死循环逃逸路径；ProviderStore 的八应用 writer、回读认亲、排序和团队绑定进入机械回归。
+4. 桌面实测推翻“注册了 native command 就等于可用”的假设：Control Center 是 Tauri remote origin，原空 capability 会把全部 native invoke 拒为 `Plugin not found`。新增单一命令清单驱动 AppManifest，capability 只授权 `main` + `http://127.0.0.1:51400/*`，并显式 `local=false`。
+5. Updater 的 3 个入口继续 fail-closed；在没有 514cc 自有签名公钥和更新端点前，不借用上游签名材料，不宣称完整上线。
+
+#### 验证
+
+- Control Center：`npm test` 554 pass / 0 fail / 1 opt-in skip；`npm run validate` 13/13；CC-Switch + ProviderStore/网络/Worker 定向安全回归 74/74；Node `--check` 113/113。
+- Desktop：`cargo test` 21/21；`cargo fmt -- --check`、`cargo build`、`cargo build --release` 通过。release SHA-256：`35D085B9681C943CE2EF5BB9BC0BD862AE6CB5E5EBB41BABB6828D0F56148594`。
+- 实机：release `PID 29120`、Node 内核 `PID 51072`；启动与二次激活时窗口句柄 `922480`、标题 `514 Forge · Control Center`，命令承载环境收尾后触发应用既定 close-to-tray，进程与 HTTP 200 保持；`9223` 调试端口关闭。单实例、A→B 深链 FIFO 预览、托盘存在和轻量模式隐藏/恢复均已取证。
+- 浏览器 QA：明暗桌面、390px 移动共 10 张最终截图，横向溢出/裁切/页签重叠为 0；501 均确认为已声明的 `REMOTE_GATE_BLOCKED`。
+
+#### 边界
+
+- 未执行 runtime sync、git commit 或 push；正式 framework 版本仍由 `rules.md` / `CHANGELOG.md` 决定。
+- 官方 registry 的 `npm audit` 当前为 11 high + 1 moderate，集中在 `exceljs@4.4.0` 传递链且无直接修复；未执行 `npm audit fix --force`。
+
+__DELTA__: 烛(Codex) | 2 | 证据：原“全部能力落地”被 287-command 盘点、ProviderStore 覆盖风险与 node:vm 逃逸共同推翻
+
+---
+
+### D-2026-07-27-002 · 能力图谱与配置界面融合为统一配置图谱
+
+- **date**: 2026-07-27
+- **topic**: config-topology-fusion
+- **triggered_by**: LO「这样这个图谱和配置界面应该合并或者说融合」
+- **decision_maker**: 烛（Codex 技术执行与独立复核）
+- **verdict**: fused-and-verified
+- **adopted**: true
+- **source_handoff**: codex-to-claude__config-topology-fusion__20260727-1640.md
+- **tags**: config-topology, ccswitch, capabilities, source-id, frontend, fault-domain, qa
+
+#### 决策
+
+1. 只保留一个用户入口“配置图谱”；内部固定三个互斥工作面：供应商与应用、Agent·Skill·MCP、真源与运行时。旧 `#capabilities` 仅作深链兼容，不恢复第二套导航。
+2. Skill/MCP 跳转配置源必须使用后端提供的精确 `sourceId`；禁止路径后缀猜测。绝对路径重复映射时返回 `null`，不擅自选一个。
+3. Skill 与 MCP 是两个独立 fail-closed 故障域：任一损坏只能冻结自己的写操作，同时在拓扑、摘要和控件状态中显式呈现。
+4. 配置工作区统一采用可等待契约：Provider/Team/Capability/CC-Switch 共享在途加载；真源详情 latest-wins；原生与 Provider 对话框深链均按 FIFO 等待实际解析；部分刷新和 Tauri native 失败不得显示成功。
+5. 响应式验收必须同时检查 body 与 `.main-content` 横滚；Playwright QA 必须用隔离 home/data、真实 HTTP 与磁盘读回，并机械等待其服务退出。
+
+#### 验证
+
+- `npm test`：571 pass / 0 fail / 1 opt-in skip。
+- `npm run validate`：13/13。
+- `npm run qa:config-topology`：桌面/390px × 明暗 × 三工作面 + MCP/Skill 双故障态，`ok=true`。
+- 定向融合测试：51/51；Node syntax 9/9；`git diff --check` 通过。
+
+#### 边界
+
+- 当前结论针对仓库源与隔离 QA 运行时；未 runtime sync、未重启已有桌面内核、未 commit/push。
+- 3 个 updater 继续 `blocked_external_trust`；既有 npm audit 债未改变。
+
+__DELTA__: 烛(Codex) | 2 | 证据：独立审计推翻“测试全绿即可完成”，补出 CC-Switch 局部刷新假成功、native 错误漏聚合及降级深链 FIFO 缺口
+
+---
+
+### D-2026-07-27-003 · 团队启用、设置与运行态融合为统一团队工作区
+
+- **date**: 2026-07-27
+- **topic**: team-workspace-fusion
+- **triggered_by**: LO「把团队的启用和设置界面和，团队界面融合或者说合并在一起」
+- **decision_maker**: 烛（Codex 技术执行与独立复核）
+- **verdict**: fused-and-verified
+- **adopted**: true
+- **source_handoff**: codex-to-claude__team-workspace-fusion__20260727-2110.md
+- **tags**: team, workspace, activation, settings, runtime, race, playwright, qa
+
+#### 决策
+
+1. `#/team` 作为唯一团队工作区，统一承载团队浏览、显式选用、名称/提示词/成员/主脑/Skill/MCP/供应商绑定，以及当前团队运行席位、协作流和热力图；不保留分离的团队设置弹窗。
+2. 团队浏览与运行选用必须解耦：切换设置对象、新建、保存、另存均不得隐式改变 session/composer/runtime；只有“设为当前团队”执行显式激活。
+3. 团队与 Provider 加载使用 epoch + fresh 排空队列；dirty/busy/revision 防止旧响应、保存晚到和视图切换覆盖草稿。目录缺失时保留既有 Skill/MCP 与未渲染成员，主脑始终属于成员集合。
+4. 团队运行数据只消费有可信归属的 run/taskGraph；无 `teamId` 的旧 run 只归内置团队。handoff、DELTA、route-gate 没有团队归属字段时必须明确标为全局治理数据。
+5. Playwright QA 固定为自建临时根 + 随机端口 + 自有子进程 + 全用户目录隔离；精确检查 4xx/5xx，只放行白名单 `501 + REMOTE_GATE_BLOCKED`，并覆盖首屏/写后 stale GET、草稿重绑、异常清理与关闭阶段最终 drain。
+
+#### 验证
+
+- 定向回归：29 pass / 0 fail。
+- `npm test`：591 项，590 pass / 0 fail / 1 explicit skip。
+- `npm run validate`：13/13 valid。
+- `npm run qa:team`：`ok=true`；桌面/390px 无横向溢出或控件重叠，diagnostics 为空；首屏竞态 `getCount=3` 且草稿保持 dirty；QA 子进程优雅退出、临时根删除。
+- 最终截图：`apps/control-center/.qa-output/team-workspace/team-{desktop,mobile}.png`；运行源 `127.0.0.1:51400/#team` HTTP 200。
+
+#### 边界
+
+- 当前结论针对仓库源、隔离 QA 运行时及既有 `51400` HTTP 读回；未重启桌面壳，未声称窗口当前可见。
+- 未执行 runtime sync、git commit 或 push；既有脏工作树中的无关修改保持不动。
+
+__DELTA__: 烛(Codex) | 2 | 证据：app.js 团队写后复用旧 GET、fresh worker 未执行及 QA 假隔离推翻了原完成判断
+
+---
+
+### D-2026-07-28-001 · 自定义团队成员、主脑与真实执行身份完全解耦
+
+- **date**: 2026-07-28
+- **topic**: custom-team-coordinator
+- **triggered_by**: LO「新建团队不应固定 Claude，成员与主脑应该完全高度自定义」
+- **decision_maker**: 烛（Codex 技术执行与独立复核）
+- **verdict**: repository-source-verified
+- **adopted**: true
+- **source_handoff**: codex-to-claude__custom-team-coordinator__20260728-0240.md
+- **tags**: team, coordinator, adapter-manifest, runtime-reload, pipeline, frontend, playwright
+
+#### 决策
+
+1. 内置 `team-514cc` 可继续默认 Claude Fable；任何自定义团队均从空成员、空主脑开始，Claude 可完全移除，主脑只由团队 `coordinator` 决定。
+2. 团队资格不根据 `profile.command` 猜测。adapter manifest + factory wiring + enabled + required command 共同决定成员/主脑资格；fallback 与缺命令 profile 不得借构造器默认值进入运行图。
+3. provider 身份不授予主脑角色。Claude/Codex adapter 的系统提示保持席位中性，orchestrator 当前轮任务包是 coordinator/executor/reviewer 身份的唯一运行时来源；Claude 工具能力按 adapter、permissionMode 与真实工具回执判断，禁止写死“无工具”或“天然主脑”。
+4. 前端候选目录消费后端 `teamCatalog` 的 `label/role/provider`；静态 PROFILE_META 只作缺目录 fallback。provider alias 先于模糊品牌匹配，pipeline 根精确匹配 `coordinatorId`，`coordinator_id/start_agent_id` 均规范化写回，session 数组/对象统一处理。
+5. bootstrap 未就绪时显示席位加载态，不制造 Claude-only 假目录；目录 hydration 必须保留脏草稿。保存、浏览、激活继续互相解耦。
+
+#### 验证
+
+- 相关定向回归：69 pass / 0 fail；独立 provider 品牌探针通过。
+- `npm test`：610 tests，609 pass，0 fail，1 explicit skip。
+- `npm run validate`：13/13 valid。
+- `npm run qa:team`：pre-bootstrap 无虚构成员且草稿保留；Codex/Kimi 单席主脑 dry-run 字段闭环；Claude 完全移除；桌面/390px 几何与 diagnostics 通过；隔离清理通过。
+- `git diff --check`：通过。
+- 最终独立复审：`APPROVED`，三项前序阻断（Claude 工具提示冲突、静态 provider 抢真源、`start_agent_id` 丢失）全部闭环。
+
+#### 边界
+
+- 未执行 runtime sync、未重启既有桌面进程、未 commit/push。
+- 任意新 CLI 必须先有真实 adapter binding；“完全自定义”不包含不可执行的幽灵 profile。
+
+__DELTA__: 烛(Codex) | 2 | 证据：独立审计推翻“保存非 Claude coordinator 即完成”，补出 adapter 固定角色与工具提示冲突、缺 command 默认值旁路、pipeline 错根、provider 漂移和 pre-bootstrap Claude 假目录
+
+---
+
+### D-2026-07-28-002 · 团队成员库、团队编排与配置图谱融合
+
+- **date**: 2026-07-28
+- **topic**: team-member-library
+- **triggered_by**: LO「我需要一个团队成员管理区域，可以自定义各种团队成员，然后在新建团队中添加或去掉队员，并且结合配置界面」
+- **decision_maker**: 烛（Codex 技术执行与独立复核）
+- **verdict**: fused-and-verified
+- **adopted**: true
+- **source_handoff**: codex-to-claude__team-member-library__20260728-0657.md
+- **tags**: team, member-library, coordinator, runtime-profile, adapter, config-topology, persistence, playwright
+
+#### 决策
+
+1. `#/team` 保持唯一团队工作区，以“团队编排 / 成员库”两个互斥工作面承载运行态、团队设置和成员管理；不再建立独立团队设置页或第二套成员配置页。
+2. 成员库是逻辑成员真源。成员可编辑名称、简称、职责、简介、提示词、能力声明、默认模型、推理强度和运行席位；支持创建、复制、删除自定义成员。内置成员允许覆盖元数据，但身份、绑定与删除冻结。
+3. 身份固定拆为 `memberId -> runtimeProfileId -> adapter.id`：团队、主脑、run、turn、bus、session 使用逻辑 `memberId`；模型发现、路由白名单和 adapter registry 使用 `runtimeProfileId`；协议诊断使用 `adapter.id`。run 固化 `teamRosterVersion: 1` 与成员快照，后续编辑不污染历史。
+4. 新建团队从空成员、空主脑开始；保存时至少需要一名可执行成员，主脑必须是已选成员中的任一 `coordinatorEligible` 成员。Claude 可加入或移除，也不再是自定义团队的固定主脑。
+5. 成员配置仍融合进唯一“配置图谱”：运行席位精确深链到 `control.models`，Skill/MCP 按逻辑 `memberId` 聚焦能力矩阵列；目标进入 hash、刷新可恢复，目录变更使能力缓存失效，连续跳转采用 latest-wins。
+6. 自定义成员必须绑定已接线且当前合格的 runtime profile，禁止幽灵席位。被正常团队或拒载团队引用时禁止删除/换绑；`teams.json` 整体损坏、重复 team id 或引用状态不可验证时全部 fail-closed。拒载记录不进入运行图，但必须跨无关 CRUD 和重启保留原始磁盘记录及成员引用。
+
+#### 验证
+
+- `npm test`：634 项，633 pass，0 fail，1 explicit skip。
+- `npm run validate`：13/13 valid。
+- `npm run qa:team`：`ok=true`；自定义成员创建、编辑、入队、任主脑、移出、删除与两条配置深链闭环；桌面/390px 无横滚或控件重叠，diagnostics 为空，隔离子进程优雅退出且临时根删除。
+- `npm run qa:config-topology`：桌面/390px、明暗主题、三个配置工作面及 Skill/MCP 双故障域均 `ok=true`。
+- 团队存储回归 16/16；独立终审定向 85/85，并用黑盒探针确认拒载记录跨写入/重启保留、损坏 JSON 与重复 ID 冻结、三类写操作统一拒绝且原字节不变。
+- `git diff --check`：通过，仅既有 LF/CRLF 提示。
+
+#### 边界
+
+- 当前结论针对仓库源与隔离浏览器运行时；未执行 runtime sync、未重启既有桌面壳、未 commit/push。
+- 新增运行供应商或 CLI 仍需先接入 adapter manifest 与 factory；成员库不会把任意文本配置伪装成可执行席位。
+
+__DELTA__: 烛(Codex) | 2 | 证据：独立终审推翻两次完成判断，发现拒载记录在无关写入后丢失及重复 team id 被 Map 覆盖；最终由 apps/control-center/src/teams.mjs:203 与 apps/control-center/tests/teams.test.mjs:181 闭环
+
+---
+
+### D-2026-08-07-001 · 协作台直接收件人、CLI 操作台与诊断安全收口
+
+- **date**: 2026-08-07
+- **topic**: collab-console-recipient-cli-security
+- **triggered_by**: LO「选择哪个标签页就是发送给谁」及「CLI 能用的命令或配置，协作台也应该能做」
+- **decision_maker**: 烛（Codex 技术执行与独立复核）
+- **verdict**: repository-and-isolated-runtime-verified
+- **adopted**: true
+- **source_handoff**: codex-to-claude__collab-console-hardening__20260805-0209.md
+- **tags**: recipient, composer, multi-cli, runtime-seat, provider, diagnostics, redaction, playwright
+
+#### 决策
+
+1. 活动成员标签是唯一直接收件人；`@` 仅为结构化额外协作者。Composer 提交前冻结成员、团队、model、effort、permission、cwd 与协作者为同一快照。
+2. CLI 控制始终沿 `memberId -> runtimeProfileId -> adapter.id` 取值。成员默认配置、当前提交覆写、运行 turn 和 pendingAsk answer 所有权必须保持同一身份链。
+3. 协作台只开放 manifest 白名单只读诊断及既有事务化配置入口；诊断固定 argv、`shell:false`、`provider:null`，不开放任意 Shell、安装、更新、删除或登录写操作。
+4. JSON/JSONL/YAML 与命令 argv 共用 fail-closed 结构化脱敏；受类型约束的 `apiKeyField` 环境变量引用可保留，其他敏感位置继续遮盖。
+5. Provider、运行席位与 Skill/MCP 写入继续走各自的串行化/plan-apply/mtime 冲突边界；前端深链使用 epoch 抑制迟到响应。
+
+#### 验证
+
+- `npm test`：729 项，728 pass，0 fail，1 explicit skip；`npm run validate`：13/13 valid。
+- 定向安全/协作回归：120/120 pass；新增模型目录不存在成员的 `404 + SOURCE_NOT_FOUND` HTTP 契约。
+- 隔离 Playwright：`ok=true`、diagnostics 为空、服务优雅退出、临时根删除；Kimi/Codex/Claude payload、CLI 控制目录、事务写盘读回与 390px 几何闭环。
+- 替代独立审查 `APPROVED`；原 `codex-reviewer` 外部侧线因 `403 insufficient balance` 失败，未冒充通过。
+
+#### 边界
+
+- 当前 `51400` Node PID 13004 从仓库 `server.mjs` 启动，进程时间晚于最新后端写入；受保护 API 未使用私密 token 做生产态行为探针。
+- 全目录 `git diff --check` 仍被既有 `public/styles.css` 行尾空白/CRLF 债阻塞；本轮相关文件检查通过，未制造无关格式化 churn。
+- 未 runtime sync、commit、push、重启、安装、更新、删除或登录写操作。
+
+__DELTA__: 烛(Codex) | 2 | 证据：apps/control-center/src/structured-redaction.mjs:56 修复纯 JSON/YAML argv 敏感参数泄漏，推翻此前“结构化诊断已完整脱敏”的判断
+
+---
+
+### D-2026-08-07-002 · 协作台采用 Codex 桌面式单会话工作面与分层抽屉
+
+- **date**: 2026-08-07
+- **topic**: control-center-codex-desktop
+- **triggered_by**: LO「选择哪个标签页就是发送给谁」「显示其 CLI 的专属发送框」及「前端界面尽量模仿 Codex」
+- **decision_maker**: 烛（Codex 技术执行与独立复核）
+- **verdict**: repository-and-isolated-browser-verified
+- **adopted**: true
+- **source_handoff**: codex-to-claude__control-center-codex-desktop__20260807-0649.md
+- **tags**: workbench, codex-desktop, composer, recipient, drawer, mission-control, responsive, playwright
+
+#### 决策
+
+1. 协作台长期只保留左侧任务树、中央单会话与底部 Composer；原全局导航改为左侧按需抽屉，Mission Control 改为右侧覆盖抽屉，不再挤压中央会话宽度。
+2. 活动成员标签仍是唯一直接收件人。Composer 的目标标题、CLI 品牌、model、effort、权限与命令目录必须同时来自该成员的 `memberId -> runtimeProfileId -> adapter.id`；完整 CLI 操作台默认折叠。
+3. 新任务营销空态、星图、模板卡及舞台装饰不进入协作台首屏；桌面中央阅读宽度保持克制，390px 保留团队、会话与自动化分组并允许滚动，不以隐藏功能换取紧凑。
+4. 所有离屏抽屉同步使用 `inert + aria-hidden`。Escape 按 `dialog / 命令面板 -> 导航 -> Mission Control` 分层消费；每次只关闭当前最上层，底层工作面保持状态。
+5. Mission Control 使用不透明 `surface` 背景；覆盖布局允许遮住底层，但不允许底层文字透出形成叠字。
+
+#### 验证
+
+- `npm run validate`：13/13 valid；相关 6 个 JS 文件 `node --check` 通过；本轮相关文件 `git diff --check` 通过。
+- 最终完整 TAP：729 项，728 pass、0 fail、1 explicit skip。此前两次全套并发曾在 `runtime-seats-http.test.mjs` 偶发得到 422；目标用例独立运行通过，最终全量通过，并为失败响应补充 payload 诊断，未把历史 flake 隐去。
+- 隔离 CLI 席位 QA：`ok=true`、diagnostics=0、服务优雅退出、临时根删除；Kimi `startAgentId=kimi-frontend`，`@Codex` 只进入 `requestedAgentIds`，Codex/Kimi/Pi 的 model、effort、权限与命令目录互不串席。
+- 隔离 Mission QA：1440x900、1280x800、820x1180、390x844 全部 errors=0；右抽屉不改中央 Grid，“MC + 导航 + 命令面板 + Escape”逐层关闭回归通过，390px 实拍无背景透字。
+- 最终独立复审：`APPROVED`，未发现键盘、ARIA 或抽屉层级残余阻断。
+- 现有 `127.0.0.1:51400` 保持 HTTP 200、Node PID 13004；未重启服务。
+
+#### 边界
+
+- 未 commit、push、runtime sync、重启或修改运行时凭据；无关脏工作树保持不动。
+- `.scratch` 既有未跟踪探针与两个历史 QA 临时目录未删除；删除仍需 LO 明确确认。
+
+__DELTA__: 烛(Codex) | 1 | 证据：app.js、command-palette.js 与 workbench-chrome.js 用 defaultPrevented 建立三层 Escape 优先级，qa-ui.mjs 四视口回归闭环独立审查发现的双抽屉与命令面板误关闭问题
+
+---
+
+### D-2026-08-07-003 · 协作台环境舱、任务工具与真实浏览器链路收口
+
+- **date**: 2026-08-07
+- **topic**: control-center-environment-tools
+- **triggered_by**: LO「图上有的功能对应514cc也得有」及「继续完善协作台」
+- **decision_maker**: 烛（Codex 技术执行与独立复核）
+- **verdict**: repository-http-browser-verified
+- **adopted**: true
+- **source_handoff**: codex-to-claude__control-center-environment-tools__20260807-0916.md
+- **tags**: workbench, environment, git, sources, tools, recipient, playwright, codex-desktop
+
+#### 决策
+
+1. Mission Control 顶部环境舱必须从任务 cwd 的真实 Git、PR、智能体、托管进程与 run source 生成；“智能体活动”不得误称全部 attempt 为“子智能体”，真实委派用 `sourceWorkItemId/sourceBusMessageId` 单独标记。
+2. Commit/Push 只能走 plan/execute 双阶段门：Commit 不代做 `git add`，计划绑定 HEAD、签名 raw index、worktree identity、TTL 与逐字确认；Push 不设置 upstream、不 force、不接收任意 argv，只允许单一 push URL，拒绝 Git URL rewrite，并以完整 OID/refspec执行且禁 hooks、follow-tags、submodule push。plan 必须在首次异步重认证前原子消费。
+3. 附件路径作为结构化 `run.sources` 持久化；新任务随 create 保存，续聊与自动化触发都在 adapter 派工边界注入路径。私有事件可携带 `sourceRefs` 作为重启后的脱敏依据，但公开 run、automation、HTTP history 与 SSE 只投影名称；旧自动化 prompt 附件块在加载时迁移。
+4. 审阅、终端、文件、侧边对话复用既有真实能力；浏览器只做 HTTP(S) 系统新标签入口，`window.opener` 置空，不伪称 CLI 可控浏览器。
+5. 根级前端 ESM 必须加入服务端静态白名单并由浏览器启动链验证。`environment-panel.js` 漏白名单会让 `app.js` import 404、token 不自举；Node 契约全绿不能替代浏览器加载证明。
+6. ProviderStore 所有状态写入口统一使用候选图；live CLI、`providers.json`、`ccswitch-proxy.json` 与 Proxy runtime 必须共享提交/补偿语义，持久化失败前不得交换实例状态。
+7. Windows rename 的 CAS 不是 publish 前的一次检查，而是每次 `EPERM/EACCES/EBUSY` retry 前的机械门。目标只有真实 rename 成功或 `renameCommitted=true` 才能进入 `published`；rollback 每次 retry 前验证事务写值，外部编辑优先于旧快照恢复。
+8. Proxy restore 是 shutdown 提交点。restore incomplete 时保留 listener、内部服务与实例锁，并在原 HTTP 端口和 bearer token 上恢复 transport；restore 成功后才关闭其余运行面。
+9. 提交点后的清理采用顺序 best-effort；任一步失败固化为 `CONTROL_CENTER_CLOSE_FAILED` 并保持后续关闭失败。HTTP transport 回开失败属于终态故障，必须设置非零退出状态。
+
+#### 验证
+
+- `npm test`：757 tests，756 pass，0 fail，1 explicit skip。首轮 8 fail 归一到 `orchestrator.mjs` 漏导入 `isAbsolute`，修复后又发现 orphan 事件回放误要求 run 仍存在；两项均由全量与定向回归闭环。
+- `npm run validate`：13/13 valid。
+- `node --test tests/workbench-environment-http.test.mjs`：真实随机端口服务验证 401、run scope、Git staged/ahead、来源追加、自动化 cancel 与全局 SSE 路径脱敏、多 push URL / URL rewrite 拒绝、hook 不执行、tag 不隐式推送及重启后来源恢复。
+- 环境舱/自动化/UI 契约定向组合：36/36；HTTP/Mission/workspace 复归：15/15。
+- `npm run qa:environment`：`ok=true`、diagnostics 为空；Codex 目标有 6 model / 7 effort / 3 permission 选项；侧边发送 payload 为 `agentId=codex-technical`；1440x900、1280x800、820x1180、390x844 均零横向溢出，Composer 与环境舱可达，Git 动作可滚动触达。
+- 截图：`apps/control-center/.qa-output/workbench-environment/{desktop-1440,desktop-1280,tablet-820,mobile-390}.png`；隔离服务优雅退出、临时根删除。
+- 独立安全终审：`APPROVED`；复审补出的自动化 cancel 路径泄露、旧格式括号文件名迁移、签名暂存计数与 Git URL rewrite 风险均已闭环。
+- 2026-08-08 事务收口：Provider 42/42；App/Shutdown/真实 server 6/6；CC-Switch 整域 142/142；Proxy 连续 10 轮均 31/31；最终 `npm test` 803 tests / 802 pass / 0 fail / 1 explicit skip。
+- `npm run validate`：13/13 valid，CC-Switch 账本保持 288 项（157 equivalent、128 adapted、3 blocked_external_trust）；核心 12 文件语法和冻结 SHA 均 12/12。
+- 两轮独立终审最终 `APPROVED`：首轮补出 retry-CAS 阻断并推翻旧完成判断；修复后又补出提交点后清理失败和 HTTP 回开失败的状态误报，增量复审 `DELTA=0`。
+
+#### 边界
+
+- 未执行仓库 commit、push、runtime sync、生产部署或凭据修改；Push 执行只针对 QA 自建临时 bare remote，隔离 Playwright 的产品交互仍只预览计划并故意取消。
+- 当前 51400 的受保护 API 未使用其私密 token 做行为探针；真实鉴权 payload 由自建隔离服务验证。
+- 远程 channels/office/market/ssh/pty 在隔离环境的 `501 + REMOTE_GATE_BLOCKED` 继续按既有白名单记账，不当作功能成功。
+- 残余风险：同权限本机进程仍可能在最终 workspace 认证与 Git 子进程打开目录之间竞争；未来 EventStore 对外读取必须复用公开投影，不能直接返回私有 `sourceRefs`。已清除 run 的 POSIX 路径兜底可能误遮部分诊断文本，当前选择保守保密。
+- 本轮未 commit、push、runtime sync、重启既有桌面进程或修改凭据；历史 `.test-*` 与 `.scratch` 未执行批量删除。
+
+__DELTA__: 烛(Codex) | 2 | 证据：真实 redirect push 曾越过仅执行环境隔离并写入被重写远端，推翻“固定 argv 即足够安全”；apps/control-center/src/workbench-environment.mjs 的原始/有效 URL 一致性门与 HTTP 回归完成闭环
+__DELTA__: 烛(Codex) | 2 | 证据：apps/control-center/src/providers.mjs:802 与 src/atomic-rename.mjs:68 的每次 retry CAS、已提交登记和 rollback 写值验证，推翻“publish 前单次快照复核足以保护外部 CLI 编辑”的判断
+---
+
+### D-2026-08-08-001 · 环境舱对齐参考图形态 + 侧栏团队过滤缺陷修复
+
+- **date**: 2026-08-08
+- **topic**: environment-panel-alignment
+- **triggered_by**: LO 提供 Codex 桌面端参考图 + 会话不显示反馈
+- **decision_maker**: 主驾(Claude)
+- **verdict**: 已落地验证
+- **adopted**: true
+- **source_handoff**: claude-to-all__environment-panel-reference-alignment__20260808-0725.md + claude-to-all__rail-team-filter-and-tool-tabs__20260808-0800.md
+- **tags**: environment, team-filter, rail, bugfix
+
+#### 决策
+
+1. **环境舱对齐参考图**：主区重排为变更/本地/分支/提交或推送/PR 顺序；本地/分支改为可展开行（展开态跨刷新保留）；刷新改为内联转圈（消除闪烁与滚动丢失）；diff 计数变为按钮进变更审阅；提交/推送收成单行；智能体分组头像堆叠；来源分组 ➕ 复用 Composer 附件链路；三个分组默认展开。
+2. **侧栏团队过滤吞噬全部项目缺陷修复**：根因=effectiveProjectTeamId() 对未归属项目返回内置团队 id，projectTreeModel 只放行 teamId === 选中团队→选中非内置团队时几乎所有历史项目被过滤。修复=未归属项目 null 无条件可见。未归属项目带虚线"未归属"淡标。
+
+#### 验证
+
+测试 804/803 pass/0 fail，validate 13/13。QA 四视口零横向溢出。
+
+---
+
+### D-2026-08-08-002 · 右栏工具标签栏（对齐 Codex 桌面端参考图）
+
+- **date**: 2026-08-08
+- **topic**: rail-tool-tabs
+- **triggered_by**: LO 提供 5 张 Codex 桌面端截图 + "右栏要能多标签且方便点"
+- **decision_maker**: 主驾(Claude)
+- **verdict**: 已落地验证
+- **adopted**: true
+- **source_handoff**: claude-to-all__rail-tool-tabs-reference-parity__20260808-0930.md
+- **tags**: rail, tools, tabs, mission-control, terminal
+
+#### 决策
+
+1. 新模块 rail-tools.js + rail-panels.js + rail-tools.css。RAIL_TOOLS 同源驱动标签条/➕菜单/空态选择器。
+2. 任务工具迁入右栏标签条：Mission Control 为默认工具页，与审阅/浏览器/文件并列。
+3. 审阅页解析 unified diff，文件页受控 workspace 投影，浏览器页地址栏+历史。
+4. 终端改为底部抽屉（保留拖高/双击复位/↑↓ 步进），右栏折叠钮改挂常驻 tabbar-actions。
+5. 五个排障中查实的缺陷均已修（右栏结构错位、Escape 越权、同一页发两遍请求、换任务不刷新、终端关闭钮被浮层吃掉）。
+6. 刻意不跟参考图：浏览器页不内嵌 webview（X-Frame-Options/CSP 拒绝）+ 补回"侧边对话"入口。
+
+#### 验证
+
+测试 809/808 pass/0 fail，validate 13/13。审阅页 diff 渲染 QA 实证。
+
+---
+
+### D-2026-08-08-003 · 终端输入双重序列化修复（全项目 16 处调用 + 8 个真实缺陷）
+
+- **date**: 2026-08-08
+- **topic**: terminal-input-double-serialization
+- **triggered_by**: LO 连续三轮报"终端打不出任何东西""同一份首屏出现很多条"
+- **decision_maker**: 主驾(Claude)
+- **verdict**: 已落地修复并验证
+- **adopted**: true
+- **source_handoff**: claude-to-all__terminal-input-double-serialization__20260808-1130.md
+- **tags**: terminal, bugfix, double-serialization, sse, xterm
+
+#### 决策
+
+1. **根因修复**：request() 内部 JSON.stringify 与 16 处调用方手动 stringify 叠加→body 被双重序列化。修复=request() 对字符串 body 原样透传，否则序列化。一行覆盖全部 16 处。
+2. **同轮修掉 8 个真实缺陷**：终端视图无条件自举（IntersectionObserver 可见才挂载）、SSE 断线不重连（指数退避 5 次/8 秒上限 + replay=0）、xterm 隐藏容器 open（先置 is-active 再 open）、孤儿面板（按 DOM 全量清理）、mount 不幂等（串行化锁 + 释放旧订阅）、输入失败静默（红字报真实原因）、默认 shell 走 pwsh（Windows 依次探测 pwsh/powershell/COMSPEC）、401 竞态（补 await apiReady + 重试入口）。
+
+#### 验证
+
+测试 819/818 pass/0 fail，validate 13/13。定位过程三层剥离（PTY 服务/HTTP+SSE/浏览器 fetch→前端），每层有实测。
+
+#### 教训
+
+同一现象连续两轮"按代码推理→修可能的机制"都落空，第三轮"架探针数数、逐层排除"一次命中。代码推理列出可能性但不能证伪；连续两次修复无效时应立刻切换实测。
+
+---
+
+### D-2026-08-08-004 · 体系健康治理补全（context.md 更新 + decisions.md 回溯 + 建议）
+
+- **date**: 2026-08-08
+- **topic**: governance-health-fix
+- **triggered_by**: LO "继续完善本项目请你深度思考"
+- **decision_maker**: Miku(swift-responder)
+- **verdict**: 部分落地（context.md ✅ + decisions.md ✅ + 诊断报告 ✅）
+- **adopted**: true
+- **source_handoff**: 本会话直接执行
+- **tags**: governance, health, context, decisions, delta
+
+#### 决策
+
+体系健康诊断发现 7 项问题，落地其中 3 项：
+
+1. **context.md 过时 11 天**→已更新至 2026-08-08（补入 6 个新波次段、更新版本风险说明、测试基线 819/818 pass/0 fail）。
+2. **decisions.md 补录**→补入 08-08 今日 4 条决策（D-001 环境舱/团队过滤、D-002 工具标签栏、D-003 终端双重序列化、D-004 本治理条目）。
+3. **DELTA 纪律**→已识别松弛问题（今日 handoff 缺 DELTA 行）。
+
+#### 建议待 LO 拍板
+
+- 正式发布 v4.0（版本升格涉及 rules.md/CHANGELOG.md/module.yaml 三方同步）
+- 召唤鉴(meta-reviewer)做体系健康度审计（最近一次鉴审计在 06-14，已近 2 个月）
+- 补烛评审（今日 handoff 自身建议补评审但未执行）
+- 14 个 proposals 跟踪状态表（哪些已采纳/已落地/已废弃）
+- 长期未用的匠/策/鉴 三个命名 Agent 的能力是否仍有效（需实测验证）
+
+### D-2026-08-08-005 · Codex 过程可见性（会话流只剩审批的两层根因）
+
+- **date**: 2026-08-08
+- **decider**: LO（提出「codex 好像在工作，但我只能审批看不到工作过程」）
+- **verdict**: 已落地（适配器 + 前端两层）
+- **adopted**: true
+- **source_handoff**: 本会话直接执行（实测抓包驱动，非代码推理）
+- **tags**: control-center, codex, observability, adapter, ui
+
+#### 根因（探针实证，codex 0.146.0 / app-server v2）
+
+会话流除了审批什么都渲染不出来，是**两层同时断**，只修一层无效：
+
+1. **适配器丢内容**：`notificationEvent` 只保留 `{method, threadId, turnId, itemType}`。
+   `item/completed` 的 `itemType:"commandExecution"` 不带命令/输出/退出码，`"fileChange"`
+   不带路径/diff——事件等于"发生过某件事但不告诉你是什么"。实测事件库 434 条
+   `item/completed` 全部是空壳。
+2. **前端过滤**：`eventAffectsConversation` 白名单不含 `codex.*`，即便有内容也不进会话流。
+
+审批之所以可见，是它走 approval-broker 独立通道。
+
+#### 落地
+
+- 新增 `codexItemProgress(method, params)`（**字段名全部来自实测抓包**：干净命令在
+  `commandActions[].command`，完整输出在完成态 `aggregatedOutput`，改动在
+  `changes[{path,kind.type,diff}]`）；输出 4KB / diff 2KB / 文件 20 个为上界，
+  截断头尾各留（报错多在尾部）并如实标注。
+- 顺带修一个正确性缺陷：`phase=commentary` 的旁白与 `final_answer` 是同一 item 类型，
+  原实现无差别覆盖 `active.text`——正文可能被一句"我这就去改"顶掉。现改为正文到达后
+  旁白不再覆盖。
+- 前端：`item/completed` → 可折叠过程卡（命令+输出+退出码 / 文件改动+diff / 旁白）；
+  `item/started` → 活跃行显示"正在执行 <命令>"，run 收尾清残留防假活。
+
+#### 验证
+
+- 单元 8/8（含截断头尾、边界、脱敏断言）；全量 829 tests / 828 pass / 0 fail / 1 skip
+- **端到端真跑一轮 Codex**：59 事件中 8 条带 progress，命令/退出码/输出/文件改动/旁白全部到位
+- `qa:environment` ok=true diagnostics=[]（chromium 实载页面）；`validate` 通过
+- 未做：过程卡在浏览器里的视觉走查（需 LO 重启后实看）
+
+#### 待办
+
+- 服务端改动（适配器）需**重启 Console** 才生效；前端刷新即可
+- 建议补一次烛评审（本轮未召唤，harness 限制主驾不自行 spawn agent；无 DELTA 账本行）
+- 事件库噪音：`codex.mcpServer/startupStatus/updated` 占 5510/12257（45%），
+  `item/commandExecution/outputDelta` 1711 条载荷为空——本轮未动，留作独立降噪波次
+
+### D-2026-08-08-006 · 协作轮次上限的可见性（maximum collaboration rounds reached）
+
+- **date**: 2026-08-08
+- **decider**: LO（提问「为什么会显示 maximum collaboration rounds reached」）
+- **verdict**: 已落地可见性修复；**上限本身与"失败轮退还"未动，留待 LO 拍板**
+- **adopted**: true
+- **source_handoff**: 本会话直接执行（读盘实证 LO 的 run）
+- **tags**: control-center, orchestrator, ux, policy
+
+#### 根因（实证）
+
+- 硬上限：`config/control-center/permissions.json:10` → `"maxRounds": 6`
+- LO 的 run `e0323510`：`round 6 / maxRounds 6`，撞顶后任何续接在
+  `orchestrator.mjs:3090` 抛 `ROUND_LIMIT`，原文英文串直接进 toast
+- **加剧因素**：`run.round += 1` 在 attempt 建立时就发生（`orchestrator.mjs:1713`），
+  与该轮成败无关。该 run 第 4、5 轮均为 `ambiguous`（Codex 超时/余额 403），
+  恢复确认只清 `inflightTurns`、**不退还轮次**——6 轮里 2 轮白烧，deep 协作实际只跑了 4 轮
+- 前端此前**从不显示** maxRounds（`grep maxRounds public/app.js` 零命中）：
+  用户全程无预算感知，撞墙才第一次听说有上限
+
+#### 落地（仅可见性，不改策略）
+
+- meta 行常驻 `轮次 N/M`（用满显示"已用满"）
+- `sendErrorText()`：ROUND_LIMIT → 说明已用满几轮 + 指向"在新任务中继续"（原生会话历史会带过去）；
+  INSUFFICIENT_ROUNDS 报出所需最小轮次
+
+#### 未动 · 待 LO 拍板
+
+- `maxRounds: 6` 是否上调（轮次闸是成本/失控的第一道闸，不单方面放松）
+- **失败/放弃轮是否退还预算**：恢复确认是人工门控，退还在语义上可辩护，
+  但会削弱"轮次=硬止损"的保证。测试已钉住现有语义，改动会红
+
+#### 验证
+
+831 tests / 830 pass / 0 fail / 1 skip；`qa:environment` ok=true diagnostics=[]
+
+### D-2026-08-08-007 · 协作逻辑：白烧轮退还 + 恢复确认单点收口
+
+- **date**: 2026-08-08
+- **decider**: LO（「请你继续完善协作逻辑」——采纳 D-006 里我倾向的方案 2）
+- **verdict**: 已落地
+- **adopted**: true
+- **source_handoff**: 本会话直接执行
+- **tags**: control-center, orchestrator, collaboration, recovery, safety
+
+#### 落地一：轮次退还（只补白烧，不放松成本）
+
+`refundAbandonedRound(run)`——人工确认放弃可疑轮时归还该轮配额。
+
+- **只退真没产出的轮**：末次 attempt 停在 `prepared/session_ready/submitting/submitted/ambiguous`
+  才退；`completed/failed` 是真跑过（failed 也烧了一次 provider 调用），退还等于凭空发配额
+- **只动 round，不动 maxRounds**——这是安全支点：成本硬顶 = `maxBudgetUsdPerTurn × maxRounds`
+  因此丝毫不放松，真跑飞仍由 `budgetExhausted` 独立兜住
+- **退还次数硬顶 = maxRounds**（`run.roundsRefunded` 计数）：每次退还都要人点一次「确认恢复」，
+  但脚本化调用方不能靠人的耐心兜底
+- 落 `run.round_refunded` 事件 + 会话流注记 + meta 行"已退还 N"——不播报就等于悄悄改配额
+
+净效果：重试复用同一轮号（5→4→5），而不是吃掉最后一轮（5→6）直接撞顶。
+
+#### 落地二：恢复确认收口（契约驱动，非单点补丁）
+
+两条恢复确认路径（`queueSteer` 排队 / `continue` 直发）此前**各写一份**，已经漂移：
+
+- `inflightTurns = {}` 只有排队那条有——直发路径仍留死记账，成员永远"正在准备会话"、
+  新消息只排队发不出去（即 D-005 那个坑，当时只修到一半）
+- 恢复注记文案两份不同（"before queuing" vs "before sending"），曾被用来判断 LO 是否重启
+
+现收口为 `acknowledgeAbandonedWork(run)` + `abandonmentSnapshot/restoreAbandonment`，
+测试钉住"两条路径都走同一收口 + 清理/注记各只有一份"，再漂移即红。
+
+#### 验证
+
+- 9 条专项测试（`tests/round-refund-contract.test.mjs`）：账目逻辑 5 条 + 快照回滚 1 条
+  + 收口 1 条 + **走真实 `continue()` 的接线测试 2 条（含"已完成轮不退"的负向对照）**
+- 接线测试当场抓到我自己的错误假设（以为退还后 round 停在 4，实际重试正当复用）——
+  单测证明逻辑对，只有接线测试能证明它被调用到
+- 840 tests / 839 pass / 0 fail / 1 skip；`qa:environment` ok=true；`validate` 通过
+
+#### 边界（如实）
+
+- **不追溯**：LO 的 run `e0323510` 已 6/6 终态，那两轮 ambiguous 在本次修复前就花掉了，
+  不会退回来；该 run 只能走「在新任务中继续」
+- 需**重启 Console** 生效（orchestrator 是服务端）
+- `maxRounds: 6` 本身未动（D-006 待办仍挂着）
+- 建议补烛评审：本轮改的是恢复/配额这类安全语义，且是我自己写的治理代码——
+  harness 限制主驾不自行 spawn agent，无 DELTA 账本行
+
+### D-2026-08-13-001 · 配置图谱续波：远端真源安全网（差异预览 + 备份时间线 + 服务端原文恢复）
+
+- **date**: 2026-08-13
+- **decider**: LO（「接着 codex 的任务继续完善配置图谱」，并在四个候选杠杆点中选定「远端真源安全网」）
+- **verdict**: 已落地
+- **adopted**: true
+- **source_handoff**: `.ai-shared/handoff/claude-to-all__remote-source-safety-net__20260813-0113.md`
+- **tags**: control-center, config-topology, remote-source, redaction, safety, backup-restore
+
+#### 判定：远端写盘风险更高，安全网却比本机少两道
+
+烛已把远程主机/项目补齐到与本机三面同构（`codex-to-claude__remote-config-workbench-parity__20260812-0446.md`），
+但本机有「预览变更 + 版本记录/对比/回滚」，远端保存则是直接覆盖；发布备份
+（`.514forge-backup-<txid>`）虽已写盘、已被 inventory 扫到，UI 只列名字，不能看也不能恢复。
+机械保证（digest/CAS/planRevision）很硬，缺的是**给人看见的那一层**。
+
+#### 先修的数据损坏缺口（实证）
+
+`editable` 旧判定只看 `findSecretCandidates`（赋值型秘密有 **12 字符门槛**，`redaction.mjs:230`），
+而返回内容走 `scrub`（`redactAssignment` **无长度门槛**，`redaction.mjs:166`）。实测 `token: short`
+判敏放行 0 候选、脱敏照改 → 文件既被改写又被判可编辑，保存即把 `[REDACTED]` 写回远端真源。
+全部 editable 真源都是 AGENTS.md/CLAUDE.md/rules.md/context.md 这类文档，写配置示例是常态。
+
+按契约驱动修（`contract-driven-over-patching`），不追模式：
+
+- **INV-BK1** `editable` ⟹ 返回内容 === 远端 raw 字节（新增 `redacted`，凡 scrub 改写过一律只读）。
+  副产品：差异预览的基线因此就是远端字节，不是脱敏投影。
+- **INV-BK2** 备份路径由服务端在真源 canonical 父目录下拼装，名字必须严格 `<basename>.514forge-backup-<[\w-]{1,64}>`；穿越与跨真源伪造在词法层不可能。
+- **INV-BK3** 备份原文只在服务端流转（HTTP 面只给 scrub 投影 + 原文 digest + restorable）；恢复只提交备份名 + 当前 digest。
+- **INV-BK4** 恢复 = 用备份原文再跑一次 `writeSource`：CAS/锁/原子发布/恢复台账全部继承，零新增写通道，且为「恢复前内容」再留一份备份 ⟹ **恢复本身仍可回滚**。截断或含凭据的备份 fail-closed 拒绝。
+
+#### 顺手根治：7 处空白图标 + 机械红灯
+
+`#lucide-*` 有 7 个不在离线 sprite 中（4 处就在配置图谱远程面，含烛新加的健康仪表盘标题）；
+`LEGACY_ICON_MAP` 只映射 `icon-*` 旧前缀，故无运行时兜底。全部换成 sprite 内真实图标，
+并新增 `tests/lucide-sprite-contract.test.mjs`——空白图标从不让测试变红，这条把它变成机械红灯。
+
+#### 验证
+
+- 元验收（防假基线）：`editable` 打回旧逻辑 → 漂移测试必红；图标注入坏引用 → 必红；两者还原后必绿、无残留。
+- 相关组 114/114 pass；`qa:remote-config` **ok: true**，恢复请求体实测 `{path, file, name, digest}`
+  **无 content** —— INV-BK3 在真实浏览器端到端验住；`validate` 13/13；全量 1028/1025 pass/2 fail/1 skip。
+
+#### 边界（如实）
+
+- 两条既有红灯：`tests/team-workspace-ui.test.mjs` 的源码正则腐烂（app.js:1436 守卫已重构为多行 `||`
+  且含 `configRemoteDirtyDraftCount()`），属 team-workspace 波次范围，**本波未擅改**。
+- `qa:remote-config` 此前在当前磁盘状态下跑不到发布那步（缺 `/recoveries` mock，前端 fail-closed 正确）；
+  已补空账本 mock。⟹ 上一份 handoff 的 `ok: true` 在当前代码上不可复现。
+- 备份无保留/清理策略（每次保存与恢复各留一份，会累积），本波未做也未伪称有。
+- **主驾直达，未召唤外部 agent**，故无发火 DELTA 行。但改动落在远端写入路径与脱敏判定＝🔴 安全敏感，
+  且是我自己写的安全代码（同一个模型同一套盲区）——建议烛 read-only 复核 INV-BK2 名字绑定可否绕过、
+  INV-BK3 原文是否真不出服务端、`restoreBackup` 复用 `writeSource` 后台账语义有无缝隙。等 LO 授权。
+
+### D-2026-08-13-002 · 配置系统 bug 搜寻结论 + Skill 矩阵可用性改造 + 门闸提示语义化
+
+- **date**: 2026-08-13
+- **decider**: LO（「1.找bug请你深度完善所有配置设置系统 2.美化前端 3.增设拓展功能」）
+- **verdict**: 已落地
+- **adopted**: true
+- **source_handoff**: `.ai-shared/handoff/claude-to-all__config-system-bugs-and-matrix-ux__20260813-0150.md`
+- **tags**: control-center, config-topology, capabilities, ux, bulk-write, qa-tooling
+
+#### 找 bug 的诚实结论：API 边界层健康，问题在 UI 层
+
+用真服务器 + 真实 HTTP 探针冲击 `/api/config` 全链路：路径穿越 404 不回内容、未知源/版本 404、
+critical 源无确认 403 fail-closed、无 Bearer 401、坏 JSON/2MB/并发写均无 5xx 与裸 SyntaxError。
+`validate` 坏 JSON 回 200 + `{valid:false}` 是正确设计（结论在 payload）。
+`exposeContent !== false` 经核实亦非 fail-open（runtime/secret 类硬编码 false）。
+**这一层没有可报缺陷，不虚构**；真问题是走查看见的三条 UI 缺陷。
+
+#### 落地
+
+1. **门闸未授权 ≠ 故障**：501/`REMOTE_GATE_BLOCKED` 原始英文技术文案此前常驻每个配置面
+   （390px 占三行红字）。改为 `configTargetLoadIssue()` 分 `gated`/`error`：未授权走中性胶囊
+   + 「去授权」直达门闩清单，真故障才告警色，原文收进 title。修复过程中发现并修掉第三处
+   仍赋裸字符串的赋值点（会渲染 `undefined`），并用测试钉住「三处赋值形状一致」。
+2. **测试断言腐烂先核实再修**：`team-workspace-ui` 三条断言盯 app.js 字面文本，而守卫已收口为
+   `hasUnsavedConfigChanges()`。先确认三道闸（切换/激活/供应商应用）**都还在**，确认是断言腐烂
+   而非功能退化，才把断言从字面升级为语义——不改代码迁就测试，也不删测试造绿。
+3. **Skill 矩阵（21×6=126 格）**：新增筛选、覆盖率徽标（按全集统计不随筛选失真）、整行/整列/
+   全量批量、斑马纹、行 hover、勾选饱和度压低、表头 sticky。批量**复用单条原子接口组合**，
+   不新开批量写面；只提交真实变更；fail-closed 成员在收集阶段排除；影响面二次确认；
+   受控并发 4 且部分失败逐条回报。
+4. **走查工具正式化** `npm run qa:walkthrough`：独立实例逐面截图 + pageerror/横向溢出体检，
+   有诊断 exit 1。布局回归与空白控件从不让单测变红，需要这类"看得见的体检"。
+
+#### 验证
+
+- 新增 `tests/capability-matrix-bulk.test.mjs` 5 条（含元验收：去掉 fail-closed 排除必红）。
+- 相关组 66/66 pass；全量 **1033/1032 pass/0 fail/1 skip**（上一波收尾尚有 2 条腐烂断言红着）；`validate` 13/13；`qa:walkthrough` 10 个面零溢出零 pageerror exit 0。
+
+#### 边界
+
+- 批量 = 前端对原子接口的组合，全量取消＝126 次请求（并发 4）。规模再翻倍应考虑服务端批量端点，
+  本波未做也未在 UI 上伪称原子操作。
+- `.scratch/` 已加入 `.gitignore`（未清理其他 agent 留存的日志）。
+- 仍为主驾直达无 DELTA；本轮触及 UI 安全语义（批量写配置、门闸呈现）与自写测试断言，
+  建议烛/鉴独立复核：批量作用域是否可能改到用户没看见的行、断言语义化后是否仍挡得住守护点丢失。
+
+---
+
+### D-2026-08-12-001 · 配置图谱 v42：回退闭环 / 本机-远程一致 / 去重 / 紧凑布局
+
+- **source_handoff**：`.ai-shared/handoff/claude-to-lo__config-graph-v42-rollback-consistency__20260812-2300.md`
+- **触发**：LO 五点要求（用户友好 + 布局合理 / 本机与远程一致 / 查明删重复 / 大厂风格 / 供应商管理不全面「回退无法更改」）
+- **调度**：主驾直达（⚪），未召唤外部 agent，无 DELTA 账本行。
+
+#### 决定
+
+1. **「可回滚」必须在界面上兑现**：`switchTo` 确认框长期承诺备份可回滚，而本机侧只有私有 `#backup()`
+   写盘、无任何读取/恢复通道——远程侧却早有完整闭环。补齐本机 `liveConfigTargets()` 登记表 +
+   备份 sidecar 清单 + list/read/restore/remove 四方法四端点，形态与操作对齐远程时间线。
+   **纪律**：恢复只认登记表内路径（手改清单指向表外＝等同无清单）；同名多目标如实拒绝不猜；
+   CAS 摘要不符 409；恢复前先备份当前内容 —— 回退本身可再回退。
+2. **破坏性操作一律页内确认**：`ccswitch-panel` 13 处原生 `window.confirm` 全部改走注入的
+   `confirmDialog`。理由不是美观：桌面壳 webview 可能不弹窗直接返回 false，用户看到的就是
+   「点了没反应」，与第七波「点确认指纹自动闪退」同类。
+3. **重复以「保留能力强的一份」为原则删**：环境冲突检查删掉页头只发 toast 的弱化副本，
+   动作改为跳工作台唯一实现；应用页签条与供应商行身份块两侧共用一份渲染器；
+   **但操作列语义不同的行主体刻意不强行合并**——KISS 优先于 DRY 教条。
+4. **UI 不暴露外部产品名与版本号**：`CC-SWITCH 3.18` 等 5 处换 514cc 自有命名，来源留代码注释。
+5. **首屏纵向预算当指标管**：三层横条（页头 + 目标条 + 72px 流程 band）合成 56px sticky 工具条，
+   正文 top 由 ≈300px 降到 **233px**（几何进实机断言，不靠"感觉更清爽"）。
+
+#### 验证
+
+- 新增 `tests/provider-backups.test.mjs` 8/8；全量 **1041 测试 1040 pass / 0 fail / 1 skipped**。
+- 实机三套 14/14 + 19/19 + 20/20；`qa:remote-config` ok:true；`qa:walkthrough` 10 面零溢出零 pageerror。
+- `lucide-sprite-contract` 抓到我引用了 sprite 中不存在的 `chevron-up`（会渲染空白）当场修正——
+  机械扳机比自测有效的又一实证。
+
+#### 边界
+
+- 「回退无法更改」的具体复现未经 LO 确认，按磁盘证据覆盖了全部合理解读；若指的是别的现象需补步骤。
+- 本机与远程仍有未对齐处（远程有真源编辑器/健康仪表盘；本机 live 文件是 `deploy-only +
+  exposeContent:false` 的既有安全设计）——本波只对齐「回退」，不假装全对齐。
+- 本波触及安全语义（备份恢复的路径围栏、凭据载体分类、13 处确认文案）且为主驾自写，
+  建议烛独立复核：围栏是否覆盖全部 live 目标、确认文案与实际影响面是否一致。

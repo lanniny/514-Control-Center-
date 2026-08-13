@@ -1,23 +1,30 @@
 // 514cc Console 桌面壳（Tauri 2）
-// 架构（烛 R1 评审后重构）：单一 supervisor 线程独占内核 Child 全生命周期，
-// 所有状态转换（URL 就绪/窗口建成/内核死亡/关闭请求/启动超时）经 mpsc 事件在
-// supervisor 单线程内判定——消除检查-执行竞态；任何退出路径统一走 taskkill /T
-// 杀整棵进程树 + wait() 回收，堵孤儿 node 与僵尸进程。UI 全部由内核 Web 面板提供。
+// 架构（烛 R1 评审后重构）：单一 supervisor 线程独占内核 Child 全生命周期；
+// 窗口激活/取消由共享原子阶段协调，外部事件先发布取消意图再通知 supervisor。
+// 任何退出路径统一走 taskkill /T 杀整棵进程树 + wait() 回收，堵孤儿 node 与
+// 僵尸进程。UI 全部由内核 Web 面板提供。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+mod native;
 
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, TryLockError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use tauri::{AppHandle, RunEvent, Url, WebviewUrl, WebviewWindowBuilder};
+use tauri::{
+    webview::PageLoadEvent, AppHandle, Manager, RunEvent, Url, WebviewUrl, WebviewWindowBuilder,
+};
+use tauri_plugin_deep_link::DeepLinkExt;
 
 const KERNEL_PORT: u16 = 51400;
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+const WINDOW_READY_TIMEOUT: Duration = Duration::from_secs(15);
+const WINDOW_READY_DELIVERY_GRACE: Duration = Duration::from_secs(2);
 // 内核 stdout 握手行的固定前缀（apps/control-center/server.mjs 的启动横幅）。
 const URL_PREFIX: &str = "514cc Control Center: ";
 #[cfg(windows)]
@@ -26,8 +33,299 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 enum Event {
     UrlFound(Url),
     StdoutEof,
-    WindowBuilt(Result<(), String>),
+    WindowActivated(Result<(), String>),
     Shutdown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(u8)]
+enum WindowLaunchPhase {
+    Pending = 0,
+    Activating = 1,
+    Live = 2,
+    Cancelling = 3,
+    Cancelled = 4,
+}
+
+struct WindowLaunchState {
+    phase: AtomicU8,
+    cancellation_requested: AtomicBool,
+    activation_in_progress: AtomicBool,
+    visibility_epoch: AtomicU64,
+    rollback_epoch: AtomicU64,
+    visibility_gate: Mutex<()>,
+}
+
+impl WindowLaunchState {
+    fn new() -> Self {
+        Self {
+            phase: AtomicU8::new(WindowLaunchPhase::Pending as u8),
+            cancellation_requested: AtomicBool::new(false),
+            activation_in_progress: AtomicBool::new(false),
+            visibility_epoch: AtomicU64::new(0),
+            rollback_epoch: AtomicU64::new(u64::MAX),
+            visibility_gate: Mutex::new(()),
+        }
+    }
+}
+
+struct ActivationOwner<'a> {
+    state: &'a WindowLaunchState,
+    active: bool,
+}
+
+impl<'a> ActivationOwner<'a> {
+    fn new(state: &'a WindowLaunchState) -> Self {
+        state.activation_in_progress.store(true, Ordering::SeqCst);
+        Self {
+            state,
+            active: true,
+        }
+    }
+
+    fn release(&mut self) {
+        if self.active {
+            self.state
+                .activation_in_progress
+                .store(false, Ordering::SeqCst);
+            if window_phase(self.state) == WindowLaunchPhase::Cancelling
+                && rollback_covers_current_visibility(self.state)
+            {
+                set_window_phase(self.state, WindowLaunchPhase::Cancelled);
+            }
+            self.active = false;
+        }
+    }
+}
+
+impl Drop for ActivationOwner<'_> {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+fn window_phase(state: &WindowLaunchState) -> WindowLaunchPhase {
+    match state.phase.load(Ordering::SeqCst) {
+        value if value == WindowLaunchPhase::Pending as u8 => WindowLaunchPhase::Pending,
+        value if value == WindowLaunchPhase::Activating as u8 => WindowLaunchPhase::Activating,
+        value if value == WindowLaunchPhase::Live as u8 => WindowLaunchPhase::Live,
+        value if value == WindowLaunchPhase::Cancelling as u8 => WindowLaunchPhase::Cancelling,
+        _ => WindowLaunchPhase::Cancelled,
+    }
+}
+
+fn set_window_phase(state: &WindowLaunchState, phase: WindowLaunchPhase) {
+    state.phase.store(phase as u8, Ordering::SeqCst);
+}
+
+fn mark_window_cancelling(state: &WindowLaunchState) -> WindowLaunchPhase {
+    loop {
+        let current = window_phase(state);
+        if matches!(
+            current,
+            WindowLaunchPhase::Cancelling | WindowLaunchPhase::Cancelled
+        ) {
+            return current;
+        }
+        if state
+            .phase
+            .compare_exchange(
+                current as u8,
+                WindowLaunchPhase::Cancelling as u8,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            )
+            .is_ok()
+        {
+            return current;
+        }
+    }
+}
+
+fn rollback_covers_current_visibility(state: &WindowLaunchState) -> bool {
+    let epoch = state.visibility_epoch.load(Ordering::SeqCst);
+    epoch % 2 == 0 && state.rollback_epoch.load(Ordering::SeqCst) == epoch
+}
+
+fn dispatch_visibility_rollback<R>(state: &WindowLaunchState, rollback: R) -> Result<(), String>
+where
+    R: FnOnce() -> Result<(), String>,
+{
+    let before = state.visibility_epoch.load(Ordering::SeqCst);
+    let result = rollback();
+    if result.is_ok() {
+        let after = state.visibility_epoch.load(Ordering::SeqCst);
+        // 奇数 epoch 表示 show 尚未返回；跨 epoch 的 hide 也可能早于迟到 show，不能作凭证。
+        if before == after && after % 2 == 0 {
+            state.rollback_epoch.store(after, Ordering::SeqCst);
+        }
+    }
+    result
+}
+
+fn rollback_activation<R>(
+    state: &WindowLaunchState,
+    rollback: R,
+    activation_error: Option<String>,
+) -> Result<bool, String>
+where
+    R: FnOnce() -> Result<(), String>,
+{
+    set_window_phase(state, WindowLaunchPhase::Cancelling);
+    match dispatch_visibility_rollback(state, rollback) {
+        Ok(()) => {
+            set_window_phase(state, WindowLaunchPhase::Cancelled);
+            match activation_error {
+                Some(error) => Err(error),
+                None => Ok(false),
+            }
+        }
+        Err(rollback_error) => Err(match activation_error {
+            Some(error) => format!(
+                "{error}; window rollback after activation failure also failed: {rollback_error}"
+            ),
+            None => format!(
+                "window activation was cancelled but visibility rollback failed: {rollback_error}"
+            ),
+        }),
+    }
+}
+
+/// PageLoad 回调的唯一可见性提交点。show/verify 在可见性门内执行，释放门后再以
+/// CAS 提交 Live；取消可无等待地把 Activating 改为 Cancelling，使迟到提交必然失败。
+fn activate_window<S, V, R>(
+    state: &WindowLaunchState,
+    show: S,
+    verify: V,
+    rollback: R,
+) -> Result<bool, String>
+where
+    S: FnOnce() -> Result<(), String>,
+    V: FnOnce() -> Result<(), String>,
+    R: FnOnce() -> Result<(), String>,
+{
+    if window_phase(state) != WindowLaunchPhase::Pending
+        || state.cancellation_requested.load(Ordering::SeqCst)
+    {
+        return Ok(false);
+    }
+    let visibility = match state.visibility_gate.try_lock() {
+        Ok(visibility) => visibility,
+        Err(TryLockError::WouldBlock) => return Ok(false),
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+    };
+    if window_phase(state) != WindowLaunchPhase::Pending
+        || state.cancellation_requested.load(Ordering::SeqCst)
+    {
+        return Ok(false);
+    }
+    set_window_phase(state, WindowLaunchPhase::Activating);
+    let mut activation_owner = ActivationOwner::new(state);
+
+    if state.cancellation_requested.load(Ordering::SeqCst)
+        || window_phase(state) != WindowLaunchPhase::Activating
+    {
+        set_window_phase(state, WindowLaunchPhase::Cancelled);
+        return Ok(false);
+    }
+    state.visibility_epoch.fetch_add(1, Ordering::SeqCst);
+    let show_result = show();
+    state.visibility_epoch.fetch_add(1, Ordering::SeqCst);
+    if let Err(error) = show_result {
+        return rollback_activation(state, rollback, Some(error));
+    }
+    if state.cancellation_requested.load(Ordering::SeqCst)
+        || window_phase(state) != WindowLaunchPhase::Activating
+    {
+        return rollback_activation(state, rollback, None);
+    }
+    if let Err(error) = verify() {
+        return rollback_activation(state, rollback, Some(error));
+    }
+    if state.cancellation_requested.load(Ordering::SeqCst)
+        || window_phase(state) != WindowLaunchPhase::Activating
+    {
+        return rollback_activation(state, rollback, None);
+    }
+
+    // 先宣布不再可能执行 show，再放开门；无门 canceller 此后即可安全提交终态。
+    activation_owner.release();
+    drop(visibility);
+    if state
+        .phase
+        .compare_exchange(
+            WindowLaunchPhase::Activating as u8,
+            WindowLaunchPhase::Live as u8,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        )
+        .is_ok()
+    {
+        return Ok(true);
+    }
+
+    if window_phase(state) == WindowLaunchPhase::Cancelled {
+        return Ok(false);
+    }
+    let _visibility = match state.visibility_gate.try_lock() {
+        Ok(visibility) => visibility,
+        // 取消 owner 已持门执行 hide；由它提交 Cancelled，激活方不得等待。
+        Err(TryLockError::WouldBlock) => return Ok(false),
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+    };
+    if window_phase(state) == WindowLaunchPhase::Cancelled {
+        return Ok(false);
+    }
+    rollback_activation(state, rollback, None)
+}
+
+fn cancel_window_launch<R>(state: &WindowLaunchState, rollback: R) -> Result<bool, String>
+where
+    R: FnOnce() -> Result<(), String>,
+{
+    state.cancellation_requested.store(true, Ordering::SeqCst);
+    let visibility = match state.visibility_gate.try_lock() {
+        Ok(visibility) => Some(visibility),
+        Err(TryLockError::WouldBlock) => None,
+        Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+    };
+    let previous = mark_window_cancelling(state);
+    let changed = previous != WindowLaunchPhase::Cancelled;
+
+    match dispatch_visibility_rollback(state, rollback) {
+        Ok(()) => {
+            // 门可能由另一个 canceller 持有。只要已无激活 owner，任一成功派发 hide
+            // 的取消者都可提交终态；仍在激活时则由 owner 做最后一次回滚并提交。
+            if visibility.is_some() || !state.activation_in_progress.load(Ordering::SeqCst) {
+                set_window_phase(state, WindowLaunchPhase::Cancelled);
+            }
+            Ok(changed)
+        }
+        Err(error) => {
+            if changed {
+                Err(format!("window cancellation rollback failed: {error}"))
+            } else {
+                Err(format!("window cancellation retry failed: {error}"))
+            }
+        }
+    }
+}
+
+fn hide_main_window(app: &AppHandle) -> Result<(), String> {
+    match app.get_webview_window("main") {
+        Some(window) => window.hide().map_err(|error| error.to_string()),
+        None => Ok(()),
+    }
+}
+
+fn cancel_main_window(app: &AppHandle, state: &WindowLaunchState, context: &str) -> bool {
+    match cancel_window_launch(state, || hide_main_window(app)) {
+        Ok(changed) => changed,
+        Err(error) => {
+            eprintln!("{context}: {error}");
+            false
+        }
+    }
 }
 
 fn repo_root() -> PathBuf {
@@ -37,13 +335,82 @@ fn repo_root() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from(r"I:\514claude\514cc"))
 }
 
+/// 解析 node 可执行路径。桌面壳从快捷方式/资源管理器启动时，PATH 常不含 fnm/node，
+/// 仅写 `node` 会 spawn 失败并秒退——这是 LO 反馈「没看到启动」的主因之一。
+fn resolve_node_binary() -> PathBuf {
+    if let Ok(path) = std::env::var("CC_NODE") {
+        let candidate = PathBuf::from(path);
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    #[cfg(windows)]
+    {
+        if let Ok(output) = Command::new("where.exe").arg("node").output() {
+            if output.status.success() {
+                if let Some(line) = String::from_utf8_lossy(&output.stdout).lines().next() {
+                    let candidate = PathBuf::from(line.trim());
+                    if candidate.is_file() {
+                        return candidate;
+                    }
+                }
+            }
+        }
+        // 本机常见落点（LO 环境实测：Dprogress 全局 node；fnm 多壳路径不稳定）
+        for candidate in [
+            r"C:\Dprogress\nodejs\node.exe",
+            r"C:\Program Files\nodejs\node.exe",
+            r"C:\Program Files (x86)\nodejs\node.exe",
+        ] {
+            let path = PathBuf::from(candidate);
+            if path.is_file() {
+                return path;
+            }
+        }
+    }
+    PathBuf::from("node")
+}
+
+fn boot_log_path() -> PathBuf {
+    let dir = repo_root().join(".scratch").join("desktop-launch");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("desktop-boot.log")
+}
+
+fn boot_log(message: &str) {
+    use std::io::Write;
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let text = format!("[{stamp}] {message}\n");
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(boot_log_path())
+    {
+        let _ = file.write_all(text.as_bytes());
+    }
+    eprintln!("{message}");
+}
+
 fn spawn_kernel() -> std::io::Result<Child> {
     let cc_dir = repo_root().join("apps").join("control-center");
-    let mut cmd = Command::new("node");
-    cmd.arg(cc_dir.join("server.mjs"))
+    let node = resolve_node_binary();
+    boot_log(&format!(
+        "spawn_kernel node={} cwd={}",
+        node.display(),
+        cc_dir.display()
+    ));
+    // 与 package.json `npm start` 对齐：Node 22 需 --experimental-sqlite（sessions 读 Cursor 等源）
+    let mut cmd = Command::new(&node);
+    cmd.arg("--experimental-sqlite")
+        .arg(cc_dir.join("server.mjs"))
         .current_dir(&cc_dir)
         .env("CONTROL_CENTER_PORT", KERNEL_PORT.to_string())
+        .env("CC_ROOT", repo_root())
         .stdout(Stdio::piped())
+        // stderr 仍 null：piped 却不读会在缓冲满后卡死子进程；启动失败靠 spawn Err + stdout 握手超时诊断
         .stderr(Stdio::null());
     #[cfg(windows)]
     {
@@ -53,7 +420,8 @@ fn spawn_kernel() -> std::io::Result<Child> {
     cmd.spawn()
 }
 
-/// 严格解析握手行：固定前缀 + http + 127.0.0.1 + 内核端口 + 非空 token 片段。
+/// 严格解析握手行：固定前缀 + http + 127.0.0.1 + 内核端口 + 非空认证片段。
+/// 当前内核使用单次 bootstrap nonce；保留 token 兼容，避免旧内核无法被新版壳启动。
 /// 尾随文本按空白截断，不把整行交给 URL 解析器。
 fn parse_kernel_url(line: &str) -> Option<Url> {
     let rest = line.strip_prefix(URL_PREFIX)?;
@@ -62,10 +430,466 @@ fn parse_kernel_url(line: &str) -> Option<Url> {
     let valid = url.scheme() == "http"
         && url.host_str() == Some("127.0.0.1")
         && url.port() == Some(KERNEL_PORT)
-        && url
-            .fragment()
-            .is_some_and(|f| f.starts_with("token=") && f.len() > "token=".len());
+        && url.fragment().is_some_and(|fragment| {
+            ["bootstrap=", "token="].iter().any(|prefix| {
+                fragment
+                    .strip_prefix(prefix)
+                    .is_some_and(|value| !value.is_empty())
+            })
+        });
     valid.then_some(url)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{mpsc, Arc, Barrier};
+    use std::time::Duration;
+
+    use super::{
+        activate_window, cancel_window_launch, parse_kernel_url, window_phase, WindowLaunchPhase,
+        WindowLaunchState,
+    };
+
+    #[test]
+    fn accepts_current_bootstrap_and_legacy_token_urls() {
+        assert!(parse_kernel_url(
+            "514cc Control Center: http://127.0.0.1:51400/#bootstrap=single-use-nonce"
+        )
+        .is_some());
+        assert!(parse_kernel_url(
+            "514cc Control Center: http://127.0.0.1:51400/#token=legacy-bearer"
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn rejects_empty_or_untrusted_handshake_urls() {
+        for line in [
+            "514cc Control Center: http://127.0.0.1:51400/#bootstrap=",
+            "514cc Control Center: http://127.0.0.1:51400/#token=",
+            "514cc Control Center: http://127.0.0.1:51400/#other=value",
+            "514cc Control Center: http://127.0.0.1/#bootstrap=nonce",
+            "514cc Control Center: http://localhost:51400/#bootstrap=nonce",
+            "514cc Control Center: http://127.0.0.1:51401/#bootstrap=nonce",
+            "514cc Control Center: http://127.0.0.1:51400@evil.example/#bootstrap=nonce",
+            "514cc Control Center: https://127.0.0.1:51400/#bootstrap=nonce",
+            "prefix 514cc Control Center: http://127.0.0.1:51400/#bootstrap=nonce",
+        ] {
+            assert!(
+                parse_kernel_url(line).is_none(),
+                "unexpectedly accepted {line}"
+            );
+        }
+    }
+
+    #[test]
+    fn cancelled_window_launch_rejects_late_readiness() {
+        let state = WindowLaunchState::new();
+        let visibility_calls = AtomicUsize::new(0);
+
+        assert_eq!(cancel_window_launch(&state, || Ok(())), Ok(true));
+        assert_eq!(
+            activate_window(
+                &state,
+                || {
+                    visibility_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+                || Ok(()),
+                || Ok(()),
+            ),
+            Ok(false)
+        );
+        assert_eq!(visibility_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(window_phase(&state), WindowLaunchPhase::Cancelled);
+    }
+
+    #[test]
+    fn readiness_claim_has_one_owner_and_runs_visibility_once() {
+        let state = WindowLaunchState::new();
+        let visibility_calls = AtomicUsize::new(0);
+        assert_eq!(
+            activate_window(
+                &state,
+                || {
+                    visibility_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+                || Ok(()),
+                || Ok(())
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            activate_window(
+                &state,
+                || {
+                    visibility_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+                || Ok(()),
+                || Ok(())
+            ),
+            Ok(false)
+        );
+        assert_eq!(visibility_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(window_phase(&state), WindowLaunchPhase::Live);
+    }
+
+    #[test]
+    fn failed_visibility_verification_rolls_back_and_cancels_launch() {
+        let state = WindowLaunchState::new();
+        let visible = AtomicBool::new(false);
+        let rollback_calls = AtomicUsize::new(0);
+
+        assert_eq!(
+            activate_window(
+                &state,
+                || {
+                    visible.store(true, Ordering::SeqCst);
+                    Ok(())
+                },
+                || Err("visibility verification failed".into()),
+                || {
+                    rollback_calls.fetch_add(1, Ordering::SeqCst);
+                    visible.store(false, Ordering::SeqCst);
+                    Ok(())
+                }
+            ),
+            Err("visibility verification failed".into())
+        );
+        assert!(!visible.load(Ordering::SeqCst));
+        assert_eq!(rollback_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(window_phase(&state), WindowLaunchPhase::Cancelled);
+    }
+
+    #[test]
+    fn cancellation_after_activation_claim_cannot_leave_a_late_show_visible() {
+        let state = Arc::new(WindowLaunchState::new());
+        let show_entered = Arc::new(Barrier::new(2));
+        let release_show = Arc::new(Barrier::new(2));
+        let visible = Arc::new(AtomicBool::new(false));
+        let rollback_calls = Arc::new(AtomicUsize::new(0));
+
+        let state_for_worker = state.clone();
+        let entered_for_worker = show_entered.clone();
+        let release_for_worker = release_show.clone();
+        let visible_for_worker = visible.clone();
+        let rollback_for_worker = rollback_calls.clone();
+        let worker = std::thread::spawn(move || {
+            activate_window(
+                &state_for_worker,
+                || {
+                    entered_for_worker.wait();
+                    release_for_worker.wait();
+                    visible_for_worker.store(true, Ordering::SeqCst);
+                    Ok(())
+                },
+                || Ok(()),
+                || {
+                    rollback_for_worker.fetch_add(1, Ordering::SeqCst);
+                    visible_for_worker.store(false, Ordering::SeqCst);
+                    Ok(())
+                },
+            )
+        });
+
+        show_entered.wait();
+        assert_eq!(window_phase(&state), WindowLaunchPhase::Activating);
+        let state_for_cancel = state.clone();
+        let visible_for_cancel = visible.clone();
+        let canceller = std::thread::spawn(move || {
+            cancel_window_launch(&state_for_cancel, || {
+                visible_for_cancel.store(false, Ordering::SeqCst);
+                Ok(())
+            })
+        });
+        while !state.cancellation_requested.load(Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
+        release_show.wait();
+
+        assert_eq!(
+            worker.join().expect("activation worker panicked"),
+            Ok(false)
+        );
+        assert!(matches!(
+            canceller.join().expect("cancellation worker panicked"),
+            Ok(false) | Ok(true)
+        ));
+        assert!(!visible.load(Ordering::SeqCst));
+        assert_eq!(rollback_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(window_phase(&state), WindowLaunchPhase::Cancelled);
+    }
+
+    #[test]
+    fn cancellation_does_not_wait_for_activation_visibility_gate() {
+        let state = Arc::new(WindowLaunchState::new());
+        let show_entered = Arc::new(Barrier::new(2));
+        let release_show = Arc::new(Barrier::new(2));
+        let rollback_calls = Arc::new(AtomicUsize::new(0));
+
+        let state_for_activation = state.clone();
+        let entered_for_activation = show_entered.clone();
+        let release_for_activation = release_show.clone();
+        let rollback_for_activation = rollback_calls.clone();
+        let activation = std::thread::spawn(move || {
+            activate_window(
+                &state_for_activation,
+                || {
+                    entered_for_activation.wait();
+                    release_for_activation.wait();
+                    Ok(())
+                },
+                || Ok(()),
+                || {
+                    rollback_for_activation.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+            )
+        });
+
+        show_entered.wait();
+        let (done_tx, done_rx) = mpsc::channel();
+        let state_for_cancel = state.clone();
+        let rollback_for_cancel = rollback_calls.clone();
+        let canceller = std::thread::spawn(move || {
+            let result = cancel_window_launch(&state_for_cancel, || {
+                rollback_for_cancel.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            });
+            let _ = done_tx.send(result.clone());
+            result
+        });
+
+        assert!(done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("cancellation blocked on the activation visibility gate")
+            .is_ok());
+        assert_eq!(window_phase(&state), WindowLaunchPhase::Cancelling);
+        release_show.wait();
+
+        assert_eq!(
+            activation.join().expect("activation worker panicked"),
+            Ok(false)
+        );
+        assert!(canceller
+            .join()
+            .expect("cancellation worker panicked")
+            .is_ok());
+        assert_eq!(rollback_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(window_phase(&state), WindowLaunchPhase::Cancelled);
+    }
+
+    #[test]
+    fn successful_concurrent_canceller_finalizes_after_other_hide_fails() {
+        let state = Arc::new(WindowLaunchState::new());
+        assert_eq!(
+            activate_window(&state, || Ok(()), || Ok(()), || Ok(())),
+            Ok(true)
+        );
+
+        let first_hide_entered = Arc::new(Barrier::new(2));
+        let release_first_hide = Arc::new(Barrier::new(2));
+        let state_for_first = state.clone();
+        let entered_for_first = first_hide_entered.clone();
+        let release_for_first = release_first_hide.clone();
+        let first = std::thread::spawn(move || {
+            cancel_window_launch(&state_for_first, || {
+                entered_for_first.wait();
+                release_for_first.wait();
+                Err("first hide failed".into())
+            })
+        });
+
+        first_hide_entered.wait();
+        assert_eq!(window_phase(&state), WindowLaunchPhase::Cancelling);
+        assert_eq!(cancel_window_launch(&state, || Ok(())), Ok(true));
+        assert_eq!(window_phase(&state), WindowLaunchPhase::Cancelled);
+
+        release_first_hide.wait();
+        assert!(first
+            .join()
+            .expect("first cancellation worker panicked")
+            .is_err());
+        assert_eq!(window_phase(&state), WindowLaunchPhase::Cancelled);
+    }
+
+    #[test]
+    fn successful_canceller_handoff_survives_activation_rollback_failure() {
+        let state = Arc::new(WindowLaunchState::new());
+        let owner_hide_entered = Arc::new(Barrier::new(2));
+        let release_owner_hide = Arc::new(Barrier::new(2));
+
+        let state_for_activation = state.clone();
+        let entered_for_activation = owner_hide_entered.clone();
+        let release_for_activation = release_owner_hide.clone();
+        let activation = std::thread::spawn(move || {
+            activate_window(
+                &state_for_activation,
+                || Ok(()),
+                || Err("visibility verification failed".into()),
+                || {
+                    entered_for_activation.wait();
+                    release_for_activation.wait();
+                    Err("activation owner hide failed".into())
+                },
+            )
+        });
+
+        owner_hide_entered.wait();
+        assert_eq!(window_phase(&state), WindowLaunchPhase::Cancelling);
+        assert_eq!(cancel_window_launch(&state, || Ok(())), Ok(true));
+        assert_eq!(window_phase(&state), WindowLaunchPhase::Cancelling);
+
+        release_owner_hide.wait();
+        assert!(activation
+            .join()
+            .expect("activation worker panicked")
+            .is_err());
+        assert_eq!(window_phase(&state), WindowLaunchPhase::Cancelled);
+    }
+
+    #[test]
+    fn hide_during_show_cannot_finalize_after_late_show_and_failed_owner_hide() {
+        let state = Arc::new(WindowLaunchState::new());
+        let show_entered = Arc::new(Barrier::new(2));
+        let release_show = Arc::new(Barrier::new(2));
+
+        let state_for_activation = state.clone();
+        let entered_for_activation = show_entered.clone();
+        let release_for_activation = release_show.clone();
+        let activation = std::thread::spawn(move || {
+            activate_window(
+                &state_for_activation,
+                || {
+                    entered_for_activation.wait();
+                    release_for_activation.wait();
+                    Ok(())
+                },
+                || Ok(()),
+                || Err("activation owner hide failed".into()),
+            )
+        });
+
+        show_entered.wait();
+        assert_eq!(cancel_window_launch(&state, || Ok(())), Ok(true));
+        release_show.wait();
+        assert!(activation
+            .join()
+            .expect("activation worker panicked")
+            .is_err());
+        assert_eq!(window_phase(&state), WindowLaunchPhase::Cancelling);
+
+        assert_eq!(cancel_window_launch(&state, || Ok(())), Ok(true));
+        assert_eq!(window_phase(&state), WindowLaunchPhase::Cancelled);
+    }
+
+    #[test]
+    fn cancellation_after_show_before_live_rolls_visibility_back() {
+        let state = Arc::new(WindowLaunchState::new());
+        let verification_entered = Arc::new(Barrier::new(2));
+        let release_verification = Arc::new(Barrier::new(2));
+        let visible = Arc::new(AtomicBool::new(false));
+
+        let state_for_worker = state.clone();
+        let entered_for_worker = verification_entered.clone();
+        let release_for_worker = release_verification.clone();
+        let visible_for_worker = visible.clone();
+        let worker = std::thread::spawn(move || {
+            activate_window(
+                &state_for_worker,
+                || {
+                    visible_for_worker.store(true, Ordering::SeqCst);
+                    Ok(())
+                },
+                || {
+                    entered_for_worker.wait();
+                    release_for_worker.wait();
+                    Ok(())
+                },
+                || {
+                    visible_for_worker.store(false, Ordering::SeqCst);
+                    Ok(())
+                },
+            )
+        });
+
+        verification_entered.wait();
+        assert!(visible.load(Ordering::SeqCst));
+        let state_for_cancel = state.clone();
+        let visible_for_cancel = visible.clone();
+        let canceller = std::thread::spawn(move || {
+            cancel_window_launch(&state_for_cancel, || {
+                visible_for_cancel.store(false, Ordering::SeqCst);
+                Ok(())
+            })
+        });
+        while !state.cancellation_requested.load(Ordering::SeqCst) {
+            std::thread::yield_now();
+        }
+        release_verification.wait();
+
+        assert_eq!(
+            worker.join().expect("activation worker panicked"),
+            Ok(false)
+        );
+        assert!(canceller
+            .join()
+            .expect("cancellation worker panicked")
+            .is_ok());
+        assert!(!visible.load(Ordering::SeqCst));
+        assert_eq!(window_phase(&state), WindowLaunchPhase::Cancelled);
+    }
+
+    #[test]
+    fn cancellation_after_live_before_receipt_hides_the_window() {
+        let state = WindowLaunchState::new();
+        let visible = AtomicBool::new(false);
+
+        assert_eq!(
+            activate_window(
+                &state,
+                || {
+                    visible.store(true, Ordering::SeqCst);
+                    Ok(())
+                },
+                || Ok(()),
+                || {
+                    visible.store(false, Ordering::SeqCst);
+                    Ok(())
+                },
+            ),
+            Ok(true)
+        );
+        assert_eq!(window_phase(&state), WindowLaunchPhase::Live);
+        assert_eq!(
+            cancel_window_launch(&state, || {
+                visible.store(false, Ordering::SeqCst);
+                Ok(())
+            }),
+            Ok(true)
+        );
+        assert!(!visible.load(Ordering::SeqCst));
+        assert_eq!(window_phase(&state), WindowLaunchPhase::Cancelled);
+    }
+
+    #[test]
+    fn failed_hide_stays_cancelling_until_a_retry_succeeds() {
+        let state = WindowLaunchState::new();
+
+        assert!(activate_window(
+            &state,
+            || Ok(()),
+            || Err("hwnd failed".into()),
+            || Err("hide failed".into()),
+        )
+        .is_err());
+        assert_eq!(window_phase(&state), WindowLaunchPhase::Cancelling);
+        assert_eq!(cancel_window_launch(&state, || Ok(())), Ok(true));
+        assert_eq!(window_phase(&state), WindowLaunchPhase::Cancelled);
+    }
 }
 
 /// 有界回收：try_wait 轮询 + 硬截止。true = 已回收。
@@ -132,11 +956,17 @@ fn supervisor(
     tx: Sender<Event>,
     rx: Receiver<Event>,
     exit_requested: Arc<AtomicBool>,
+    window_launch_state: Arc<WindowLaunchState>,
 ) {
     let mut child = match spawn_kernel() {
-        Ok(c) => c,
+        Ok(c) => {
+            boot_log("kernel process spawned");
+            c
+        }
         Err(e) => {
-            eprintln!("514cc kernel spawn failed: {e}. Check node on PATH and CC_ROOT.");
+            boot_log(&format!(
+                "kernel spawn failed: {e}. Check node on PATH / CC_NODE / CC_ROOT."
+            ));
             app.exit(1);
             return;
         }
@@ -147,23 +977,51 @@ fn supervisor(
     match child.stdout.take() {
         Some(stdout) => {
             let tx_reader = tx.clone();
-            std::thread::spawn(move || {
-                let mut url_sent = false;
-                for line in BufReader::new(stdout).lines() {
-                    let Ok(line) = line else { break };
-                    if !url_sent {
-                        if let Some(url) = parse_kernel_url(&line) {
-                            url_sent = true;
-                            if tx_reader.send(Event::UrlFound(url)).is_err() {
-                                return;
+            let state_for_reader = window_launch_state.clone();
+            let app_for_reader = app.clone();
+            let reader = std::thread::Builder::new()
+                .name("514cc-kernel-stdout".into())
+                .spawn(move || {
+                    let mut url_sent = false;
+                    for line in BufReader::new(stdout).lines() {
+                        let Ok(line) = line else { break };
+                        if !url_sent {
+                            if let Some(url) = parse_kernel_url(&line) {
+                                url_sent = true;
+                                boot_log(&format!("kernel URL ready: {url}"));
+                                if tx_reader.send(Event::UrlFound(url)).is_err() {
+                                    return;
+                                }
+                            } else if line.contains("514cc Control Center:") {
+                                boot_log(&format!("kernel banner rejected by URL parser: {line}"));
                             }
                         }
                     }
-                }
-                let _ = tx_reader.send(Event::StdoutEof);
-            });
+                    cancel_main_window(
+                        &app_for_reader,
+                        &state_for_reader,
+                        "failed to hide main window after kernel stdout EOF",
+                    );
+                    let _ = tx_reader.send(Event::StdoutEof);
+                });
+            if let Err(error) = reader {
+                cancel_main_window(
+                    &app,
+                    &window_launch_state,
+                    "failed to hide main window after stdout reader spawn failure",
+                );
+                eprintln!("failed to spawn kernel stdout reader thread: {error}");
+                kill_kernel_tree(&mut child);
+                app.exit(1);
+                return;
+            }
         }
         None => {
+            cancel_main_window(
+                &app,
+                &window_launch_state,
+                "failed to hide main window after missing kernel stdout",
+            );
             kill_kernel_tree(&mut child);
             app.exit(1);
             return;
@@ -173,6 +1031,7 @@ fn supervisor(
     let mut deadline = Instant::now() + STARTUP_TIMEOUT;
     let mut window_up = false;
     let mut clean_shutdown = false;
+    let mut ready_delivery_grace_used = false;
 
     loop {
         let timeout = if window_up {
@@ -183,37 +1042,147 @@ fn supervisor(
         match rx.recv_timeout(timeout) {
             Ok(Event::UrlFound(url)) => {
                 // 给窗口构建留出独立预算，消除"URL 已到却被启动超时误杀"的边界
-                deadline = Instant::now() + Duration::from_secs(15);
+                deadline = Instant::now() + WINDOW_READY_TIMEOUT;
+                ready_delivery_grace_used = false;
                 let tx_win = tx.clone();
                 let app_win = app.clone();
-                let dispatched = app.run_on_main_thread(move || {
-                    // Windows 上 Webview 窗口必须在主线程创建；结果回传 supervisor
-                    let built = WebviewWindowBuilder::new(
-                        &app_win,
-                        "main",
-                        WebviewUrl::External(url),
-                    )
-                    .title("514cc Console")
-                    .inner_size(1440.0, 920.0)
-                    .min_inner_size(960.0, 640.0)
-                    .build()
-                    .map(|_| ())
-                    .map_err(|e| e.to_string());
-                    let _ = tx_win.send(Event::WindowBuilt(built));
-                });
-                if dispatched.is_err() {
-                    eprintln!("failed to dispatch window creation to main thread");
+                let state_for_builder = window_launch_state.clone();
+                // Tauri 2 / WebView2：builder 在独立线程，结果回传 supervisor。
+                // 关键修复（LO 反馈任务栏闪一下就没了）：不要只等 PageLoadEvent::Finished。
+                // 外部 URL + 单次 bootstrap 时 Finished 可能迟迟不来，15s 看门狗会杀进程，
+                // 用户只看到任务栏闪一下。build 成功后立刻 show + 报告 Live。
+                let spawned = std::thread::Builder::new()
+                    .name("514cc-window-builder".into())
+                    .spawn(move || {
+                        let tx_ready = tx_win.clone();
+                        let state_for_ready = state_for_builder.clone();
+                        let built = WebviewWindowBuilder::new(
+                            &app_win,
+                            "main",
+                            WebviewUrl::External(url),
+                        )
+                        .title("514 Forge · Control Center")
+                        .inner_size(1440.0, 920.0)
+                        .min_inner_size(960.0, 640.0)
+                        .visible(true)
+                        .focused(true)
+                        .on_page_load(move |window, payload| {
+                            // 页面完成后补一次前置/焦点；不作为唯一就绪条件
+                            if payload.event() != PageLoadEvent::Finished {
+                                return;
+                            }
+                            if let Err(error) = native::flush_pending_deep_links(&window) {
+                                eprintln!("failed to flush native deep links after page load: {error}");
+                            }
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                            #[cfg(windows)]
+                            if let Ok(hwnd) = window.hwnd() {
+                                eprintln!("console page finished: hwnd={hwnd:?}");
+                            }
+                        })
+                        .build();
+
+                        match built {
+                            Ok(window) => {
+                                let activation = activate_window(
+                                    &state_for_ready,
+                                    || {
+                                        window.show().map_err(|error| error.to_string())?;
+                                        let _ = window.unminimize();
+                                        let _ = window.set_focus();
+                                        Ok(())
+                                    },
+                                    || {
+                                        // 可见性：show 成功即够；is_visible 在部分 WebView2 时机会假阴性
+                                        #[cfg(windows)]
+                                        {
+                                            let hwnd =
+                                                window.hwnd().map_err(|error| error.to_string())?;
+                                            eprintln!(
+                                                "console window activated: hwnd={hwnd:?}"
+                                            );
+                                        }
+                                        Ok(())
+                                    },
+                                    || window.hide().map_err(|error| error.to_string()),
+                                );
+                                let activation_event = match activation {
+                                    Ok(true) => Ok(()),
+                                    Ok(false) => {
+                                        // 取消已获胜：仍报告失败以免 supervisor 空等
+                                        Err("window activation cancelled".to_string())
+                                    }
+                                    Err(error) => Err(error),
+                                };
+                                let was_live = activation_event.is_ok();
+                                if was_live {
+                                    if let Err(error) = native::flush_pending_deep_links(&window) {
+                                        eprintln!(
+                                            "native deep links remain queued after activation: {error}"
+                                        );
+                                    }
+                                }
+                                if tx_ready
+                                    .send(Event::WindowActivated(activation_event))
+                                    .is_err()
+                                    && was_live
+                                {
+                                    if let Err(error) = cancel_window_launch(
+                                        &state_for_ready,
+                                        || window.hide().map_err(|error| error.to_string()),
+                                    ) {
+                                        eprintln!(
+                                            "failed to cancel activated window after supervisor exit: {error}"
+                                        );
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                if cancel_main_window(
+                                    &app_win,
+                                    &state_for_builder,
+                                    "failed to hide main window after builder failure",
+                                ) {
+                                    let _ = tx_win
+                                        .send(Event::WindowActivated(Err(error.to_string())));
+                                }
+                            }
+                        }
+                    });
+                if let Err(error) = spawned {
+                    cancel_main_window(
+                        &app,
+                        &window_launch_state,
+                        "failed to hide main window after builder thread spawn failure",
+                    );
+                    eprintln!("failed to spawn window builder thread: {error}");
                     break;
                 }
             }
-            Ok(Event::WindowBuilt(Ok(()))) => {
-                window_up = true;
+            Ok(Event::WindowActivated(Ok(()))) => {
+                if window_phase(&window_launch_state) == WindowLaunchPhase::Live {
+                    window_up = true;
+                } else {
+                    // EOF/ExitRequested 可在回执入队前覆盖 Live；对应事件仍会随后到达。
+                    eprintln!("console window activation was superseded by cancellation");
+                }
             }
-            Ok(Event::WindowBuilt(Err(e))) => {
-                eprintln!("console window build failed: {e}");
+            Ok(Event::WindowActivated(Err(error))) => {
+                cancel_main_window(
+                    &app,
+                    &window_launch_state,
+                    "failed to hide main window after activation error",
+                );
+                eprintln!("console window activation failed: {error}");
                 break;
             }
             Ok(Event::StdoutEof) => {
+                cancel_main_window(
+                    &app,
+                    &window_launch_state,
+                    "failed to retry main window hide after stdout EOF",
+                );
                 // 关窗与内核死亡可能竞速到达（烛 R2/R3）：先查共享退出意图（ExitRequested
                 // 阶段已置位，早于 Shutdown 消息入队），再 drain 通道兜已入队的 Shutdown
                 if exit_requested.load(Ordering::SeqCst) {
@@ -230,14 +1199,35 @@ fn supervisor(
                 break;
             }
             Ok(Event::Shutdown) => {
+                cancel_main_window(
+                    &app,
+                    &window_launch_state,
+                    "failed to hide main window during shutdown",
+                );
                 clean_shutdown = true;
                 break;
             }
             Err(RecvTimeoutError::Timeout) => {
                 if !window_up {
-                    eprintln!(
-                        "514cc kernel did not become ready within the startup budget; giving up."
+                    let phase = window_phase(&window_launch_state);
+                    if phase == WindowLaunchPhase::Live && !ready_delivery_grace_used {
+                        ready_delivery_grace_used = true;
+                        deadline = Instant::now() + WINDOW_READY_DELIVERY_GRACE;
+                        continue;
+                    }
+
+                    cancel_main_window(
+                        &app,
+                        &window_launch_state,
+                        "failed to hide main window after readiness timeout",
                     );
+                    if phase == WindowLaunchPhase::Pending {
+                        eprintln!(
+                            "514cc kernel/window did not become ready within the startup budget; giving up."
+                        );
+                        break;
+                    }
+                    eprintln!("console window readiness did not reach the supervisor in time");
                     break;
                 }
                 // window_up 时的 Timeout 只是长轮询到期，继续等事件
@@ -246,6 +1236,11 @@ fn supervisor(
         }
     }
 
+    cancel_main_window(
+        &app,
+        &window_launch_state,
+        "failed to hide main window during supervisor cleanup",
+    );
     kill_kernel_tree(&mut child);
     if !clean_shutdown {
         // 异常路径（启动失败/窗口失败/内核崩溃）：结束应用；正常关窗路径 app 已在退出中
@@ -258,14 +1253,86 @@ fn main() {
     let rx_slot: Arc<Mutex<Option<Receiver<Event>>>> = Arc::new(Mutex::new(Some(rx)));
     let sup_handle: Arc<Mutex<Option<JoinHandle<()>>>> = Arc::new(Mutex::new(None));
     let exit_requested = Arc::new(AtomicBool::new(false));
+    let window_launch_state = Arc::new(WindowLaunchState::new());
 
     let tx_setup = tx.clone();
     let rx_for_setup = rx_slot.clone();
     let handle_for_setup = sup_handle.clone();
     let exit_flag_setup = exit_requested.clone();
+    let state_for_setup = window_launch_state.clone();
 
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
+        .manage(native::NativeState::default())
+        .plugin(tauri_plugin_deep_link::init())
+        .invoke_handler(tauri::generate_handler![
+            native::get_native_capabilities,
+            native::get_auto_launch_status,
+            native::set_auto_launch,
+            native::restart_app,
+            native::is_portable_mode,
+            native::copy_text_to_clipboard,
+            native::set_window_theme,
+            native::update_tray_menu,
+            native::enter_lightweight_mode,
+            native::exit_lightweight_mode,
+            native::is_lightweight_mode,
+        ])
+        .on_window_event(|window, event| {
+            if window.label() != "main" {
+                return;
+            }
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                if let Err(error) = native::hide_forge_window(window.app_handle()) {
+                    eprintln!("failed to hide Forge on close request: {error}");
+                }
+            }
+        });
+
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+        let mut found_deep_link = false;
+        for arg in &args {
+            if native::accept_deep_link(app, arg, "single-instance callback") {
+                found_deep_link = true;
+            }
+        }
+        if !found_deep_link {
+            if let Err(error) = native::show_forge_window(app) {
+                eprintln!("failed to focus existing Forge instance: {error}");
+            }
+        }
+    }));
+
+    builder
         .setup(move |app| {
+            native::install_tray(app.handle()).map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("failed to install native tray: {error}"),
+                )
+            })?;
+
+            app.deep_link().on_open_url({
+                let handle = app.handle().clone();
+                move |event| {
+                    for url in event.urls() {
+                        if native::accept_deep_link(&handle, url.as_str(), "deep-link plugin") {
+                            break;
+                        }
+                    }
+                }
+            });
+
+            // Initial Windows/Linux protocol activation arrives as an argument. We only
+            // receive here; protocol registration is installer-owned and setup never
+            // calls register_all(), so running tests/builds cannot touch the registry.
+            for arg in std::env::args().skip(1) {
+                if native::accept_deep_link(app.handle(), &arg, "initial process args") {
+                    break;
+                }
+            }
+
             let handle = app.handle().clone();
             let rx = rx_for_setup
                 .lock()
@@ -274,7 +1341,8 @@ fn main() {
                 .expect("supervisor receiver already taken");
             let tx_sup = tx_setup.clone();
             let flag = exit_flag_setup.clone();
-            let join = std::thread::spawn(move || supervisor(handle, tx_sup, rx, flag));
+            let state = state_for_setup.clone();
+            let join = std::thread::spawn(move || supervisor(handle, tx_sup, rx, flag, state));
             *handle_for_setup
                 .lock()
                 .expect("supervisor handle lock poisoned at setup") = Some(join);
@@ -282,14 +1350,24 @@ fn main() {
         })
         .build(tauri::generate_context!())
         .expect("failed to build tauri app")
-        .run(move |_app, event| match event {
+        .run(move |app, event| match event {
             RunEvent::ExitRequested { .. } => {
-                // 最后一个窗口关闭即置位退出意图——早于 Exit 的 Shutdown 消息（烛 R3）
+                // 事件源先发布取消，激活回调若仍在 show/验证阶段会同步 hide 回滚。
                 exit_requested.store(true, Ordering::SeqCst);
+                cancel_main_window(
+                    app,
+                    &window_launch_state,
+                    "failed to hide main window on ExitRequested",
+                );
                 let _ = tx.send(Event::Shutdown);
             }
             RunEvent::Exit => {
                 exit_requested.store(true, Ordering::SeqCst);
+                cancel_main_window(
+                    app,
+                    &window_launch_state,
+                    "failed to hide main window on Exit",
+                );
                 let _ = tx.send(Event::Shutdown);
                 // 独立作用域 take，避免持锁 join
                 let join = sup_handle.lock().ok().and_then(|mut slot| slot.take());

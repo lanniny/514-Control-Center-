@@ -1,0 +1,7 @@
+{
+  "agents": {
+    "grok-build": {
+      "disabledSkills": []
+    }
+  }
+}

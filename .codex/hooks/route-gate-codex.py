@@ -51,7 +51,7 @@ def strip_noise(text: str) -> str:
     return "\n".join(line for line in text.splitlines() if not MCP_NOISE.search(line))
 
 
-def main() -> int:
+def _main() -> int:
     try:
         data = json.load(sys.stdin)
     except Exception:
@@ -59,8 +59,14 @@ def main() -> int:
     if not isinstance(data, dict):
         data = {}
 
-    cwd = str(data.get("cwd") or os.getcwd())
-    prompt = str(data.get("prompt") or data.get("user_prompt") or data.get("input") or "")
+    cwd_value = data.get("cwd") or os.getcwd()
+    cwd = cwd_value if isinstance(cwd_value, str) else ""
+    prompt_value = data.get("prompt") or data.get("user_prompt") or data.get("input") or ""
+    prompt = prompt_value if isinstance(prompt_value, str) else ""
+    session_value = data.get("session_id") or data.get("session")
+    session_id = session_value.strip() if isinstance(session_value, str) else ""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}", session_id):
+        session_id = ""
     if WORKSPACE_ANCHOR not in cwd.replace("\\", "/").lower():
         return 0
 
@@ -81,20 +87,34 @@ def main() -> int:
             reason = ",".join(tags + (["uc"] if uc_hit else []) + (["div"] if div_hit else [])) or "-"
             one_line = prompt.replace("\r", " ").replace("\n", " ")[:100]
             with open(aishared / "route-gate.codex.log", "a", encoding="utf-8") as fp:
-                fp.write(f"{ts}\t{flag}\t{reason}\t?\t{one_line}\n")
+                fp.write(f"{ts}\t{flag}\t{reason}\tunknown\t{one_line}\n")
     except Exception:
         pass
 
-    if tags or div_hit or uc_hit:
-        msg = "514cc route gate: "
+    route_hit = bool(tags or div_hit or uc_hit)
+    if route_hit or session_id:
+        msg = "514cc route gate: " if route_hit else "514cc handoff context: "
         if tags:
             msg += "RED=" + ",".join(tags) + "; "
         if uc_hit:
             msg += "UC=Codex Ultracode: xhigh + bounded dynamic workflow; "
         if div_hit:
             msg += "DIV=先发散2-3个互斥角度再收敛; "
+        if session_id:
+            msg += (
+                f"handoff marker=<!-- 514cc-session-id: {session_id} -->; "
+                "DELTA example=__DELTA__: 烛(Codex) | 1 | 证据：file:line 说明新增发现; "
+                "choose one numeric score from 0, 1, or 2; "
+            )
         print(msg.strip())
     return 0
+
+
+def main() -> int:
+    try:
+        return _main()
+    except Exception:
+        return 0
 
 
 if __name__ == "__main__":

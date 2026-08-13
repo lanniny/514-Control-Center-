@@ -1,10 +1,267 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
-import { isAbsolute, join } from "node:path";
+import { execFile } from "node:child_process";
+import { mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { basename, isAbsolute, join, resolve } from "node:path";
+import { promisify } from "node:util";
+import { BusStore, parseDirectives } from "./bus.mjs";
 import { findSecretCandidates, sanitizeForPersistence } from "./redaction.mjs";
+import { ADAPTER_TEMPLATES } from "./adapters/manifest.mjs";
+import { createRemoteAdapter } from "./adapters/index.mjs";
+import { attestRunWorkspace } from "./run-workspace.mjs";
+import { normalizeRunSources, promptWithRunSources } from "./run-sources.mjs";
+
+export { normalizeRunSources, promptWithRunSources } from "./run-sources.mjs";
+
+const execFileAsync = promisify(execFile);
 
 const TERMINAL = new Set(["succeeded", "failed", "cancelled"]);
+const MAX_REQUESTED_AGENTS = 4;
 const CODEX_TRANSPORT_FAILURES = new Set(["APP_SERVER_EXIT", "APP_SERVER_TIMEOUT", "EPIPE", "ECONNRESET", "ENOENT", "UNSAFE_COMMAND_SHIM"]);
+// 自动续跑只针对"已提交但被打断"的超时轮：打断经 provider 确认 + 只读/plan 轮（无写盘残留）
+// 才有安全续跑语义。续跑必须进入新 round；run 级轮次闸因此也是 provider 派发硬闸。
+const AUTO_RECOVERY_TIMEOUT_CODES = new Set(["TURN_TIMEOUT", "TURN_IDLE_TIMEOUT"]);
+const MAX_AUTO_RECOVERIES_PER_RUN = 2;
+// Codex 官方权限档（LO 2026-08-09：与 Codex 桌面批准菜单一致，不再用 514cc 自造档位替代）：
+// composer mode → 原生组合 id（sandbox+approvalPolicy 由 codex adapter 解析，见 codex-app-server.mjs）。
+// 官方语义不走 514cc 的 build 审批/租约门——审批发生在 Codex 层（on-request/on-failure 升级到
+// approvalBroker）或按官方含义不询问（full-access/never、config.toml 自定义）。
+const CODEX_PRESET_NATIVE_MODES = Object.freeze({
+  ask: "workspace-write",
+  auto: "workspace-write:on-failure",
+  "full-access": "danger-full-access",
+  config: "config-default",
+});
+// 会话中权限热改白名单（2026-08-10 LO：固化不应一刀切）。只放开机制上每轮可改、治理上安全的迁移：
+// - 降档（build→review/plan、review→plan）：写面收缩，无审批语义被破坏；
+// - Codex ask↔auto：sandbox 同为 workspace-write 不变，只动 turn 级 approvalPolicy。
+// 其余一律拒绝：升 build 必须走创建时审批门；Codex sandbox 轴（read-only/workspace-write/
+// full-access/config 互转）绑在 thread/start，原生会话存续期真固化；跨族迁移语义不明。
+const PERMISSION_HOT_TRANSITIONS = Object.freeze({
+  plan: [],
+  review: ["plan"],
+  build: ["review", "plan"],
+  ask: ["auto"],
+  auto: ["ask"],
+  "full-access": [],
+  config: [],
+});
+const AUTO_RECOVERY_CONTINUATION_PROMPT = "[514cc 编排器自动恢复] 你的上一轮原生轮因超时被编排器打断，打断已获 provider 确认，会话内无残留活跃工作，但任务尚未交付。请利用本会话已保留的排查进展继续完成当前任务：不要从头重复已完成的读取与分析，直接补齐剩余工作并给出最终交付与可验证证据。";
+const TRANSIENT_RENAME_ERRORS = new Set(["EPERM", "EACCES", "EBUSY"]);
+const RENAME_RETRY_DELAYS_MS = [10, 25, 50, 100];
+const ADAPTER_RESUME_FEATURES = Object.freeze({
+  "claude-stream-json": { defaultCommand: "claude", args: (sessionId) => ["-r", sessionId] },
+  "codex-app-server": { defaultCommand: "codex", args: (sessionId) => ["exec", "resume", sessionId] },
+  "codex-exec-json": { defaultCommand: "codex", args: (sessionId) => ["exec", "resume", sessionId] },
+  "gemini-stream-json": { defaultCommand: "gemini", args: (sessionId) => ["--resume", sessionId] },
+  "grok-build-headless": { defaultCommand: "grok", args: (sessionId) => ["-r", sessionId] },
+  "kimi-headless-resume": { defaultCommand: "kimi", args: (sessionId) => ["-S", sessionId] },
+});
+
+function commandHintToken(value) {
+  const text = String(value ?? "");
+  return /^[A-Za-z0-9._:/\\-]+$/.test(text) ? text : JSON.stringify(text);
+}
+
+function resumeCommandForAdapter(adapter, sessionId) {
+  const feature = ADAPTER_RESUME_FEATURES[adapter?.id];
+  if (!feature || !sessionId) return null;
+  if (typeof adapter.canResume === "function" && adapter.canResume(sessionId) !== true) return null;
+  const command = String(adapter.command || feature.defaultCommand || "").trim();
+  if (!command) return null;
+  return [command, ...feature.args(String(sessionId))].map(commandHintToken).join(" ");
+}
+
+function legacyTeamMember(memberId) {
+  const id = String(memberId ?? "").trim();
+  return {
+    id,
+    runtimeProfileId: id,
+    label: id,
+    role: "",
+    description: "",
+    systemPrompt: "",
+    capabilities: [],
+    defaultModel: null,
+    defaultEffort: null,
+    teamMemberEligible: true,
+    coordinatorEligible: true,
+  };
+}
+
+function normalizeTeamMember(raw, expectedId = null) {
+  const fallbackId = String(expectedId ?? "").trim();
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw Object.assign(new Error(`team member snapshot is missing or invalid: ${fallbackId || "<missing>"}`), {
+      code: "TEAM_MEMBER_SNAPSHOT_INVALID",
+    });
+  }
+  const id = String(raw?.id ?? fallbackId).trim();
+  if (!id || (fallbackId && id !== fallbackId)) {
+    throw Object.assign(new Error(`team member snapshot is invalid: ${fallbackId || "<missing>"}`), {
+      code: "TEAM_MEMBER_SNAPSHOT_INVALID",
+    });
+  }
+  const runtimeProfileId = String(raw?.runtimeProfileId ?? raw?.profileId ?? id).trim();
+  if (!runtimeProfileId) {
+    throw Object.assign(new Error(`team member ${id} has no runtime profile binding`), {
+      code: "TEAM_MEMBER_SNAPSHOT_INVALID",
+    });
+  }
+  let capabilities = raw?.capabilities ?? [];
+  if (Array.isArray(capabilities)) capabilities = [...capabilities];
+  else if (capabilities && typeof capabilities === "object") capabilities = { ...capabilities };
+  else if (capabilities == null || capabilities === "") capabilities = [];
+  else capabilities = [String(capabilities)];
+  return {
+    id,
+    runtimeProfileId,
+    label: String(raw?.label ?? raw?.name ?? id).trim() || id,
+    role: String(raw?.role ?? "").trim(),
+    description: String(raw?.description ?? "").trim(),
+    systemPrompt: String(raw?.systemPrompt ?? raw?.personaPrompt ?? "").trim(),
+    capabilities,
+    defaultModel: String(raw?.defaultModel ?? "").trim() || null,
+    defaultEffort: String(raw?.defaultEffort ?? "").trim().toLowerCase() || null,
+    teamMemberEligible: raw.teamMemberEligible === true,
+    coordinatorEligible: raw.coordinatorEligible === true,
+    ...(raw?.eligibilityReason ? { eligibilityReason: String(raw.eligibilityReason) } : {}),
+  };
+}
+
+function rosterSnapshotEntries(snapshot) {
+  if (snapshot instanceof Map) return [...snapshot.values()];
+  if (Array.isArray(snapshot)) return snapshot;
+  if (Array.isArray(snapshot?.members)) return snapshot.members;
+  if (snapshot?.members instanceof Map) return [...snapshot.members.values()];
+  if (snapshot?.members && typeof snapshot.members === "object") {
+    return Object.entries(snapshot.members)
+      .map(([id, member]) => member && typeof member === "object" ? { id, ...member } : member);
+  }
+  if (Array.isArray(snapshot?.roster)) return snapshot.roster;
+  if (snapshot?.id && typeof snapshot === "object") return [snapshot];
+  if (snapshot && typeof snapshot === "object") {
+    return Object.entries(snapshot)
+      .filter(([key]) => !["version", "createdAt", "updatedAt"].includes(key))
+      .map(([id, member]) => member && typeof member === "object" ? { id, ...member } : member);
+  }
+  return [];
+}
+
+function rosterMember(roster, memberId) {
+  if (!Array.isArray(roster)) return null;
+  return roster.find((member) => member?.id === memberId) || null;
+}
+
+function runtimeRouteId(routeEntry) {
+  return String(routeEntry?.runtimeProfileId ?? routeEntry?.id ?? "").trim();
+}
+
+function mergeResumeQueues(...queues) {
+  const merged = [];
+  const seen = new Set();
+  for (const queue of queues) {
+    for (const raw of queue || []) {
+      if (!raw || typeof raw.to !== "string" || !raw.to) continue;
+      const itemId = raw.itemId
+        ? String(raw.itemId)
+        : operationMessageId("work", raw.busMessageId || JSON.stringify({
+            to: raw.to,
+            kind: raw.kind || "legacy",
+            sourceAttemptId: raw.sourceAttemptId || null,
+          }));
+      const item = {
+        itemId,
+        to: raw.to,
+        ...(raw.busMessageId ? { busMessageId: String(raw.busMessageId) } : {}),
+        ...(raw.sourceAttemptId ? { sourceAttemptId: String(raw.sourceAttemptId) } : {}),
+        ...(raw.kind ? { kind: String(raw.kind) } : {}),
+      };
+      if (seen.has(item.itemId)) continue;
+      seen.add(item.itemId);
+      merged.push(item);
+    }
+  }
+  return merged;
+}
+
+export function normalizeRequestedAgentIds(value, teamMembers) {
+  if (value == null) return [];
+  if (!Array.isArray(value)) {
+    throw Object.assign(new Error("requestedAgentIds must be an array"), { code: "VALIDATION_FAILED" });
+  }
+  const requested = [...new Set(value.map((item) => String(item).trim()).filter(Boolean))];
+  if (requested.length > MAX_REQUESTED_AGENTS) {
+    throw Object.assign(new Error(`requestedAgentIds supports at most ${MAX_REQUESTED_AGENTS} targets`), { code: "VALIDATION_FAILED" });
+  }
+  const members = Array.isArray(teamMembers) ? new Set(teamMembers) : null;
+  if (requested.length && (!members?.size || requested.some((id) => !members.has(id)))) {
+    throw Object.assign(new Error("every requested agent must belong to the selected team"), { code: "NOT_TEAM_MEMBER" });
+  }
+  return requested;
+}
+
+export function resolveStartAgentId(value, teamMembers, fallbackId) {
+  const explicit = value == null ? "" : String(value).trim();
+  const members = Array.isArray(teamMembers) ? new Set(teamMembers) : null;
+  if (explicit) {
+    if (members && !members.has(explicit)) {
+      throw Object.assign(new Error("startAgentId must belong to the selected team"), { code: "NOT_TEAM_MEMBER" });
+    }
+    return explicit;
+  }
+  const fallback = String(fallbackId || "").trim();
+  if (!fallback || (members && !members.has(fallback))) {
+    throw Object.assign(new Error("the selected team has no valid direct target"), { code: "NOT_TEAM_MEMBER" });
+  }
+  return fallback;
+}
+
+export function initialSocialTargets(startAgentId, requestedAgentIds = []) {
+  return [...new Set([startAgentId, ...(requestedAgentIds || [])].map((id) => String(id || "").trim()).filter(Boolean))];
+}
+
+function executionOwnerIdOf(run) {
+  return String(run?.executionOwnerId || run?.route?.selected?.id || run?.startAgentId || run?.coordinatorId || "claude-fable");
+}
+
+function operationMessageId(kind, ownerId) {
+  return `${kind}:${createHash("sha256").update(String(ownerId)).digest("hex")}`;
+}
+
+function legacyAskMessageId(run, ask) {
+  return operationMessageId("legacy-ask", JSON.stringify({
+    runId: run.id,
+    from: ask?.from || null,
+    at: ask?.at || null,
+    text: ask?.text || "",
+  }));
+}
+
+function answerOwnsAsk(run, answer, ask) {
+  const askerIsMember = !Array.isArray(run.teamMembers)
+    || run.teamMembers.length === 0
+    || run.teamMembers.includes(ask.from);
+  return askerIsMember
+    && answer?.kind === "answer"
+    && answer.from === "lo"
+    && answer.to === ask.from
+    && answer.refs?.answerToAskId === ask.id;
+}
+
+export async function renameWithRetry(source, target, {
+  renameFile = rename,
+  sleep = (delayMs) => new Promise((resolveTimer) => setTimeout(resolveTimer, delayMs)),
+} = {}) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await renameFile(source, target);
+      return;
+    } catch (error) {
+      if (!TRANSIENT_RENAME_ERRORS.has(error?.code) || attempt >= RENAME_RETRY_DELAYS_MS.length) throw error;
+      await sleep(RENAME_RETRY_DELAYS_MS[attempt]);
+    }
+  }
+}
 
 async function closeWithin(adapter, timeoutMs = 10_000) {
   let timer;
@@ -17,7 +274,22 @@ async function closeWithin(adapter, timeoutMs = 10_000) {
 }
 
 export class Orchestrator {
-  constructor({ router, adapters, eventStore, dataRoot, policy, approvalBroker, teams = null }) {
+  constructor({
+    router,
+    adapters,
+    eventStore,
+    dataRoot,
+    policy,
+    approvalBroker,
+    teams = null,
+    teamMembers = null,
+    models = null,
+    modelDiscovery = null,
+    capabilities = null,
+    storage = null,
+    remoteRunner = null, // v41 波二：远程 run 桥（ssh/remote-run.mjs）；null=远程 run 如实不可用
+    repoRoot = null, // 远程 adapter 工厂表的 assertWithin 锚点（claude settings/grok 脚本 containment）
+  }) {
     this.router = router;
     this.adapters = adapters;
     this.eventStore = eventStore;
@@ -25,30 +297,137 @@ export class Orchestrator {
     this.policy = policy;
     this.approvalBroker = approvalBroker;
     this.teams = teams;
+    this.teamMembers = teamMembers;
+    this.remoteRunner = remoteRunner;
+    this.repoRoot = repoRoot;
+    // 远程 run 专用 adapter 缓存：`${runId}:${runtimeProfileId}` → Promise<{adapter, fallback}>。
+    // 与本机席位池隔离；常驻型（codex app-server）靠它跨轮复用同一只远端进程（会话连续性）。
+    this.remoteAdapters = new Map();
+    this.models = models; // 可选：models.json 注册表（modelOptions 目录校验）；缺省回退 claude 白名单正则
+    this.modelDiscovery = modelDiscovery; // 可选：CLI 原生动态目录（优先于静态 modelOptions/effortLevels）
+    this.capabilities = capabilities; // dispatch 必需：缺失时 turn() fail-closed，不静默放行
     this.runs = new Map();
     this.controllers = new Map();
     this.executions = new Map();
     this.closing = false;
+    this.closePromise = null;
     this.runDir = join(dataRoot, "runs");
+    this.bus = new BusStore({ dataRoot }); // v3.6 社会模拟编排：消息总线（proposals/v36）
+    this.rosterChain = Promise.resolve(); // 运行时 roster 读改写串行
     this.saveChains = new Map(); // per-run 写盘串行链（save 竞态修复），完成即自清
+    this.transitionChains = new Map(); // per-run 短状态事务；串行 CAS + mutation + save，不包 provider
+    this.lifecycleChains = new Map(); // provider 轮 checkpoint/mutation；前后复验 owner，close 固定点排空
+    this.projectionChains = new Map(); // provider 结果投影；cancel 等当前投影收口后再清最终状态
+    this.cancelEpochs = new Map(); // continue 入口捕获 epoch；并发 cancel 后旧准入必须失效
+    this.cancellingRuns = new Set();
+    this.askClaims = new Map(); // runId -> askId；仅保护同进程内 answer 所有权，不进入持久化状态
+    this.storage = { mkdir, readdir, readFile, ...(storage || {}) }; // init I/O seam；故障测试不依赖平台权限技巧
     // 已清除 run 的墓碑：终态尾巴协程（drain 收尾/emitEvent 降级路径）持有 run 引用的迟到 save
     // 会绕过 Map 复活文件——墓碑让 save 直接丢弃。uuid 每条约 40B、清除频率低，不回收。
     this.clearedRuns = new Set();
   }
 
   async init() {
-    await mkdir(this.runDir, { recursive: true });
-    let names = [];
+    await this.storage.mkdir(this.runDir, { recursive: true });
+    const resumeAfterRestart = [];
+    const steerAfterRestart = [];
+    let names;
     try {
-      names = await readdir(this.runDir);
-    } catch {
-      names = [];
+      names = await this.storage.readdir(this.runDir);
+    } catch (cause) {
+      throw Object.assign(new Error(`run store cannot be listed: ${cause?.message || String(cause)}`), {
+        code: "RUN_STORE_UNAVAILABLE",
+        cause,
+      });
     }
     for (const name of names.filter((item) => item.endsWith(".json"))) {
-      let run = null;
+      let run;
+      let serialized;
       try {
-        run = JSON.parse(await readFile(join(this.runDir, name), "utf8"));
-        let restatedOnRestart = false; // 重启改写必须落盘，否则内存与磁盘分叉（烛 wave2 回炉 P2）
+        serialized = await this.storage.readFile(join(this.runDir, name), "utf8");
+      } catch (cause) {
+        throw Object.assign(new Error(`run store record cannot be read (${name}): ${cause?.message || String(cause)}`), {
+          code: "RUN_STORE_READ_FAILED",
+          record: name,
+          cause,
+        });
+      }
+      try {
+        run = JSON.parse(serialized);
+      } catch {
+        // JSON 真损坏时没有可信 run 身份可投影；文件原样留盘待查。
+        continue;
+      }
+      if (!run?.id) continue;
+      this.runs.set(run.id, run); // 先建立控制面可见性；后续 bus/save 故障不能把有效 run 隐藏成 404。
+      let restatedOnRestart = false;
+      try {
+        const normalizedQueue = mergeResumeQueues(run.resumeQueue);
+        if (JSON.stringify(normalizedQueue) !== JSON.stringify(run.resumeQueue || [])) {
+          run.resumeQueue = normalizedQueue;
+          restatedOnRestart = true;
+        }
+        const requestedAgentIds = normalizeRequestedAgentIds(run.requestedAgentIds, run.teamMembers);
+        if (JSON.stringify(requestedAgentIds) !== JSON.stringify(run.requestedAgentIds || [])) {
+          run.requestedAgentIds = requestedAgentIds;
+          restatedOnRestart = true;
+        }
+        const executionOwnerId = executionOwnerIdOf(run);
+        if (run.teamMembers?.length && !run.teamMembers.includes(executionOwnerId)) {
+          throw Object.assign(new Error(`execution owner is outside the persisted team: ${executionOwnerId}`), { code: "NOT_TEAM_MEMBER" });
+        }
+        if (run.executionOwnerId !== executionOwnerId) {
+          run.executionOwnerId = executionOwnerId;
+          restatedOnRestart = true;
+        }
+        if (run.orchestrationMode === "social") {
+          const members = new Set(run.teamMembers || []);
+          const invalidTarget = (run.resumeQueue || []).find((item) => !members.has(item.to));
+          if (invalidTarget) {
+            throw Object.assign(new Error(`durable work target is outside the persisted team: ${invalidTarget.to}`), { code: "NOT_TEAM_MEMBER" });
+          }
+        }
+        if (run.execute === true
+          && run.orchestrationMode === "social"
+          && Number(run.round || 0) === 0
+          && !(run.turnAttempts || []).length
+          && !run.pendingAsk
+          && !run.resumeClaim
+          && !(run.resumeQueue || []).length
+          && !TERMINAL.has(run.status)) {
+          const startAgentId = resolveStartAgentId(
+            run.startAgentId,
+            run.teamMembers,
+            requestedAgentIds[0] || run.coordinatorId || "claude-fable",
+          );
+          const targets = initialSocialTargets(startAgentId, requestedAgentIds);
+          if (targets.some((id) => !(run.teamMembers || []).includes(id))) {
+            throw Object.assign(new Error("initial social work target is outside the persisted team"), { code: "NOT_TEAM_MEMBER" });
+          }
+          run.resumeQueue = mergeResumeQueues(targets.map((to) => ({
+            to,
+            busMessageId: operationMessageId("task", targets.length === 1 && to === startAgentId ? run.id : `${run.id}:${to}`),
+            kind: "task",
+          })));
+          for (const item of run.resumeQueue) {
+            if (item.to === startAgentId) continue;
+            this.recordTaskGraphDelegation(run, {
+              fromAgentId: "lo",
+              toAgentId: item.to,
+              busMessageId: item.busMessageId,
+              kind: "mention",
+              state: "queued",
+            });
+          }
+          restatedOnRestart = true;
+        }
+        const busReconciliation = await this.reconcileSocialBus(run);
+        restatedOnRestart ||= busReconciliation.changed;
+      } catch (error) {
+        this.markRecoveryIssue(run, "BUS_RECONCILIATION_FAILED", error);
+        restatedOnRestart = true;
+      }
+      try {
         if (run.status === "waiting_approval") {
           restatedOnRestart = true;
           run.status = "cancelled";
@@ -60,9 +439,10 @@ export class Orchestrator {
           if (run.permissionMode === "build") {
             run.status = "cancelled";
             if (run.buildApproval) run.buildApproval.status = "revoked";
+            this.revokeCapabilityLease(run, "control-plane-restart");
             run.error = "A write-capable run cannot resume automatically after a control-plane restart.";
             run.recoveryNote = "Native session IDs are retained for read-only inspection; submit a new build run for further writes.";
-          } else if ((run.turnAttempts || []).some((attempt) => ["submitting", "submitted", "ambiguous"].includes(attempt.phase))) {
+          } else if (this.hasAmbiguousRestartWork(run)) {
             run.status = "recovery_required";
             run.error = "A native turn may have been submitted before the control plane stopped.";
             run.recoveryNote = "Inspect the persisted session and explicitly acknowledge recovery before sending another prompt; automatic replay is blocked.";
@@ -71,17 +451,464 @@ export class Orchestrator {
             run.recoveryNote = "Control plane restarted; native session IDs are retained and can be continued.";
           }
         }
-        // 重启改写必须先成功落盘才入内存（烛 wave2 回炉 P2a）：save 失败抛进外层 catch。
-        // save() 成功路径内部已做 runs.set。
-        if (restatedOnRestart) await this.save(run);
-        else this.runs.set(run.id, run);
-      } catch {
-        // 解析失败或落盘失败的 run 不入内存、文件留盘待查。save() 的同步段先 runs.set 后写盘，
-        // 真实 writeFile/rename 失败时 run 已在 Map——此处显式移除，堵住内存新态/磁盘旧态分叉。
-        if (run?.id) this.runs.delete(run.id);
+        if (restatedOnRestart) {
+          try {
+            await this.save(run);
+          } catch (error) {
+            this.markRecoveryIssue(run, "RESTART_PERSISTENCE_FAILED", error);
+            this.runs.set(run.id, run);
+          }
+        }
+        if (["queued", "waiting_agent"].includes(run.status)
+          && run.permissionMode !== "build"
+          && !run.pendingAsk
+          && ((run.resumeQueue || []).length || run.resumeClaim)) {
+          resumeAfterRestart.push(run.id);
+        } else if (["waiting_agent", "succeeded"].includes(run.status)
+          && ((run.pendingSteer || []).length || run.activeSteer)) {
+          steerAfterRestart.push(run.id);
+        }
+      } catch (error) {
+        this.markRecoveryIssue(run, "RESTART_RESTATEMENT_FAILED", error);
+        this.runs.set(run.id, run);
       }
     }
+    for (const id of resumeAfterRestart) {
+      setImmediate(() => {
+        const run = this.runs.get(id);
+        if (!this.closing && ["queued", "waiting_agent"].includes(run?.status) && run.permissionMode !== "build" && !run.pendingAsk
+          && ((run.resumeQueue || []).length || run.resumeClaim)) {
+          void this.startExecution(id);
+        }
+      });
+    }
+    for (const id of steerAfterRestart) {
+      setImmediate(() => {
+        const run = this.runs.get(id);
+        if (this.closing || !run || !["waiting_agent", "succeeded"].includes(run.status)) return;
+        if (!((run.pendingSteer || []).length || run.activeSteer) || this.controllers.has(id)) return;
+        const controller = new AbortController();
+        this.controllers.set(id, controller);
+        void this.startSteerDrain(id, controller);
+      });
+    }
     return this;
+  }
+
+  async snapshotTeamRoster(memberIds) {
+    const ids = [...new Set((memberIds || []).map((id) => String(id).trim()).filter(Boolean))];
+    if (!ids.length) return [];
+    // Transitional compatibility for legacy callers whose team members are runtime profiles.
+    if (!this.teamMembers) return ids.map((id) => legacyTeamMember(id));
+
+    const byId = new Map();
+    if (typeof this.teamMembers.snapshot === "function") {
+      const pendingSnapshot = this.teamMembers.snapshot(ids);
+      const snapshot = pendingSnapshot && typeof pendingSnapshot.then === "function"
+        ? await pendingSnapshot
+        : pendingSnapshot;
+      for (const raw of rosterSnapshotEntries(snapshot)) {
+        if (!raw || typeof raw !== "object") continue;
+        const member = normalizeTeamMember(raw);
+        if (member.teamMemberEligible !== true) {
+          throw Object.assign(new Error(`team member is not executable: ${member.id}`), {
+            code: "RUNTIME_PROFILE_INELIGIBLE",
+            eligibilityReason: member.eligibilityReason || null,
+          });
+        }
+        if (ids.includes(member.id)) byId.set(member.id, member);
+      }
+    }
+    for (const id of ids) {
+      if (byId.has(id)) continue;
+      if (typeof this.teamMembers.get !== "function") {
+        throw Object.assign(new Error(`team member snapshot is missing ${id}`), { code: "TEAM_MEMBER_NOT_FOUND" });
+      }
+      const pendingMember = this.teamMembers.get(id);
+      const raw = pendingMember && typeof pendingMember.then === "function"
+        ? await pendingMember
+        : pendingMember;
+      const member = normalizeTeamMember(raw, id);
+      if (member.teamMemberEligible !== true) {
+        throw Object.assign(new Error(`team member is not executable: ${id}`), {
+          code: "RUNTIME_PROFILE_INELIGIBLE",
+          eligibilityReason: member.eligibilityReason || null,
+        });
+      }
+      byId.set(id, member);
+    }
+    return ids.map((id) => byId.get(id));
+  }
+
+  rosterForRun(run) {
+    const rosterVersion = Number(run?.teamRosterVersion || 0);
+    if (!Object.hasOwn(run || {}, "teamRoster") || run.teamRoster == null) {
+      if (rosterVersion >= 1) {
+        throw Object.assign(new Error("persisted team roster is missing"), {
+          code: "TEAM_MEMBER_SNAPSHOT_INVALID",
+        });
+      }
+      return null;
+    }
+    const entries = rosterSnapshotEntries(run.teamRoster);
+    if (rosterVersion >= 1) {
+      const expectedIds = Array.isArray(run.teamMembers) ? run.teamMembers : null;
+      const rosterIds = entries.map((member) => member?.id);
+      const snapshotMatchesTeam = expectedIds
+        && entries.length === expectedIds.length
+        && rosterIds.every((id, index) => id === expectedIds[index]);
+      const runtimeBindingsAreExplicit = entries.every((member) =>
+        typeof member?.runtimeProfileId === "string" && member.runtimeProfileId.trim());
+      if (!snapshotMatchesTeam || !runtimeBindingsAreExplicit || entries.some((member) => member?.teamMemberEligible !== true)) {
+        throw Object.assign(new Error("persisted team roster does not match its executable-member assertions"), {
+          code: "TEAM_MEMBER_SNAPSHOT_INVALID",
+        });
+      }
+    }
+    return entries.map((member) => normalizeTeamMember(member));
+  }
+
+  memberForRun(run, memberId) {
+    const id = String(memberId ?? "").trim();
+    const roster = this.rosterForRun(run);
+    if (roster == null) return legacyTeamMember(id);
+    const member = rosterMember(roster, id);
+    if (!member) {
+      throw Object.assign(new Error(`${id} is absent from this run's persisted team roster`), {
+        code: "NOT_TEAM_MEMBER",
+      });
+    }
+    if (member.teamMemberEligible !== true) {
+      throw Object.assign(new Error(`team member is not executable: ${id}`), {
+        code: "RUNTIME_PROFILE_INELIGIBLE",
+        eligibilityReason: member.eligibilityReason || null,
+      });
+    }
+    if (id === run.coordinatorId && member.coordinatorEligible !== true) {
+      throw Object.assign(new Error(`team coordinator is not executable: ${id}`), {
+        code: "RUNTIME_PROFILE_INELIGIBLE",
+        eligibilityReason: member.eligibilityReason || null,
+      });
+    }
+    return member;
+  }
+
+  runtimeProfileIdFor(run, memberId) {
+    return this.memberForRun(run, memberId).runtimeProfileId;
+  }
+
+  mapRuntimeRoute(route, teamRoster, preferredMemberIds = []) {
+    const mapEntry = (entry, excludedMemberId = null, requireUnclaimed = false) => {
+      if (!entry) return null;
+      const runtimeProfileId = runtimeRouteId(entry);
+      if (!runtimeProfileId) {
+        throw Object.assign(new Error("router returned a route without a runtime profile"), { code: "NO_ROUTE" });
+      }
+      if (!Array.isArray(teamRoster)) {
+        return { ...entry, id: runtimeProfileId, runtimeProfileId };
+      }
+      const candidates = teamRoster.filter((member) => member.runtimeProfileId === runtimeProfileId);
+      if (!candidates.length) {
+        throw Object.assign(new Error(`router selected a runtime profile outside the team roster: ${runtimeProfileId}`), {
+          code: "NO_ROUTE",
+        });
+      }
+      const unclaimed = candidates.filter((member) => member.id !== excludedMemberId);
+      if (requireUnclaimed && excludedMemberId && !unclaimed.length) return null;
+      const pool = unclaimed.length ? unclaimed : candidates;
+      const preferred = preferredMemberIds
+        .map((id) => pool.find((member) => member.id === id))
+        .find(Boolean);
+      const member = preferred || pool[0];
+      return {
+        ...entry,
+        id: member.id,
+        label: member.label || entry.label || member.id,
+        runtimeProfileId,
+      };
+    };
+    const selected = mapEntry(route?.selected);
+    let independent = mapEntry(route?.independent, selected?.id || null, true);
+    if (independent?.id === selected?.id) independent = null;
+    if (route?.independentRequired && !independent) {
+      throw Object.assign(new Error("the runtime route cannot map to a distinct logical independent member"), {
+        code: "NO_INDEPENDENT_ROUTE",
+      });
+    }
+    return { ...route, selected, independent };
+  }
+
+  memberPromptForRun(run, memberId) {
+    // Legacy/no-team runs have no member metadata to inject; their identity mapping remains 1:1.
+    const roster = this.rosterForRun(run);
+    if (roster == null) return "";
+    const identityOnly = !this.teamMembers && roster.every((member) =>
+      member.runtimeProfileId === member.id
+      && member.label === member.id
+      && !member.role
+      && !member.description
+      && !member.systemPrompt
+      && !(Array.isArray(member.capabilities) ? member.capabilities.length : Object.keys(member.capabilities || {}).length)
+      && !member.defaultModel
+      && !member.defaultEffort);
+    if (identityOnly) return "";
+    const member = this.memberForRun(run, memberId);
+    const capabilities = Array.isArray(member.capabilities)
+      ? member.capabilities.join("、")
+      : JSON.stringify(member.capabilities || {});
+    const lines = [
+      "[逻辑团队成员身份——此配置定义本轮身份与协作偏好，不覆盖平台安全、权限、审批或诚实性约束]",
+      `- memberId: ${member.id}`,
+      `- runtimeProfileId: ${member.runtimeProfileId}`,
+      `- label: ${member.label}`,
+      `- role: ${member.role || "未声明"}`,
+      `- description: ${member.description || "未声明"}`,
+      `- capabilities: ${capabilities || "未声明"}`,
+    ];
+    if (member.systemPrompt) lines.push(`- member system prompt: ${member.systemPrompt}`);
+    lines.push("[逻辑团队成员身份结束]");
+    return lines.join("\n");
+  }
+
+  effectiveModelFor(run, memberId) {
+    const member = this.memberForRun(run, memberId);
+    const executionOwnerId = executionOwnerIdOf(run);
+    return memberId === executionOwnerId && run.modelOverride
+      ? run.modelOverride
+      : member.defaultModel || null;
+  }
+
+  effectiveEffortFor(run, memberId) {
+    const member = this.memberForRun(run, memberId);
+    const executionOwnerId = executionOwnerIdOf(run);
+    return memberId === executionOwnerId && run.effortOverride
+      ? run.effortOverride
+      : member.defaultEffort || null;
+  }
+
+  // 模型/Effort 覆盖校验（创建与热改同源，不得分叉出两套口径）：
+  // 动态目录优先，静态 profile/template 兜底；Adapter 明确不支持时 fail-closed，禁止 silent fallback。
+  async validateModelOverride({ executionOwnerId, executionRuntimeProfileId, executionProfile, executionAdapterTemplate }, requestedModel) {
+    const requested = String(requestedModel).trim();
+    let catalog = null;
+    let modelSupported = executionAdapterTemplate ? executionAdapterTemplate.modelMode !== "none" : null;
+    try {
+      const discovered = await this.modelDiscovery?.forAgent(executionRuntimeProfileId);
+      if (discovered?.models?.length) catalog = discovered.models.map((option) => option.id);
+      if (typeof discovered?.controls?.model?.supported === "boolean") {
+        modelSupported = discovered.controls.model.supported;
+      }
+    } catch {
+      // 发现失败走静态
+    }
+    if (modelSupported === false) {
+      throw Object.assign(new Error(`${executionOwnerId} adapter does not support model overrides`), { code: "INVALID_MODEL" });
+    }
+    if (!catalog) {
+      catalog = Array.isArray(executionProfile?.modelOptions) ? executionProfile.modelOptions.map((option) => option.id).filter(Boolean) : null;
+    }
+    const safeModelId = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$/.test(requested);
+    const allowed = catalog?.length ? catalog.includes(requested) : modelSupported === true ? safeModelId : /^(?:fable|opus|sonnet|haiku|claude-[a-z0-9.-]{1,48})$/i.test(requested);
+    if (!allowed) {
+      throw Object.assign(new Error(`unsupported model for ${executionOwnerId}: ${requested}`), { code: "INVALID_MODEL" });
+    }
+    return requested;
+  }
+
+  async validateEffortOverride({ executionOwnerId, executionRuntimeProfileId, executionProfile, executionAdapterTemplate }, requestedEffort) {
+    const requested = String(requestedEffort).trim().toLowerCase();
+    let levels = null;
+    let effortSupported = executionAdapterTemplate ? executionAdapterTemplate.effortMode !== "none" : null;
+    try {
+      const discovered = await this.modelDiscovery?.forAgent(executionRuntimeProfileId);
+      if (discovered?.effortLevels?.length) levels = discovered.effortLevels;
+      if (typeof discovered?.controls?.effort?.supported === "boolean") {
+        effortSupported = discovered.controls.effort.supported;
+      }
+    } catch {
+      // 发现失败走静态
+    }
+    if (effortSupported === false) {
+      throw Object.assign(new Error(`${executionOwnerId} adapter does not support effort overrides`), { code: "INVALID_EFFORT" });
+    }
+    if (!levels) {
+      if (executionProfile?.effortLevels?.length) levels = executionProfile.effortLevels;
+      else if (executionAdapterTemplate?.effortLevels?.length) levels = executionAdapterTemplate.effortLevels;
+    }
+    const allowed = levels?.length
+      ? levels.includes(requested)
+      : effortSupported === true
+        ? false
+        : /^(?:low|medium|high|xhigh|max)$/.test(requested);
+    if (!allowed) {
+      throw Object.assign(new Error(`unsupported effort level for ${executionOwnerId}: ${requested}`), { code: "INVALID_EFFORT" });
+    }
+    return requested;
+  }
+
+  markRecoveryIssue(run, code, error) {
+    run.auditDegraded = true;
+    run.persistenceDegraded = true;
+    run.recoveryIssue = {
+      code,
+      message: error?.message || String(error),
+      at: new Date().toISOString(),
+    };
+    if (!TERMINAL.has(run.status)) run.status = "recovery_required";
+    run.recoveryNote = `Automatic recovery is blocked: ${code}. Inspect the persisted run and bus before acknowledging recovery.`;
+  }
+
+  hasAmbiguousRestartWork(run) {
+    const attempts = run.turnAttempts || [];
+    if (attempts.some((attempt) => ["submitting", "submitted", "ambiguous"].includes(attempt.phase))) return true;
+    const claims = [run.resumeClaim?.itemId, run.activeSteer?.steerId].filter(Boolean);
+    return claims.some((claimId) => attempts.some((attempt) =>
+      attempt.sourceWorkItemId === claimId
+      && ["submitting", "submitted", "ambiguous", "completed"].includes(attempt.phase)));
+  }
+
+  requiresRecovery(run, error = null) {
+    return error?.code === "RECOVERY_REQUIRED"
+      || Boolean(run.resumeClaim)
+      || Boolean((run.resumeQueue || []).length)
+      || Boolean(run.activeSteer)
+      || this.hasAmbiguousRestartWork(run);
+  }
+
+  /**
+   * 超时轮自动续跑判决。四个条件缺一不可：
+   * ① 超时家族错误（TURN_TIMEOUT/TURN_IDLE_TIMEOUT）——其它 ambiguous（如 OUTPUT_LIMIT）续跑只会重演；
+   * ② interruptConfirmed === true——provider 确认原生轮已死，续跑不与任何活跃工作并发；
+   * ③ 只读/plan 轮——被打断的轮不可能留下写盘残留（workspace-write 轮必须人工检查半成品）；
+   * ④ 有原生会话可续且未超 run 级硬顶（防脚本化白烧，超限回落人工闸）。
+   */
+  autoRecoveryDecision(run, agentId, error, effectivePermissionMode) {
+    if (!AUTO_RECOVERY_TIMEOUT_CODES.has(error?.code)) return { ok: false, reason: "not-a-timeout" };
+    if (error.interruptConfirmed !== true) return { ok: false, reason: "interrupt-unconfirmed" };
+    if (!["read-only", "plan"].includes(effectivePermissionMode)) return { ok: false, reason: "write-turn" };
+    if (!(error.sessionId || run.sessions?.[agentId])) return { ok: false, reason: "no-native-session" };
+    const roundCap = Number(run.maxRounds);
+    if (Number.isFinite(roundCap) && roundCap > 0 && (Number(run.round) || 0) >= roundCap) {
+      return { ok: false, reason: "round-limit" };
+    }
+    if ((run.autoRecoveries || 0) >= MAX_AUTO_RECOVERIES_PER_RUN) return { ok: false, reason: "cap-exhausted" };
+    return { ok: true };
+  }
+
+  async withRunTransition(runId, operation) {
+    const previous = this.transitionChains.get(runId) || Promise.resolve();
+    const transition = previous.catch(() => {}).then(operation);
+    this.transitionChains.set(runId, transition);
+    try {
+      return await transition;
+    } finally {
+      if (this.transitionChains.get(runId) === transition) this.transitionChains.delete(runId);
+    }
+  }
+
+  async withRunLifecycle(runId, operation) {
+    const previous = this.lifecycleChains.get(runId) || Promise.resolve();
+    const lifecycle = previous.catch(() => {}).then(operation);
+    this.lifecycleChains.set(runId, lifecycle);
+    try {
+      return await lifecycle;
+    } finally {
+      if (this.lifecycleChains.get(runId) === lifecycle) this.lifecycleChains.delete(runId);
+    }
+  }
+
+  async withRunProjection(runId, operation) {
+    const previous = this.projectionChains.get(runId) || Promise.resolve();
+    const projection = previous.catch(() => {}).then(operation);
+    this.projectionChains.set(runId, projection);
+    try {
+      return await projection;
+    } finally {
+      if (this.projectionChains.get(runId) === projection) this.projectionChains.delete(runId);
+    }
+  }
+
+  cancelEpoch(runId) {
+    return this.cancelEpochs.get(runId) || 0;
+  }
+
+  assertContinuationAdmission(runId, expectedEpoch) {
+    if (this.closing) {
+      throw Object.assign(new Error("control plane is shutting down"), { code: "CONTROL_PLANE_CLOSING" });
+    }
+    if (this.cancellingRuns.has(runId) || this.cancelEpoch(runId) !== expectedEpoch) {
+      throw Object.assign(new Error("run cancellation superseded this continuation"), { code: "RUN_CANCELLED" });
+    }
+  }
+
+  async withLifecycleEffect(run, controller, operation) {
+    return this.withRunLifecycle(run.id, async () => {
+      this.assertLifecycleOwner(run, controller);
+      const result = await operation();
+      this.assertLifecycleOwner(run, controller);
+      return result;
+    });
+  }
+
+
+  async withProjectionEffect(run, controller, operation) {
+    return this.withRunProjection(run.id, async () => {
+      this.assertLifecycleOwner(run, controller);
+      const result = await operation();
+      this.assertLifecycleOwner(run, controller);
+      return result;
+    });
+  }
+
+  /**
+   * v41 波二：远程 run 的专用 adapter（缓存 Promise 防并发双建——同键两轮并发会各起一只远端
+   * 常驻进程，先者泄漏）。grok-mcp 在 createRemoteAdapter 模板层如实拒绝（REMOTE_ADAPTER_UNSUPPORTED）。
+   */
+  remoteAdapterFor(run, runtimeProfileId) {
+    const key = `${run.id}:${runtimeProfileId}`;
+    let pending = this.remoteAdapters.get(key);
+    if (!pending) {
+      if (!this.remoteRunner) {
+        throw Object.assign(new Error("remote runner is not wired; remote runs are unavailable"), { code: "REMOTE_UNAVAILABLE" });
+      }
+      const profile = (this.models?.profiles || []).find((item) => item.id === runtimeProfileId);
+      if (!profile) {
+        throw Object.assign(new Error(`no runtime profile for remote adapter: ${runtimeProfileId}`), { code: "ADAPTER_UNAVAILABLE" });
+      }
+      const remote = {
+        spawnImpl: this.remoteRunner.spawnImpl(run.remote.hostId, run.remote.path),
+        runProcessImpl: this.remoteRunner.runProcessImpl(run.remote.hostId, run.remote.path),
+      };
+      pending = Promise.resolve().then(() => createRemoteAdapter({
+        profile,
+        eventStore: this.eventStore,
+        cwd: this.repoRoot || this.dataRoot,
+        approvalResolver: (message, context) => this.approvalBroker.request(message, context),
+        remote,
+      }));
+      this.remoteAdapters.set(key, pending);
+    }
+    return pending;
+  }
+
+  /** 远程 run 终态处置：关闭其专用 adapter（codex app-server close → 通道收 + pgid kill 远端进程树）。 */
+  async disposeRemoteAdapters(runId) {
+    const prefix = `${runId}:`;
+    const entries = [...this.remoteAdapters.entries()].filter(([key]) => key.startsWith(prefix));
+    for (const [key, pending] of entries) {
+      if (this.remoteAdapters.get(key) !== pending) continue; // 不删后入的新主（同名键竞态纪律）
+      this.remoteAdapters.delete(key);
+      const pair = await pending.catch(() => null);
+      for (const adapter of [pair?.adapter, pair?.fallback]) {
+        if (typeof adapter?.close === "function") await adapter.close().catch(() => {});
+      }
+    }
+  }
+
+  assertLifecycleOwner(run, controller) {
+    if (!controller || controller.signal.aborted || this.controllers.get(run.id) !== controller || run.status === "cancelled") {
+      throw Object.assign(new Error("run cancelled or execution ownership changed"), { code: "ABORTED" });
+    }
   }
 
   policySha256() {
@@ -90,13 +917,37 @@ export class Orchestrator {
 
   buildApprovalMessage(run) {
     const policySha256 = this.policySha256();
+    const executionOwnerId = executionOwnerIdOf(run);
+    const executionOwnerRuntimeProfileId = this.runtimeProfileIdFor(run, executionOwnerId);
+    const routeSelectedAgent = run.route.selected.id;
+    const routeSelectedRuntimeProfileId = this.runtimeProfileIdFor(run, routeSelectedAgent);
+    const coordinatorId = run.coordinatorId || "claude-fable";
+    const startAgentId = run.startAgentId || coordinatorId;
+    const adapterWorkspace = this.adapters.get(executionOwnerRuntimeProfileId)?.cwd || null;
+    // 远程 run：工作区=规范化 ssh:// 串（§3.3 审批哈希口径）——绝不进本机 resolve()/git 语义
+    const workspace = run.remote
+      ? this.remoteRunner?.workspaceLabel(run.remote.hostId, run.remote.path) ?? `ssh://${run.remote.hostId}${run.remote.path}`
+      : run.cwd || adapterWorkspace;
     return {
       method: "control/runBuild/requestApproval",
       params: {
         runId: run.id,
         promptSha256: createHash("sha256").update(run.prompt).digest("hex"),
-        workspace: this.adapters.get("codex-technical")?.cwd || null,
-        selectedAgent: run.route.selected.id,
+        workspace: run.remote ? workspace : workspace ? resolve(workspace) : null,
+        workspaceSource: run.remote ? "run.remote" : run.cwd ? "run.cwd" : "adapter.cwd",
+        isolation: run.remote ? "remote-unsupported" : run.cwd ? "git-worktree" : "none",
+        selectedAgent: executionOwnerId,
+        selectedRuntimeProfileId: executionOwnerRuntimeProfileId,
+        executionOwnerId,
+        executionOwnerRuntimeProfileId,
+        routeSelectedAgent,
+        routeSelectedRuntimeProfileId,
+        coordinatorId,
+        coordinatorRuntimeProfileId: this.runtimeProfileIdFor(run, coordinatorId),
+        startAgentId,
+        startRuntimeProfileId: this.runtimeProfileIdFor(run, startAgentId),
+        model: this.effectiveModelFor(run, executionOwnerId),
+        effort: this.effectiveEffortFor(run, executionOwnerId),
         permissionMode: run.permissionMode,
         collaborationMode: run.collaborationMode,
         maxRounds: run.maxRounds,
@@ -117,6 +968,327 @@ export class Orchestrator {
       && run.buildApproval.actionSha256 === expectedActionSha256;
   }
 
+  // Capability Lease 强制闸（EX-05）：workspace-write 必须持有未过期、哈希匹配的 active 租约。
+  // 审批可见对象 ≠ 执行授权；adapter 边界以本方法为准 fail-closed。
+  buildLeaseTtlMs() {
+    const brokerTtl = Number(this.approvalBroker?.ttlMs) || 300_000;
+    // 构建轮可能长于审批弹窗 TTL；租约至少 4h，仍绑定 action 哈希与工作区。
+    return Math.max(brokerTtl, 4 * 60 * 60_000);
+  }
+
+  issueCapabilityLease(run, { actor = "operator" } = {}) {
+    if (!run?.buildApproval?.actionSha256) return null;
+    const now = Date.now();
+    const issuedAt = new Date(now).toISOString();
+    const expiresAt = new Date(now + this.buildLeaseTtlMs()).toISOString();
+    const lease = {
+      id: `lease-${run.id}`,
+      approvalId: run.buildApproval.approvalId || null,
+      status: "active",
+      issuedAt,
+      revokedAt: null,
+      expiresAt,
+      actionSha256: run.buildApproval.actionSha256,
+      policySha256: run.buildApproval.policySha256 || this.policySha256(),
+      runId: run.id,
+      sessionId: null,
+      method: "control/runBuild/requestApproval",
+      actor,
+      revocable: true,
+      scope: "attempt+action-hash+ttl+worktree",
+      workspace: this.buildApprovalMessage(run).params.workspace,
+    };
+    run.buildApproval.lease = lease;
+    return lease;
+  }
+
+  activeCapabilityLease(run) {
+    const lease = run?.buildApproval?.lease;
+    if (!lease || lease.status !== "active") return null;
+    if (!this.buildApprovalIsValid(run)) return null;
+    if (lease.actionSha256 !== run.buildApproval.actionSha256) return null;
+    const exp = Date.parse(lease.expiresAt);
+    if (Number.isFinite(exp) && exp <= Date.now()) {
+      lease.status = "expired";
+      lease.revokedAt = new Date().toISOString();
+      return null;
+    }
+    return lease;
+  }
+
+  revokeCapabilityLease(run, reason = "revoked") {
+    const lease = run?.buildApproval?.lease;
+    if (!lease || lease.status !== "active") return null;
+    lease.status = "revoked";
+    lease.revokedAt = new Date().toISOString();
+    lease.revokeReason = reason;
+    return lease;
+  }
+
+  capabilityLeaseView(run) {
+    const lease = run?.buildApproval?.lease;
+    if (!lease) return null;
+    const expiresAt = Date.parse(lease.expiresAt);
+    const approvalValid = this.buildApprovalIsValid(run);
+    const expired = Number.isFinite(expiresAt) && expiresAt <= Date.now();
+    const gateOpen = lease.status === "active" && !expired && approvalValid;
+    return {
+      ...lease,
+      status: lease.status === "active" && expired ? "expired" : lease.status,
+      gateOpen,
+      invalidReason: gateOpen
+        ? null
+        : lease.status !== "active"
+          ? `LEASE_${String(lease.status || "UNKNOWN").toUpperCase()}`
+          : expired
+            ? "LEASE_EXPIRED"
+            : "APPROVAL_BINDING_INVALID",
+    };
+  }
+
+  listCapabilityLeases() {
+    return this.list()
+      .map((run) => this.capabilityLeaseView(run))
+      .filter(Boolean)
+      .sort((left, right) => Date.parse(right.issuedAt || 0) - Date.parse(left.issuedAt || 0));
+  }
+
+  async revokeCapabilityLeaseForRun(id, { reason = "operator-revoke", actor = "operator" } = {}) {
+    return this.withRunTransition(id, async () => {
+      const run = this.get(id);
+      const lease = run.buildApproval?.lease;
+      if (!lease) throw Object.assign(new Error("capability lease not found for run"), { code: "LEASE_NOT_FOUND" });
+      if (lease.status === "active") {
+        this.revokeCapabilityLease(run, String(reason || "operator-revoke").slice(0, 160));
+        lease.revokedBy = String(actor || "operator").slice(0, 80);
+        await this.save(run);
+        await this.emitEvent(run, "capability.lease_revoked", lease, {
+          runId: run.id,
+          sessionId: lease.sessionId || null,
+          agentId: "control-plane",
+          sensitivity: "sensitive",
+        });
+      }
+      return this.capabilityLeaseView(run);
+    });
+  }
+
+  #delegationContext(run, sourceAttemptId = null) {
+    const graph = run?.taskGraph;
+    const rootTaskId = graph?.rootTaskId || `task-${run?.id}`;
+    const sourceAttempt = sourceAttemptId
+      ? (run?.turnAttempts || []).find((item) => item?.attemptId === sourceAttemptId) || null
+      : null;
+    const inboundEdge = sourceAttemptId
+      ? (graph?.delegations || []).find((item) =>
+          item?.targetAttemptId === sourceAttemptId
+          || (sourceAttempt?.sourceBusMessageId && item?.busMessageId === sourceAttempt.sourceBusMessageId)) || null
+      : null;
+    const inboundTask = inboundEdge?.busMessageId
+      ? (graph?.tasks || []).find((item) => item?.busMessageId === inboundEdge.busMessageId) || null
+      : null;
+    return {
+      parentTaskId: inboundTask?.id || rootTaskId,
+      depth: Math.max(1, (Number(inboundEdge?.depth) || 0) + 1),
+    };
+  }
+
+  // 权威 taskGraph 写边（AG-12B/13）：social 路由成功后持久化，不靠 Mission 从 chat 反推。
+  recordTaskGraphDelegation(run, {
+    fromAgentId,
+    toAgentId,
+    busMessageId = null,
+    kind = "route",
+    state = "queued",
+    attemptId = null,
+  } = {}) {
+    if (!run) return null;
+    const stamp = new Date().toISOString();
+    run.taskGraph ||= {
+      version: 1,
+      rootTaskId: `task-${run.id}`,
+      tasks: [],
+      delegations: [],
+      updatedAt: stamp,
+    };
+    const rootId = run.taskGraph.rootTaskId || `task-${run.id}`;
+    run.taskGraph.rootTaskId = rootId;
+    if (!Array.isArray(run.taskGraph.tasks)) run.taskGraph.tasks = [];
+    if (!Array.isArray(run.taskGraph.delegations)) run.taskGraph.delegations = [];
+    if (!run.taskGraph.tasks.some((item) => item.id === rootId || item.kind === "root")) {
+      run.taskGraph.tasks.unshift({
+        id: rootId,
+        kind: "root",
+        title: String(run.prompt || "task").slice(0, 180),
+        status: "running",
+        assigneeId: run.startAgentId || run.coordinatorId || null,
+        parentTaskId: null,
+        createdAt: run.createdAt || stamp,
+        updatedAt: stamp,
+      });
+    } else {
+      const root = run.taskGraph.tasks.find((item) => item.id === rootId || item.kind === "root");
+      if (root && !["succeeded", "failed", "cancelled"].includes(root.status)) {
+        root.status = "running";
+        root.updatedAt = stamp;
+      }
+    }
+    const edgeId = busMessageId ? `del-${busMessageId}` : `del-${randomUUID()}`;
+    const existingEdge = run.taskGraph.delegations.find((item) =>
+      item.id === edgeId || (busMessageId && item.busMessageId === busMessageId));
+    if (existingEdge) return existingEdge;
+    const { parentTaskId, depth } = this.#delegationContext(run, attemptId);
+    const depthLimit = Math.max(1, Math.min(8, Number(run.delegationDepthLimit) || 4));
+    const depthLimitReached = depth > depthLimit;
+    const edge = {
+      id: edgeId,
+      fromAgentId,
+      toAgentId,
+      kind,
+      state: depthLimitReached ? "rejected" : state,
+      busMessageId,
+      parentTaskId,
+      sourceAttemptId: attemptId,
+      targetAttemptId: null,
+      depth,
+      limit: depthLimit,
+      depthLimitReached,
+      timestamp: stamp,
+    };
+    run.taskGraph.delegations.push(edge);
+    if (run.taskGraph.delegations.length > 200) {
+      run.taskGraph.delegations = run.taskGraph.delegations.slice(-200);
+    }
+    if (toAgentId && toAgentId !== "team" && toAgentId !== "lo" && toAgentId !== "memo") {
+      const childId = busMessageId ? `task-route-${busMessageId}` : `task-route-${randomUUID()}`;
+      if (!run.taskGraph.tasks.some((item) => item.id === childId)) {
+        run.taskGraph.tasks.push({
+          id: childId,
+          kind: "attempt",
+          title: `${fromAgentId || "?"} → ${toAgentId}`,
+          status: depthLimitReached ? "blocked" : state === "queued" ? "queued" : state,
+          assigneeId: toAgentId,
+          parentTaskId,
+          sourceAttemptId: attemptId,
+          attemptId: null,
+          busMessageId,
+          createdAt: stamp,
+          updatedAt: stamp,
+        });
+        if (run.taskGraph.tasks.length > 128) {
+          const root = run.taskGraph.tasks.find((item) => item.kind === "root") || run.taskGraph.tasks[0];
+          run.taskGraph.tasks = [root, ...run.taskGraph.tasks.filter((item) => item !== root).slice(-127)];
+        }
+      }
+    }
+    run.taskGraph.updatedAt = stamp;
+    return edge;
+  }
+
+  #syncTaskGraph(run, stamp) {
+    const graph = run?.taskGraph;
+    if (!graph || !Array.isArray(graph.tasks) || !Array.isArray(graph.delegations)) return;
+    let changed = false;
+    const update = (record, field, value) => {
+      if (!record || Object.is(record[field], value)) return;
+      record[field] = value;
+      changed = true;
+    };
+    const setStatus = (record, field, value) => {
+      if (!record || !value || Object.is(record[field], value)) return;
+      record[field] = value;
+      record.updatedAt = stamp;
+      changed = true;
+    };
+    const root = graph.tasks.find((item) => item?.id === graph.rootTaskId || item?.kind === "root") || null;
+    const rootStatus = run.status === "succeeded"
+      ? "succeeded"
+      : run.status === "failed"
+        ? "failed"
+        : run.status === "cancelled"
+          ? "cancelled"
+          : run.status === "recovery_required"
+            ? "recovery_required"
+            : ["queued", "planning"].includes(run.status)
+              ? "queued"
+              : ["waiting_approval", "waiting_for_approval"].includes(run.status)
+                ? "waiting_approval"
+                : "running";
+    setStatus(root, "status", rootStatus);
+
+    const attemptStatus = (phase) => {
+      if (phase === "completed") return { task: "succeeded", edge: "completed" };
+      if (phase === "failed") return { task: "failed", edge: "failed" };
+      if (phase === "rejected") return { task: "failed", edge: "rejected" };
+      if (phase === "ambiguous") return { task: "recovery_required", edge: "ambiguous" };
+      if (["prepared", "session_ready", "submitting", "submitted"].includes(phase)) return { task: "running", edge: "running" };
+      return null;
+    };
+    for (const attempt of run.turnAttempts || []) {
+      if (!attempt?.sourceBusMessageId) continue;
+      const edge = graph.delegations.find((item) => item?.busMessageId === attempt.sourceBusMessageId) || null;
+      const task = graph.tasks.find((item) => item?.busMessageId === attempt.sourceBusMessageId) || null;
+      if (!edge && !task) continue;
+      update(edge, "targetAttemptId", attempt.attemptId || null);
+      update(task, "attemptId", attempt.attemptId || null);
+      const projected = attemptStatus(attempt.phase);
+      if (projected) {
+        setStatus(edge, "state", projected.edge);
+        setStatus(task, "status", projected.task);
+      }
+    }
+
+    const terminalProjection = run.status === "succeeded"
+      ? { task: "skipped", edge: "skipped" }
+      : run.status === "failed"
+        ? { task: "failed", edge: "failed" }
+        : run.status === "cancelled"
+          ? { task: "cancelled", edge: "cancelled" }
+          : run.status === "recovery_required"
+            ? { task: "recovery_required", edge: "ambiguous" }
+            : null;
+    if (terminalProjection) {
+      const finalTaskStates = new Set(["succeeded", "failed", "cancelled", "skipped", "blocked", "recovery_required"]);
+      const finalEdgeStates = new Set(["completed", "failed", "cancelled", "skipped", "rejected", "ambiguous"]);
+      for (const task of graph.tasks) {
+        if (task === root || finalTaskStates.has(task?.status)) continue;
+        setStatus(task, "status", terminalProjection.task);
+      }
+      for (const edge of graph.delegations) {
+        if (finalEdgeStates.has(edge?.state)) continue;
+        setStatus(edge, "state", terminalProjection.edge);
+      }
+    }
+    if (changed) graph.updatedAt = stamp;
+  }
+
+  // 异构 resume 契约（AG-15 最小路径）：按 provider 返回可恢复命令，禁止跨 CLI 静默 resume。
+  resumeHintsForRun(run) {
+    const sessions = run?.sessions || {};
+    const hints = [];
+    for (const [agentId, session] of Object.entries(sessions)) {
+      const sessionId = typeof session === "string" ? session : (session?.sessionId || session?.id || null);
+      if (!sessionId) continue;
+      const runtimeProfileId = this.runtimeProfileIdFor(run, agentId);
+      const adapter = this.adapters.get(runtimeProfileId);
+      const protocol = adapter?.id || "unknown";
+      const command = resumeCommandForAdapter(adapter, sessionId);
+      const canResume = Boolean(command);
+      hints.push({
+        agentId,
+        runtimeProfileId,
+        sessionId,
+        protocol,
+        canResume,
+        command,
+        note: canResume
+          ? "native-session resume only; never cross-provider"
+          : "no verified native resume for this adapter",
+      });
+    }
+    return hints;
+  }
+
   async save(run) {
     if (this.clearedRuns.has(run.id)) return run; // 墓碑：已清除 run 的迟到写盘直接丢弃，不复活文件
     // 竞态修复（烛 wave2 P1）：旧序"快照 → await 写盘 → 回写旧快照"会把写盘窗口内的并发变更
@@ -124,6 +1296,7 @@ export class Orchestrator {
     // 被写回重复执行。现序两根支柱：①快照+回写在同一 tick 内完成（事件循环内原子，无覆盖窗口）；
     // ②写盘挂 per-run 链串行（防旧快照后落盘造成磁盘回退）。
     run.updatedAt = new Date().toISOString();
+    this.#syncTaskGraph(run, run.updatedAt);
     const safe = sanitizeForPersistence(run);
     Object.assign(run, safe);
     this.runs.set(run.id, run);
@@ -133,8 +1306,13 @@ export class Orchestrator {
       if (this.clearedRuns.has(run.id)) return;
       const target = join(this.runDir, `${run.id}.json`);
       const temp = join(this.runDir, `.${run.id}.${randomUUID()}.tmp`);
-      await writeFile(temp, `${JSON.stringify(safe, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-      await rename(temp, target);
+      try {
+        await writeFile(temp, `${JSON.stringify(safe, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+        await renameWithRetry(temp, target);
+      } catch (error) {
+        await rm(temp, { force: true }).catch(() => {});
+        throw error;
+      }
     });
     this.saveChains.set(run.id, flush);
     try {
@@ -147,7 +1325,10 @@ export class Orchestrator {
 
   async emitEvent(run, type, data = {}, context = {}) {
     try {
-      return await this.eventStore.emit(type, data, context);
+      return await this.eventStore.emit(type, data, {
+        ...context,
+        sourceRefs: normalizeRunSources(run?.sources),
+      });
     } catch (error) {
       run.auditDegraded = true;
       run.auditErrors = [...(run.auditErrors || []), { type, message: error.message, at: new Date().toISOString() }].slice(-20);
@@ -192,6 +1373,11 @@ export class Orchestrator {
           this.runs.set(run.id, run);
           throw removeError;
         }
+        // 辅助资产随 run 一并回收（烛致命10）：bus 消息流 / git worktree / roster 条目。
+        // best-effort——run 记录已删是既成事实，资产清理失败不回滚（下次清理或人工兜底）
+        await this.bus.remove(run.id).catch(() => {});
+        await this.removeRunWorktree(run).catch(() => {});
+        await this.removeRosterEntries(run.id).catch(() => {});
         cleared.push(run.id);
       } catch {
         // 删除失败的保留在列表，如实反映磁盘状态
@@ -217,24 +1403,89 @@ export class Orchestrator {
     if (findSecretCandidates(prompt).length) {
       throw Object.assign(new Error("prompt contains secret-like material; pass credential references instead of values"), { code: "SENSITIVE_PROMPT" });
     }
+    const idempotencyKey = input.idempotencyKey == null ? null : String(input.idempotencyKey).trim();
+    if (idempotencyKey && (idempotencyKey.length > 200 || !/^[A-Za-z0-9:._-]+$/.test(idempotencyKey))) {
+      throw Object.assign(new Error("idempotencyKey contains unsupported characters or exceeds 200 characters"), { code: "VALIDATION_FAILED" });
+    }
+    if (idempotencyKey) {
+      const existing = [...this.runs.values()].find((item) => item.idempotencyKey === idempotencyKey);
+      if (existing) return existing;
+    }
     // 团队 = 会话级能力配比：成员进路由白名单，提示词/能力声明注入主脑规划轮
     let team = null;
     if (this.teams) {
       team = this.teams.get(String(input.teamId || "team-514cc")); // 不存在 → SOURCE_NOT_FOUND
     }
-    const route = await this.router.preview({
+    const teamMemberIds = team ? [...team.members] : null;
+    const teamRoster = team ? await this.snapshotTeamRoster(teamMemberIds) : null;
+    const requestedAgentIds = normalizeRequestedAgentIds(input.requestedAgentIds, teamMemberIds);
+    // 会话入口与所有持久化身份都是逻辑成员；只有路由器和运行时边界消费 profile id。
+    const coordinatorId = team?.coordinator || "claude-fable";
+    if (teamMemberIds && !teamMemberIds.includes(coordinatorId)) {
+      throw Object.assign(new Error("team coordinator must be a logical team member"), { code: "NOT_TEAM_MEMBER" });
+    }
+    const coordinatorMember = teamRoster ? rosterMember(teamRoster, coordinatorId) : null;
+    if (coordinatorMember && coordinatorMember.coordinatorEligible !== true) {
+      throw Object.assign(new Error(`team coordinator is not executable: ${coordinatorId}`), {
+        code: "RUNTIME_PROFILE_INELIGIBLE",
+        eligibilityReason: coordinatorMember.eligibilityReason || null,
+      });
+    }
+    const orchestrationMode = input.orchestrationMode === "pipeline" ? "pipeline" : "social";
+    if (orchestrationMode !== "social" && requestedAgentIds.length) {
+      throw Object.assign(new Error("requestedAgentIds is only supported by social orchestration"), { code: "VALIDATION_FAILED" });
+    }
+    const explicitStartAgentId = String(input.startAgentId ?? "").trim();
+    const startAgentId = resolveStartAgentId(explicitStartAgentId || null, teamMemberIds, requestedAgentIds[0] || coordinatorId);
+    const initialTargets = initialSocialTargets(startAgentId, requestedAgentIds);
+    const startRuntimeProfileId = teamRoster
+      ? rosterMember(teamRoster, startAgentId)?.runtimeProfileId
+      : startAgentId;
+    if (!startRuntimeProfileId) {
+      throw Object.assign(new Error(`team roster is missing the start member ${startAgentId}`), { code: "NOT_TEAM_MEMBER" });
+    }
+    const requestedProvider = input.requestedProvider == null ? null : String(input.requestedProvider).trim();
+    const requestedProviderMember = teamRoster ? rosterMember(teamRoster, requestedProvider) : null;
+    const runtimeRoute = await this.router.preview({
       prompt,
       taskType: input.taskType,
-      requestedProvider: input.requestedProvider,
+      requestedProvider: requestedProviderMember?.runtimeProfileId || requestedProvider || undefined,
       risk: input.risk,
       needsCurrentSource: input.needsCurrentSource === true,
-      allowedProviders: team ? [...team.members] : null,
+      allowedProviders: teamRoster
+        ? [...new Set(teamRoster.map((member) => member.runtimeProfileId))]
+        : null,
     });
-    const requestedPermissionMode = input.permissionMode === "build" ? "build" : "plan";
+    const route = this.mapRuntimeRoute(runtimeRoute, teamRoster, [
+      requestedProviderMember?.id,
+      startAgentId,
+      ...requestedAgentIds,
+      coordinatorId,
+    ].filter(Boolean));
+    const executionOwnerId = explicitStartAgentId ? startAgentId : route.selected.id;
+    if (teamMemberIds && !teamMemberIds.includes(executionOwnerId)) {
+      throw Object.assign(new Error("execution owner must belong to the selected team"), { code: "NOT_TEAM_MEMBER" });
+    }
+    const executionRuntimeProfileId = teamRoster
+      ? rosterMember(teamRoster, executionOwnerId)?.runtimeProfileId
+      : executionOwnerId;
+    if (!executionRuntimeProfileId) {
+      throw Object.assign(new Error(`team roster is missing the execution owner ${executionOwnerId}`), { code: "NOT_TEAM_MEMBER" });
+    }
+    // plan=只读规划；review=只读深审（允许 read-only shell 语义，仍禁止写盘）；build=审批后可写；
+    // ask/auto/full-access/config=Codex 官方权限档（桌面批准菜单同款，组合见 CODEX_PRESET_NATIVE_MODES）
+    const rawPermission = String(input.permissionMode ?? "").trim().toLowerCase();
+    const requestedPermissionMode = rawPermission || "plan";
+    if (!["plan", "review", "build", ...Object.keys(CODEX_PRESET_NATIVE_MODES)].includes(requestedPermissionMode)) {
+      throw Object.assign(new Error(`unsupported permission mode: ${requestedPermissionMode}`), { code: "VALIDATION_FAILED" });
+    }
     const permissionContract = this.policy.modes?.[requestedPermissionMode];
     if (!permissionContract) throw Object.assign(new Error(`permission mode ${requestedPermissionMode} is not configured`), { code: "POLICY_VIOLATION" });
     if (requestedPermissionMode === "build" && permissionContract.approvalRequired !== true) {
       throw Object.assign(new Error("build mode must remain approval-bound"), { code: "POLICY_VIOLATION" });
+    }
+    if (requestedPermissionMode === "review" && permissionContract.write && permissionContract.write !== false) {
+      throw Object.assign(new Error("review mode must remain non-writing"), { code: "POLICY_VIOLATION" });
     }
     // 会话项目地址：CLI 子进程的工作目录。地址=项目身份（claude 原生按 cwd 归属 ~/.claude/projects）。
     // 校验绝对路径 + 真实存在的目录；不存在/不是目录如实拒绝，不静默回退 repoRoot。
@@ -253,31 +1504,65 @@ export class Orchestrator {
       if (!info.isDirectory()) {
         throw Object.assign(new Error(`session cwd is not a directory: ${requested}`), { code: "INVALID_CWD" });
       }
-      sessionCwd = requested;
+      sessionCwd = await realpath(requested);
     }
-    // /model 会话级模型覆盖（claude 主脑轮生效）：白名单校验——别名或 claude-* 完整 id，拒绝任意串进命令行
+    // v41 波二：远程 run（{hostId, path}）——远端探针校验目录真实存在；与 cwd 互斥（两套 cwd 语义绝不混用）。
+    // 门闸（ssh）+ 主机存在/启用 + 远端 test -d 全在 assertRunnable 一处；失败如实 422/404/409/501。
+    let sessionRemote = null;
+    if (input.remote != null) {
+      if (sessionCwd) {
+        throw Object.assign(new Error("remote and cwd are mutually exclusive run targets"), { code: "VALIDATION_FAILED" });
+      }
+      if (!this.remoteRunner) {
+        throw Object.assign(new Error("remote runner is not wired; remote runs are unavailable"), { code: "REMOTE_UNAVAILABLE" });
+      }
+      const normalized = this.remoteRunner.validateRemote(input.remote);
+      await this.remoteRunner.assertRunnable(normalized.hostId, normalized.path);
+      sessionRemote = normalized;
+    }
+    // v3.6 社会模拟编排：social 为默认内置模式（LO 2026-07-19，无需显式开启）；
+    // pipeline 为可选旧拓扑（/pipeline 前缀或 orchestrationMode:"pipeline" 显式调用）。
+    // startAgentId=「从谁开始」，缺省团队 leader——主脑不再是强制入口（白名单=团队成员）
+    // /model 会话级模型覆盖：优先 CLI 原生动态目录（新模型即日出可用），
+    // 发现失败回退静态 modelOptions；Adapter 明确不支持时在 spawn 前拒绝。
+    const executionProfile = this.models?.profiles?.find((item) => item.id === executionRuntimeProfileId) || null;
+    const executionAdapterTemplate = executionProfile
+      ? ADAPTER_TEMPLATES.find((item) => item.id === executionProfile.adapter) || null
+      : null;
+    const nativePermissionMode = CODEX_PRESET_NATIVE_MODES[requestedPermissionMode]
+      || { plan: "plan", review: "read-only", build: "workspace-write" }[requestedPermissionMode];
+    // Codex 官方档要求 adapter 明确声明预设族（danger-full-access 是标记位）——ask 原生映射
+    // 与 build 同为 workspace-write，不能仅凭原生 id 放行，否则 claude 等模板会被 ask 绕过 build 审批门。
+    if (CODEX_PRESET_NATIVE_MODES[requestedPermissionMode]
+      && !executionAdapterTemplate?.permissionModes?.includes("danger-full-access")) {
+      throw Object.assign(new Error(`${executionOwnerId} adapter does not support Codex official preset ${requestedPermissionMode}`), { code: "UNSUPPORTED_PERMISSION" });
+    }
+    if (executionAdapterTemplate && !executionAdapterTemplate.permissionModes.includes(nativePermissionMode)) {
+      throw Object.assign(new Error(`${executionOwnerId} adapter does not support ${requestedPermissionMode} mode`), { code: "UNSUPPORTED_PERMISSION" });
+    }
     let modelOverride = null;
     if (input.model) {
-      const requested = String(input.model).trim();
-      if (!/^(?:fable|opus|sonnet|haiku|claude-[a-z0-9.-]{1,48})$/i.test(requested)) {
-        throw Object.assign(new Error(`unsupported model: ${requested}`), { code: "INVALID_MODEL" });
-      }
-      modelOverride = requested;
+      modelOverride = await this.validateModelOverride(
+        { executionOwnerId, executionRuntimeProfileId, executionProfile, executionAdapterTemplate },
+        input.model,
+      );
     }
-    // /effort 会话级推理力度覆盖（claude 主脑轮生效）：CLI --effort 白名单五档（含 ultracode，
-    // 2026-07-19 headless 实测 CLI 接受），拒绝任意串进命令行
+    // /effort 会话级推理力度覆盖：档位各家独立（codex 有 max/ultra、grok 有 --reasoning-effort）——
+    // 动态目录优先，静态/manifest 档位兜底；Adapter 未接线时明确拒绝，禁止 silent fallback。
     let effortOverride = null;
     if (input.effort) {
-      const requestedEffort = String(input.effort).trim().toLowerCase();
-      if (!/^(?:low|medium|high|xhigh|ultracode)$/.test(requestedEffort)) {
-        throw Object.assign(new Error(`unsupported effort level: ${requestedEffort}`), { code: "INVALID_EFFORT" });
-      }
-      effortOverride = requestedEffort;
+      effortOverride = await this.validateEffortOverride(
+        { executionOwnerId, executionRuntimeProfileId, executionProfile, executionAdapterTemplate },
+        input.effort,
+      );
     }
-    // 会话入口由团队主脑决定：主脑=规划/综合轮执行者（默认 claude-fable，旧 run 无字段时兜底）
-    const coordinatorId = team?.coordinator || "claude-fable";
+    // v4.0 codeg 对标：委托深度限制（1-8，默认 4）——防止无限递归委派
+    // codeg 的 DelegationBroker 含 depth_limit（1-8）、per-agent defaults、cancel 传播
+    const delegationDepthLimit = Math.max(1, Math.min(8, Number(input.delegationDepthLimit) || 4));
     const requestedMaxRounds = Number(input.maxRounds) || this.policy.limits.maxRounds;
-    const minimumRounds = route.selected.id === coordinatorId ? (route.independentRequired ? 3 : 1) : 3;
+    const topologyMinimumRounds = executionOwnerId === coordinatorId ? (route.independentRequired ? 3 : 1) : 3;
+    const socialMinimumRounds = orchestrationMode === "social" ? initialTargets.length + 1 : 0;
+    const minimumRounds = Math.max(topologyMinimumRounds, socialMinimumRounds);
     if (this.policy.limits.maxRounds < minimumRounds) {
       throw Object.assign(new Error(`permission policy maxRounds cannot satisfy the selected ${minimumRounds}-round topology`), { code: "POLICY_VIOLATION" });
     }
@@ -288,8 +1573,16 @@ export class Orchestrator {
       });
     }
     const now = new Date().toISOString();
+    const runId = randomUUID();
+    const initialResumeQueue = input.execute === true && orchestrationMode === "social"
+      ? mergeResumeQueues(initialTargets.map((to) => ({
+          to,
+          busMessageId: operationMessageId("task", initialTargets.length === 1 && to === startAgentId ? runId : `${runId}:${to}`),
+          kind: "task",
+        })))
+      : [];
     const run = {
-      id: randomUUID(),
+      id: runId,
       status: "queued",
       prompt,
       taskType: route.taskType,
@@ -297,29 +1590,70 @@ export class Orchestrator {
       updatedAt: now,
       maxRounds: Math.max(minimumRounds, Math.min(requestedMaxRounds, this.policy.limits.maxRounds)),
       round: 0,
+      roundsRefunded: 0, // 明确未被 provider 接受的轮次退还数（上界=maxRounds，见 refundAbandonedRound）
       route,
       sessions: {},
       turns: [],
       turnAttempts: [],
       inflightTurns: {},
+      resumeQueue: initialResumeQueue,
+      resumeClaim: null,
       execute: input.execute === true,
       teamId: team?.id ?? null,
       teamName: team?.name ?? null,
       teamBrief: team ? this.teams.brief(team.id) : null,
-      teamMembers: team ? [...team.members] : null, // 成员白名单快照，续聊按此服务端强制隔离（团队删除后仍固化）
+      teamMembers: teamMemberIds, // 逻辑成员白名单快照，续聊按此服务端强制隔离（团队删除后仍固化）
+      teamRoster, // 逻辑成员 → runtime profile 与人格/默认档快照；既有 run 不受后续成员编辑漂移
+      teamRosterVersion: team ? 1 : null,
+      teamSkills: team ? [...(team.skills ?? [])] : null, // 团队 skill 声明快照（成员轮按 agent 负名单过滤注入）
       coordinatorId,
+      orchestrationMode,
+      startAgentId,
+      executionOwnerId,
+      requestedAgentIds,
       modelOverride,
       effortOverride,
+      idempotencyKey,
       cwd: sessionCwd, // null=控制面默认（repoRoot）；有值=会话项目地址，CLI 原生会话落该项目
+      remote: sessionRemote, // v41：{hostId, path}=远端运行位置；null=本机。与 cwd 互斥（create 校验）
+      sources: normalizeRunSources(input.sources), // 结构化来源台账；prompt 仍保留 CLI 可读路径说明
       collaborationMode: input.collaborationMode === "deep" ? "deep" : "standard",
       permissionMode: requestedPermissionMode,
+      delegationDepthLimit, // v4.0：委托深度限制（codeg DelegationBroker 对标）
       maxBudgetUsdPerTurn: Math.max(0.05, Math.min(Number(input.maxBudgetUsdPerTurn) || 0.75, Number(this.policy.limits.maxBudgetUsdPerTurn) || 2)),
       buildApproval: requestedPermissionMode === "build" && input.execute === true
         ? { status: "pending", policySha256: this.policySha256(), actionSha256: null, approvedAt: null }
         : null,
+      // 轻量 Task 图（AG-13 读/写起点）：根任务 + 后续委派边由 social 路由/投影增补
+      taskGraph: {
+        version: 1,
+        rootTaskId: `task-${runId}`,
+        tasks: [{
+          id: `task-${runId}`,
+          kind: "root",
+          title: String(prompt).slice(0, 180),
+          status: "queued",
+          assigneeId: startAgentId,
+          parentTaskId: null,
+          createdAt: now,
+          updatedAt: now,
+        }],
+        delegations: [],
+        updatedAt: now,
+      },
       result: null,
       error: null,
     };
+    for (const item of initialResumeQueue) {
+      if (item.to === startAgentId) continue;
+      this.recordTaskGraphDelegation(run, {
+        fromAgentId: "lo",
+        toAgentId: item.to,
+        busMessageId: item.busMessageId,
+        kind: "mention",
+        state: "queued",
+      });
+    }
     await this.save(run);
     await this.emitEvent(run, "run.created", { taskType: run.taskType, execute: run.execute, route: route.selected, collaborationMode: run.collaborationMode }, { runId: run.id });
     if (!run.execute) {
@@ -356,9 +1690,19 @@ export class Orchestrator {
         return;
       }
       run.buildApproval.status = "approved";
+      run.buildApproval.approvalId = response.approvalId || null;
       run.buildApproval.approvedAt = new Date().toISOString();
+      const lease = this.issueCapabilityLease(run, { actor: "operator" });
       await this.save(run);
-      await this.emitEvent(run, "run.approved", { permissionMode: run.permissionMode, policySha256 }, { runId: run.id });
+      await this.emitEvent(run, "run.approved", {
+        permissionMode: run.permissionMode,
+        policySha256,
+        leaseId: lease?.id || null,
+        leaseExpiresAt: lease?.expiresAt || null,
+      }, { runId: run.id });
+      if (lease) {
+        await this.emitEvent(run, "capability.lease_issued", lease, { runId: run.id, agentId: "control-plane", sensitivity: "sensitive" });
+      }
       await this.startExecution(run.id);
     } catch (error) {
       if (run.status === "cancelled") return;
@@ -372,10 +1716,17 @@ export class Orchestrator {
   async checkpointTurn(run, agentId, attemptId, phase, patch = {}) {
     const attempt = (run.turnAttempts || []).find((item) => item.attemptId === attemptId);
     if (!attempt) throw Object.assign(new Error("turn attempt checkpoint is missing"), { code: "CHECKPOINT_MISSING" });
+    const durableIdentifiers = ["sessionId", "protocol", "clientUserMessageId", "nativeTurnId"];
+    for (const field of durableIdentifiers) {
+      if (patch[field] == null && attempt[field] != null) patch[field] = attempt[field];
+    }
     Object.assign(attempt, patch, { phase, updatedAt: new Date().toISOString() });
     if (attempt.sessionId) run.sessions[agentId] = attempt.sessionId;
     run.inflightTurns ||= {};
-    if (["completed", "failed"].includes(phase)) delete run.inflightTurns[agentId];
+    // rejected/ambiguous 同属终结相位：该 attempt 不会再推进，留在 inflight 只会让 UI 永远显示"正在准备会话"。
+    // "可能已占用原生轮"的语义由 run.status=recovery_required + recoveryNote + resumeClaim 承载，
+    // 不需要 inflight 记账兼任，后者反而挡住了操作者确认恢复后的继续发送。
+    if (["completed", "failed", "rejected", "ambiguous"].includes(phase)) delete run.inflightTurns[agentId];
     else run.inflightTurns[agentId] = attemptId;
     await this.save(run);
     await this.emitEvent(
@@ -394,162 +1745,519 @@ export class Orchestrator {
     );
   }
 
-  async turn(run, agentId, prompt, { allowWorkspaceWrite = false } = {}) {
-    if (run.round >= run.maxRounds) throw Object.assign(new Error("maximum collaboration rounds reached"), { code: "ROUND_LIMIT" });
+  async turn(run, agentId, prompt, {
+    allowWorkspaceWrite = false,
+    cwd = null,
+    sourceWorkItemId = null,
+    sourceBusMessageId = null,
+    allowAutoRecovery = true,
+  } = {}) {
+    const member = this.memberForRun(run, agentId);
+    const runtimeProfileId = member.runtimeProfileId;
+    // Source paths stay in the private run ledger and are injected only at the adapter boundary.
+    // Public run/event prompts keep the operator's original text and receive a filename-only projection.
+    prompt = promptWithRunSources(prompt, run.sources);
+    const promptSha256 = createHash("sha256").update(prompt).digest("hex");
+    const preparedAttempt = sourceWorkItemId
+      ? [...(run.turnAttempts || [])].reverse().find((attempt) =>
+          attempt.agentId === agentId
+          && attempt.sourceWorkItemId === sourceWorkItemId
+          && attempt.phase === "prepared") || null
+      : null;
+    if (preparedAttempt && preparedAttempt.promptSha256 !== promptSha256) {
+      throw Object.assign(new Error("prepared turn prompt changed before safe recovery"), { code: "RECOVERY_REQUIRED" });
+    }
+    if (!preparedAttempt && run.round >= run.maxRounds) {
+      throw Object.assign(new Error("maximum collaboration rounds reached"), { code: "ROUND_LIMIT" });
+    }
     const controller = this.controllers.get(run.id);
     if (!controller || controller.signal.aborted) throw Object.assign(new Error("run cancelled"), { code: "ABORTED" });
+    // 所有 provider turn 的共同准入：social / pipeline / steer / terminal continue 都只能从这里
+    // 进入 adapter。即使团队没有声明任何 Skill，也要读取一次配置，防止损坏文件被绕成“全启用”。
+    if (typeof this.capabilities?.agentDisabledSkills !== "function") {
+      throw Object.assign(new Error("agent capability provider is unavailable; provider dispatch is blocked"), {
+        code: "CAPABILITY_CONFIG_UNAVAILABLE",
+      });
+    }
+    let enabledSkillDeclarations = [];
+    {
+      const disabled = await this.capabilities.agentDisabledSkills(agentId);
+      enabledSkillDeclarations = (run.teamSkills ?? []).filter((skill) => !disabled.has(skill));
+      // teamBrief 是团队级快照，含未按成员过滤的 Skill 总表；provider prompt 中移除该行，
+      // 再由下方成员级声明取代，避免被禁用项仍从另一段提示词漏入。
+      if (run.teamBrief && prompt.includes(run.teamBrief)) {
+        const filteredBrief = run.teamBrief
+          .split(/\r?\n/)
+          .filter((line) => !line.startsWith("团队 Skill（声明，供派工参考）："))
+          .join("\n");
+        prompt = prompt.replace(run.teamBrief, filteredBrief);
+      }
+      if (run.teamSkills?.length) {
+        const declared = enabledSkillDeclarations.length ? enabledSkillDeclarations.join("、") : "无";
+        prompt = `[团队 Skill 提示声明]\n- 本成员本轮声明：${declared}\n- 这只是注入模型的提示词声明，不授予工具、文件、网络或沙箱权限；真实调用仍受 adapter 与运行时策略约束。\n\n${prompt}`;
+      }
+    }
+    const memberPrompt = this.memberPromptForRun(run, agentId);
+    if (memberPrompt) prompt = `${memberPrompt}\n\n${prompt}`;
+    this.assertLifecycleOwner(run, controller);
     const coordinatorId = run.coordinatorId || "claude-fable";
+    const executionOwnerId = executionOwnerIdOf(run);
     const requestsWorkspaceWrite = allowWorkspaceWrite
       && run.permissionMode === "build"
-      && agentId === run.route.selected.id
-      && agentId !== coordinatorId;
+      && agentId === executionOwnerId;
     if (requestsWorkspaceWrite && !this.buildApprovalIsValid(run)) {
       throw Object.assign(new Error("workspace-write requires a current action-bound build approval"), { code: "POLICY_VIOLATION" });
     }
-    // 主脑轮恒 plan（协调者只规划不落盘）；专家轮按审批分 workspace-write / read-only
-    const effectivePermissionMode = agentId === coordinatorId ? "plan" : requestsWorkspaceWrite ? "workspace-write" : "read-only";
-    run.round += 1;
-    run.status = "waiting_agent";
-    const attemptId = randomUUID();
-    run.turnAttempts ||= [];
-    run.inflightTurns ||= {};
-    run.turnAttempts.push({
-      attemptId,
-      round: run.round,
-      agentId,
-      phase: "prepared",
-      promptSha256: createHash("sha256").update(prompt).digest("hex"),
-      sessionId: run.sessions[agentId] || null,
-      protocol: null,
-      clientUserMessageId: null,
-      nativeTurnId: null,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    });
-    run.inflightTurns[agentId] = attemptId;
-    await this.save(run);
-    await this.emitEvent(run, "agent.turn_started", { round: run.round, agentId }, { runId: run.id, sessionId: run.sessions[agentId] || null, agentId });
-
-    const adapter = this.adapters.get(agentId);
+    // Lease 强制：声明式审批通过后仍须 active 租约（哈希+TTL+工作区绑定）
+    if (requestsWorkspaceWrite && !this.activeCapabilityLease(run)) {
+      throw Object.assign(
+        new Error("workspace-write requires an active capability lease (issued, unexpired, action-hash matched)"),
+        { code: "POLICY_VIOLATION", detail: "CAPABILITY_LEASE_REQUIRED" },
+      );
+    }
+    const effectivePermissionMode = run.permissionMode === "plan"
+      ? "plan"
+      : run.permissionMode === "review"
+        ? "read-only"
+        : run.permissionMode === "build"
+          ? requestsWorkspaceWrite
+            ? "workspace-write"
+            : agentId === coordinatorId ? "plan" : "read-only"
+          : CODEX_PRESET_NATIVE_MODES[run.permissionMode]
+            // Codex 官方档：执行拥有者拿原生组合；其余成员保持只读/plan，写面不扩散
+            ? agentId === executionOwnerId
+              ? CODEX_PRESET_NATIVE_MODES[run.permissionMode]
+              : agentId === coordinatorId ? "plan" : "read-only"
+            : null;
+    if (!effectivePermissionMode) {
+      throw Object.assign(new Error(`persisted run has unsupported permission mode: ${run.permissionMode}`), { code: "POLICY_VIOLATION" });
+    }
+    // 远程 run：专用 adapter（SSH 桥 spawn），与本机席位池隔离；fallback 同样远程（绝不回本机执行）
+    const remotePair = run.remote ? await this.remoteAdapterFor(run, runtimeProfileId) : null;
+    const adapter = remotePair ? remotePair.adapter : this.adapters.get(runtimeProfileId);
     if (!adapter) throw Object.assign(new Error(`no executable adapter for ${agentId}`), { code: "ADAPTER_UNAVAILABLE" });
-    let response;
-    const checkpoint = (phase, data = {}) => this.checkpointTurn(run, agentId, attemptId, phase, {
-      sessionId: data.sessionId || run.sessions[agentId] || null,
-      protocol: data.protocol || null,
-      clientUserMessageId: data.clientUserMessageId || null,
-      nativeTurnId: data.turnId || null,
+    const adapterTemplate = adapter.id ? ADAPTER_TEMPLATES.find((item) => item.id === adapter.id) : null;
+    if (adapterTemplate && !adapterTemplate.permissionModes.includes(effectivePermissionMode)) {
+      throw Object.assign(new Error(`${agentId} adapter cannot honor ${effectivePermissionMode}`), { code: "UNSUPPORTED_PERMISSION" });
+    }
+    // worktree 隔离 fail-closed（烛 v3.6 致命7：codex app-server 常驻进程 cwd 固定在控制面仓库，
+    // "隔离"若只是传了个被忽略的参数=写盘发生在错误目录还自称隔离）：写盘轮存在 worktree 时，
+    // adapter 必须声明支持 per-turn cwd，否则拒绝派工——绝不静默降级到 adapter 默认目录
+    if (requestsWorkspaceWrite && run.worktreePath) {
+      const workspace = await attestRunWorkspace(run);
+      cwd = cwd ?? workspace.path;
+      if (adapter.supportsPerTurnCwd !== true) {
+        throw Object.assign(
+          new Error(`${agentId} (${runtimeProfileId}) adapter cannot honor per-turn cwd for worktree isolation; dispatch write turns to a spawn-type adapter (claude/grok-build)`),
+          { code: "UNSUPPORTED_PERMISSION" },
+        );
+      }
+    }
+    const attemptId = preparedAttempt?.attemptId || randomUUID();
+    await this.withLifecycleEffect(run, controller, async () => {
+      if (!preparedAttempt && run.round >= run.maxRounds) {
+        throw Object.assign(new Error("maximum collaboration rounds reached"), { code: "ROUND_LIMIT" });
+      }
+      run.status = "waiting_agent";
+      run.turnAttempts ||= [];
+      run.inflightTurns ||= {};
+      if (preparedAttempt) {
+        preparedAttempt.updatedAt = new Date().toISOString();
+      } else {
+        run.round += 1;
+        run.turnAttempts.push({
+          attemptId,
+          round: run.round,
+          agentId,
+          phase: "prepared",
+          promptSha256,
+          sessionId: run.sessions[agentId] || null,
+          protocol: null,
+          clientUserMessageId: null,
+          nativeTurnId: null,
+          sourceWorkItemId,
+          sourceBusMessageId,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        });
+      }
+      run.inflightTurns[agentId] = attemptId;
+      await this.save(run);
+      await this.emitEvent(run, "agent.turn_started", {
+        round: preparedAttempt?.round || run.round,
+        agentId,
+        resumedPrepared: Boolean(preparedAttempt),
+      }, { runId: run.id, sessionId: run.sessions[agentId] || null, agentId });
     });
+
+    let response;
+    const checkpoint = (phase, data = {}) => this.withLifecycleEffect(run, controller, () =>
+      this.checkpointTurn(run, agentId, attemptId, phase, {
+        sessionId: data.sessionId || run.sessions[agentId] || null,
+        protocol: data.protocol || null,
+        clientUserMessageId: data.clientUserMessageId || null,
+        nativeTurnId: data.turnId || null,
+      }));
     const lifecycle = {
       onSessionStarted: (data) => checkpoint("session_ready", data),
       onTurnSubmitting: (data) => checkpoint("submitting", data),
       onTurnAccepted: (data) => checkpoint("submitted", data),
     };
+    const sendInput = {
+      agentId,
+      sessionId: run.sessions[agentId] || null,
+      prompt,
+      runId: run.id,
+      signal: controller.signal,
+      permissionMode: effectivePermissionMode,
+      maxBudgetUsd: run.maxBudgetUsdPerTurn,
+      timeoutMs: this.policy.limits.turnTimeoutMs,
+      idleTimeoutMs: this.policy.limits.turnIdleTimeoutMs,
+      model: this.effectiveModelFor(run, agentId),
+      effort: this.effectiveEffortFor(run, agentId),
+      cwd: cwd ?? run.cwd ?? null,
+      ...lifecycle,
+    };
     try {
-      response = await adapter.send({
-        sessionId: run.sessions[agentId] || null,
-        prompt,
-        runId: run.id,
-        signal: controller.signal,
-        permissionMode: effectivePermissionMode,
-        maxBudgetUsd: run.maxBudgetUsdPerTurn,
-        timeoutMs: this.policy.limits.turnTimeoutMs,
-        model: agentId === coordinatorId ? run.modelOverride || null : null, // /model 只作用于主脑轮
-        effort: agentId === coordinatorId ? run.effortOverride || null : null, // /effort 同样只作用于主脑轮
-        cwd: run.cwd || null, // 会话项目地址（spawn 型适配器生效；常驻型 codex app-server 沿用启动 cwd）
-        ...lifecycle,
-      });
+      response = await adapter.send(sendInput);
     } catch (error) {
-      if (
-        agentId !== "codex-technical"
-        || controller.signal.aborted
-        || !CODEX_TRANSPORT_FAILURES.has(error.code)
-        || error.safeToFallback !== true
-      ) {
-        if (agentId === "codex-technical" && error.safeToFallback === false) {
-          if (error.sessionId) {
-            run.sessions[agentId] = error.sessionId;
-          }
-          await checkpoint("ambiguous", {
+      const fallback = run.remote
+        ? (remotePair?.fallback ?? null) // 远程 run 的 fallback 必须同样远程——本机 fallback 会把写盘落到错误机器
+        : this.adapters.get(`${runtimeProfileId}-fallback`);
+      const attempt = (run.turnAttempts || []).find((item) => item.attemptId === attemptId);
+      if (error.submissionRejected === true && attempt?.phase === "submitting") {
+        await checkpoint("rejected", {
+          sessionId: error.sessionId || run.sessions[agentId] || null,
+          protocol: error.protocol || null,
+          clientUserMessageId: error.clientUserMessageId || null,
+          turnId: error.turnId || null,
+        });
+      }
+      // The registry owns fallback identity. A known app-server may report its no-replay
+      // boundary even when transport loss prevented lifecycle callbacks from persisting.
+      const isCodexAppServer = adapter.id === "codex-app-server" || Boolean(fallback);
+      const replayBlocked = (candidate) => candidate?.safeToFallback === false
+        && (isCodexAppServer || ["submitting", "submitted", "ambiguous"].includes(attempt?.phase));
+      // ambiguous 封存 + 阻断事件只有一个出口：首轮失败与自动续跑失败都经这里，避免两套台账漂移。
+      const markAmbiguous = async (blockedError) => {
+        if (blockedError.sessionId) run.sessions[agentId] = blockedError.sessionId;
+        await checkpoint("ambiguous", {
+          sessionId: blockedError.sessionId || run.sessions[agentId] || null,
+          protocol: blockedError.protocol || null,
+          clientUserMessageId: blockedError.clientUserMessageId || null,
+          turnId: blockedError.turnId || null,
+        });
+        await this.emitEvent(
+          run,
+          "adapter.replay_blocked",
+          {
+            from: adapter.id || runtimeProfileId,
+            reason: blockedError.message,
+            phase: blockedError.codexPhase || attempt?.phase || "unknown",
+            clientUserMessageId: blockedError.clientUserMessageId || attempt?.clientUserMessageId || null,
+            interruptConfirmed: blockedError.interruptConfirmed === true,
+          },
+          { runId: run.id, sessionId: blockedError.sessionId || run.sessions[agentId] || null, agentId },
+        );
+      };
+      // 已确认打断的只读超时轮：原生会话完好留存且无写盘残留，自动续跑一轮比进人工闸
+      // 更安全也更省——人工"检查"在没有半成品可写的只读轮里没有可检查对象。
+      if (allowAutoRecovery && replayBlocked(error) && !controller.signal.aborted) {
+        const recovery = this.autoRecoveryDecision(run, agentId, error, effectivePermissionMode);
+        if (recovery.ok) {
+          run.autoRecoveries = (run.autoRecoveries || 0) + 1;
+          await checkpoint("failed", {
             sessionId: error.sessionId || run.sessions[agentId] || null,
-            protocol: "app-server-v2",
+            protocol: error.protocol || null,
             clientUserMessageId: error.clientUserMessageId || null,
+            turnId: error.turnId || null,
           });
           await this.emitEvent(
             run,
-            "adapter.replay_blocked",
+            "run.auto_recovery",
             {
-              from: "codex-app-server",
+              agentId,
+              round: run.round,
+              count: run.autoRecoveries,
+              cap: MAX_AUTO_RECOVERIES_PER_RUN,
+              nextRound: run.round + 1,
               reason: error.message,
-              phase: error.codexPhase || "unknown",
-              clientUserMessageId: error.clientUserMessageId || null,
             },
             { runId: run.id, sessionId: error.sessionId || run.sessions[agentId] || null, agentId },
           );
+          return await this.turn(run, agentId, AUTO_RECOVERY_CONTINUATION_PROMPT, {
+            allowWorkspaceWrite,
+            cwd,
+            sourceWorkItemId,
+            sourceBusMessageId,
+            allowAutoRecovery: false,
+          });
         }
-        throw error;
       }
-      const fallback = this.adapters.get("codex-technical-fallback");
-      if (!fallback) throw error;
-      await this.emitEvent(
-        run,
-        "adapter.fallback",
-        { from: "codex-app-server", to: "codex-exec-json", reason: error.message },
-        { runId: run.id, sessionId: run.sessions[agentId] || null, agentId },
-      );
-      response = await fallback.send({
-        sessionId: run.sessions[agentId] || null,
-        prompt,
-        runId: run.id,
-        signal: controller.signal,
-        timeoutMs: this.policy.limits.turnTimeoutMs,
-        ...lifecycle,
-      });
+      if (!response) {
+        if (replayBlocked(error)) await markAmbiguous(error);
+        // Fallback ownership is declared by the adapter registry, not by a reserved profile id.
+        if (
+          !isCodexAppServer
+          || controller.signal.aborted
+          || !CODEX_TRANSPORT_FAILURES.has(error.code)
+          || error.safeToFallback !== true
+        ) {
+          throw error;
+        }
+        if (!fallback) throw error;
+        await this.emitEvent(
+          run,
+          "adapter.fallback",
+          { from: adapter.id || "codex-app-server", to: fallback.id || "codex-exec-json", reason: error.message },
+          { runId: run.id, sessionId: run.sessions[agentId] || null, agentId },
+        );
+        this.assertLifecycleOwner(run, controller);
+        response = await fallback.send(sendInput);
+      }
     }
-    run.sessions[agentId] = response.sessionId;
-    run.turns.push({
-      // id/createdAt/role 供前端重启后从 turns 恢复对话时稳定去重、真实时序排序、正确归属（避免倒置/全显 Agent）
-      id: attemptId,
-      round: run.round,
-      role: "assistant",
-      agentId,
-      createdAt: new Date().toISOString(),
-      sessionId: response.sessionId,
-      protocol: response.protocol,
-      permissionMode: effectivePermissionMode,
-      requestedModel: response.requestedModel ?? null,
-      effectiveModel: response.effectiveModel ?? null,
-      costUsd: response.costUsd ?? null,
-      tokens: response.tokens ?? null, // 状态栏累计用量
-      text: response.text,
+    // Some CLIs cannot or do not honor AbortSignal. Response mutation is owner-gated;
+    // all later bus/result projections use projectionChains, which cancel drains before
+    // publishing the terminal cancellation state.
+    await this.withLifecycleEffect(run, controller, async () => {
+      run.sessions[agentId] = response.sessionId;
+      // run 级累计成本（烛致命9）：有回执的轮累加；无成本回执的 CLI（codex/grok/kimi）如实计不到——
+      // 累计闸只对已知成本硬止损，轮次闸（maxRounds/guardLimit）仍是全 agent 生效的第一道闸
+      if (Number.isFinite(response.costUsd)) run.costUsdTotal = (run.costUsdTotal || 0) + response.costUsd;
+      run.turns.push({
+        // id/createdAt/role 供前端重启后从 turns 恢复对话时稳定去重、真实时序排序、正确归属（避免倒置/全显 Agent）
+        id: attemptId,
+        round: run.round,
+        role: "assistant",
+        agentId,
+        createdAt: new Date().toISOString(),
+        sessionId: response.sessionId,
+        protocol: response.protocol,
+        permissionMode: effectivePermissionMode,
+        requestedModel: response.requestedModel ?? null,
+        effectiveModel: response.effectiveModel ?? null,
+        costUsd: response.costUsd ?? null,
+        tokens: response.tokens ?? null, // 状态栏累计用量
+        text: response.text,
+      });
+      await this.checkpointTurn(run, agentId, attemptId, "completed", {
+        sessionId: response.sessionId,
+        protocol: response.protocol,
+        clientUserMessageId: (run.turnAttempts || []).find((item) => item.attemptId === attemptId)?.clientUserMessageId || null,
+      });
+      this.assertLifecycleOwner(run, controller);
+      await this.emitEvent(run, "agent.turn_completed", {
+        round: run.round,
+        agentId,
+        protocol: response.protocol,
+        permissionMode: effectivePermissionMode,
+        requestedModel: response.requestedModel ?? null,
+        effectiveModel: response.effectiveModel ?? null,
+        costUsd: response.costUsd ?? null,
+        tokens: response.tokens ?? null,
+      }, { runId: run.id, sessionId: response.sessionId, agentId });
     });
-    await checkpoint("completed", {
-      sessionId: response.sessionId,
-      protocol: response.protocol,
-      clientUserMessageId: (run.turnAttempts || []).find((item) => item.attemptId === attemptId)?.clientUserMessageId || null,
-    });
-    await this.save(run);
-    await this.emitEvent(run, "agent.turn_completed", {
-      round: run.round,
-      agentId,
-      protocol: response.protocol,
-      permissionMode: effectivePermissionMode,
-      requestedModel: response.requestedModel ?? null,
-      effectiveModel: response.effectiveModel ?? null,
-      costUsd: response.costUsd ?? null,
-      tokens: response.tokens ?? null,
-    }, { runId: run.id, sessionId: response.sessionId, agentId });
     return response.text;
+  }
+
+  /** run 级已知成本止损：只覆盖会回传 costUsd 的 adapter，不冒充所有 provider 的货币硬顶。 */
+  budgetExhausted(run) {
+    const cap = (Number(run.maxBudgetUsdPerTurn) || 0) * (Number(run.maxRounds) || 0);
+    return cap > 0 && Number(run.costUsdTotal || 0) >= cap;
+  }
+
+  async ensureStablePendingAsk(run, { messages = null, persist = true } = {}) {
+    if (!run.pendingAsk || run.pendingAsk.id) return run.pendingAsk || null;
+    const materialize = async () => {
+      if (!run.pendingAsk || run.pendingAsk.id) return run.pendingAsk || null;
+      const legacy = { ...run.pendingAsk };
+      const members = new Set(run.teamMembers || []);
+      if (!legacy.from || (members.size && !members.has(legacy.from))) {
+        throw Object.assign(new Error("legacy pending ask is not owned by a run team member"), { code: "LEGACY_ASK_INVALID" });
+      }
+      const history = messages || await this.bus.read(run.id);
+      let durable = history.find((message) => message.kind === "ask"
+        && message.to === "lo"
+        && message.from === legacy.from
+        && message.text === legacy.text
+        && (!legacy.at || message.ts === legacy.at));
+      if (!durable) {
+        if (!run.busExpectedAt) run.busExpectedAt = new Date().toISOString();
+        durable = await this.bus.append(run.id, {
+          id: legacyAskMessageId(run, legacy),
+          from: legacy.from,
+          to: "lo",
+          kind: "ask",
+          text: legacy.text,
+          refs: { legacyMigrated: true },
+        });
+        if (!run.busMaterializedAt) run.busMaterializedAt = durable.ts;
+      }
+      run.pendingAsk = { id: durable.id, from: durable.from, text: durable.text, at: durable.ts };
+      run.pausedForInput = true;
+      if (persist) await this.save(run);
+      return run.pendingAsk;
+    };
+    return persist ? this.withRunTransition(run.id, materialize) : materialize();
+  }
+
+  async reconcileSocialBus(run) {
+    if (run.orchestrationMode !== "social" || TERMINAL.has(run.status)) {
+      return { changed: false, resume: false };
+    }
+    let messages = await this.bus.read(run.id);
+    let changed = false;
+    if (run.pendingAsk && !run.pendingAsk.id) {
+      await this.ensureStablePendingAsk(run, { messages, persist: false });
+      messages = await this.bus.read(run.id);
+      changed = true;
+    }
+    if (!messages.length) return { changed, resume: false };
+
+    const members = new Set(run.teamMembers || []);
+    const asks = messages.filter((message) => message.kind === "ask"
+      && message.to === "lo"
+      && (!members.size || members.has(message.from)));
+    const answersByAsk = new Map();
+    for (const ask of asks) {
+      const answer = messages.find((message) => answerOwnsAsk(run, message, ask));
+      if (answer) answersByAsk.set(ask.id, answer);
+    }
+
+    run.askCounts ||= {};
+    const durableAskCounts = new Map();
+    for (const ask of asks) durableAskCounts.set(ask.from, (durableAskCounts.get(ask.from) || 0) + 1);
+    for (const [agentId, count] of durableAskCounts) {
+      if ((run.askCounts[agentId] || 0) < count) {
+        run.askCounts[agentId] = count;
+        changed = true;
+      }
+    }
+
+    const consumedRouteIds = new Set((run.turnAttempts || [])
+      .filter((attempt) => attempt.sourceBusMessageId
+        && ["submitting", "submitted", "ambiguous", "completed"].includes(attempt.phase))
+      .map((attempt) => attempt.sourceBusMessageId));
+    const queuedRoutes = messages
+      .filter((message) => message.kind === "say"
+        && message.refs?.routeDisposition === "queued"
+        && members.has(message.to)
+        && !consumedRouteIds.has(message.id))
+      .map((message) => ({
+        to: message.to,
+        busMessageId: message.id,
+        sourceAttemptId: message.refs?.sourceAttemptId || null,
+        kind: "route",
+      }));
+    const restoredQueue = mergeResumeQueues(run.resumeQueue, queuedRoutes);
+    if (JSON.stringify(run.resumeQueue || []) !== JSON.stringify(restoredQueue)) {
+      run.resumeQueue = restoredQueue;
+      changed = true;
+    }
+
+    const persistedAsk = run.pendingAsk?.id
+      ? asks.find((message) => message.id === run.pendingAsk.id) || null
+      : null;
+    const unansweredAsk = [...asks].reverse().find((message) => !answersByAsk.has(message.id)) || null;
+
+    if (unansweredAsk) {
+      const normalized = {
+        id: unansweredAsk.id,
+        from: unansweredAsk.from,
+        text: unansweredAsk.text,
+        at: unansweredAsk.ts,
+      };
+      if (JSON.stringify(run.pendingAsk ?? null) !== JSON.stringify(normalized)) {
+        run.pendingAsk = normalized;
+        changed = true;
+      }
+      if (run.pausedForInput !== true) {
+        run.pausedForInput = true;
+        changed = true;
+      }
+      return { changed, resume: false };
+    }
+
+    if (persistedAsk && answersByAsk.has(persistedAsk.id)) {
+      const answer = answersByAsk.get(persistedAsk.id);
+      run.pendingAsk = null;
+      run.pausedForInput = false;
+      const promotedSteerId = answer.refs?.queuedSteerId || null;
+      if (promotedSteerId) {
+        const retained = (run.pendingSteer || []).filter((item) => item?.id !== promotedSteerId);
+        if (retained.length !== (run.pendingSteer || []).length) {
+          run.pendingSteer = retained;
+        }
+        if (run.activeSteer?.steerId === promotedSteerId) run.activeSteer = null;
+      }
+      run.resumeQueue = mergeResumeQueues(
+        [{ to: persistedAsk.from, busMessageId: answer.id, kind: "answer" }],
+        run.resumeQueue,
+      );
+      run.recoveryNote = "A durable user answer was reconciled after restart and is queued for safe read-only continuation.";
+      changed = true;
+      return { changed, resume: true };
+    }
+
+    return { changed, resume: false };
+  }
+
+  async appendBus(run, message) {
+    if (!run.busExpectedAt) {
+      run.busExpectedAt = new Date().toISOString();
+      await this.save(run);
+    }
+    const appended = await this.bus.append(run.id, message);
+    if (!run.busMaterializedAt) {
+      run.busMaterializedAt = appended.ts;
+      await this.save(run);
+    }
+    await this.emitEvent(run, "bus.appended", {
+      messageId: appended.id,
+      from: appended.from,
+      to: appended.to,
+      kind: appended.kind,
+    }, { runId: run.id, agentId: appended.from });
+    return appended;
   }
 
   async execute(id) {
     const run = this.get(id);
-    if (TERMINAL.has(run.status)) return run;
+    if (TERMINAL.has(run.status) || run.status === "recovery_required") return run;
     const controller = new AbortController();
     this.controllers.set(id, controller);
     run.status = "running";
     await this.save(run);
     try {
-      const specialistId = run.route.selected.id;
+      // P3 build 隔离（social 与 pipeline 统一，烛致命8：显式 pipeline 曾绕过 worktree）：
+      // build 会话先建 git worktree，全部轮次 cwd 指向隔离副本——真实项目目录零污染。
+      // 无 cwd 的 build（写盘落 adapter 默认目录）不再静默——审计事件如实可见
+      if (run.permissionMode === "build" && run.execute) {
+        if (run.cwd) await this.ensureRunWorktree(run);
+        else if (run.remote && !run.worktreeSkipNoted) {
+          // v41：worktree 是本机 fs+git 语义，远程 run 首波禁用——如实标注，不假装隔离（§3.3）
+          run.worktreeSkipNoted = true;
+          await this.emitEvent(run, "run.worktree_skipped", {
+            reason: "remote run: git worktree isolation is local-only; agent writes directly on the remote host",
+            workspaceIsolation: "remote-unsupported",
+          }, { runId: run.id });
+        } else if (!run.worktreeSkipNoted) {
+          run.worktreeSkipNoted = true;
+          await this.emitEvent(run, "run.worktree_skipped", { reason: "run has no cwd; write turns run in the adapter default directory without worktree isolation" }, { runId: run.id });
+        }
+      }
+      if (run.orchestrationMode === "social") {
+        // v3.6 社会模拟编排：消息驱动主循环（bus.jsonl），与 pipeline 拓扑分治
+        await this.socialLoop(run, controller);
+        // 只有无定向目标的 legacy continuation 才可在 ask 出现后升级为回答。显式 agentId
+        // 始终保留 steer 所有权，成员独立页不会因为同时出现 pendingAsk 而被静默改投发问者。
+        while (run.pausedForInput && run.pendingAsk && !controller.signal.aborted) {
+          const promoted = await this.withProjectionEffect(run, controller, () => this.promoteQueuedAnswer(run));
+          if (!promoted) break;
+          await this.socialLoop(run, controller);
+        }
+      } else {
+      const specialistId = executionOwnerIdOf(run);
       const independentId = run.route.independent?.id || null;
       const coordinatorId = run.coordinatorId || "claude-fable";
       const teamContext = run.teamBrief ? `${run.teamBrief}\n\n` : "";
@@ -559,19 +2267,15 @@ export class Orchestrator {
         await this.injectNextSteer(run);
         return text;
       };
+      const coordinatorOwnsBuild = run.permissionMode === "build" && specialistId === coordinatorId;
       const plan = await turn(
         coordinatorId,
-        `${teamContext}你是 514cc 团队主脑与总协调者。本轮是规划阶段（plan 权限模式，只读不落盘）；禁止声称已写入、已部署或未验证的完成。请输出可公开审计的计划、派工理由、验收标准和给执行者的任务包，不输出隐藏思维链。\n\n用户目标：\n${run.prompt}\n\n路由器建议：${specialistId}\n路由理由：${run.route.reason}`,
+        coordinatorOwnsBuild
+          ? `${teamContext}你是 514cc 团队主脑，也是用户明确选择并获批的执行所有者。请在获批工作区内完成目标并给出可验证证据，不输出隐藏思维链。\n\n用户目标：\n${run.prompt}\n\n路由器建议：${run.route.selected.id}\n路由理由：${run.route.reason}`
+          : `${teamContext}你是 514cc 团队主脑与总协调者。本轮是规划阶段（plan 权限模式，只读不落盘）；禁止声称已写入、已部署或未验证的完成。请输出可公开审计的计划、派工理由、验收标准和给执行者的任务包，不输出隐藏思维链。\n\n用户目标：\n${run.prompt}\n\n执行所有者：${specialistId}\n路由器建议：${run.route.selected.id}\n路由理由：${run.route.reason}`,
+        { allowWorkspaceWrite: coordinatorOwnsBuild },
       );
       if (specialistId === coordinatorId || run.round >= run.maxRounds) {
-        // 主脑兼任被路由选中的执行者时，本分支只做规划轮（plan，只读）不落盘。
-        // build 模式下用户期望写入却不会发生：明示告知而非静默 no-op（严禁 silent fallback）。
-        if (run.permissionMode === "build" && run.execute && specialistId === coordinatorId) {
-          await this.emitEvent(run, "run.coordinator_write_skipped", {
-            coordinatorId,
-            note: "主脑同时被选为执行者，本轮仅规划不落盘；如需写入请改用独立专家或 claude 主脑团队",
-          }, { runId: run.id, agentId: coordinatorId });
-        }
         if (independentId && run.round < run.maxRounds) {
           const independent = await turn(
             independentId,
@@ -593,44 +2297,98 @@ export class Orchestrator {
           `主脑（${coordinatorId}）派发以下任务。请作为独立技术/研究执行者完成，保留证据、指出阻塞并提出明确反问。\n\n原始目标：\n${run.prompt}\n\n主脑计划：\n${plan}`,
           { allowWorkspaceWrite: true },
         );
-        const verifierId = independentId || coordinatorId;
-        const critique = await turn(
-          verifierId,
-          `你是本轮独立验证者。执行者 ${specialistId} 已返回结果。请检查它是否满足原目标，指出缺口、核验证据，并输出可直接作为最终审计结论使用的 verdict；如仍有轮次，再附给执行者的补强指令。\n\n原始目标：\n${run.prompt}\n\n执行结果：\n${specialist}`,
-        );
-        let verified = specialist;
-        if (run.collaborationMode === "deep" && run.round < run.maxRounds - 1) {
-          verified = await turn(
-            specialistId,
-            `独立验证者（${verifierId}）对上一轮结果的复核如下。请在同一个原生会话中完成补强并给出最终证据。\n\n${critique}`,
-            { allowWorkspaceWrite: true },
+        if (run.round >= run.maxRounds) {
+          // 自动恢复也消耗真实 round。预算已尽时保留已完成执行结果并明确标记未复核，
+          // 不能再调用 provider，也不能伪造 independent critique。
+          run.result = { plan, specialist, critique: null, verified: specialist, final: specialist, truncated: true };
+        } else {
+          const verifierId = independentId || coordinatorId;
+          const critique = await turn(
+            verifierId,
+            `你是本轮独立验证者。执行者 ${specialistId} 已返回结果。请检查它是否满足原目标，指出缺口、核验证据，并输出可直接作为最终审计结论使用的 verdict；如仍有轮次，再附给执行者的补强指令。\n\n原始目标：\n${run.prompt}\n\n执行结果：\n${specialist}`,
           );
+          let verified = specialist;
+          if (run.collaborationMode === "deep" && run.round < run.maxRounds - 1) {
+            verified = await turn(
+              specialistId,
+              `独立验证者（${verifierId}）对上一轮结果的复核如下。请在同一个原生会话中完成补强并给出最终证据。\n\n${critique}`,
+              { allowWorkspaceWrite: true },
+            );
+          }
+          const final = run.round < run.maxRounds
+            ? await turn(
+                coordinatorId,
+                `作为主脑，请综合原始目标、执行结果和复核结果，输出最终结论、已验证证据、未完成风险与下一步。不要隐藏工具失败。\n\n原始目标：${run.prompt}\n\n初次执行：${specialist}\n\n复核/补强：${verified}`,
+              )
+            : critique;
+          run.result = { plan, specialist, critique, verified, final };
         }
-        const final = run.round < run.maxRounds
-          ? await turn(
-              coordinatorId,
-              `作为主脑，请综合原始目标、执行结果和复核结果，输出最终结论、已验证证据、未完成风险与下一步。不要隐藏工具失败。\n\n原始目标：${run.prompt}\n\n初次执行：${specialist}\n\n复核/补强：${verified}`,
-            )
-          : critique;
-        run.result = { plan, specialist, critique, verified, final };
       }
+      }
+      // 协程所有权闸（ask 熔断 flaky 追凶根因）：挂起置位（socialLoop 设 pendingAsk/pausedForInput）
+      // 到本收尾之间存在 await 窗口——turn() 每轮开始把 status 写成 waiting_agent，"waiting_agent +
+      // pendingAsk" 对在收尾前就可被观测，LO/UI 此刻回答 → resumePendingAsk 同步清 pausedForInput
+      // 并接管 controller 键。垂死协程若照旧写终态：①pausedForInput 被清 → 误判自然收敛写
+      // succeeded → resume 的 startExecution 撞 execute() 的 TERMINAL 早退 → 回答被吞、run 假成功。
+      // 只有仍持有 controller 键的协程才允许写挂起/终态；键已易主则状态交由新协程决定。
+      const ownsLifecycle = this.controllers.get(id) === controller;
+      if (run.status === "recovery_required") {
+        if (ownsLifecycle) await this.save(run).catch(() => {});
+      } else if (run.pausedForInput) {
+        // v3.6 ask/answer 挂起：队列已空但有未回答的 [[msg:lo]]——run 转为等待输入，
+        // LO 的回答经 continue 恢复主循环（不收敛、不判终、不排干）
+        if (ownsLifecycle) {
+          await this.withProjectionEffect(run, controller, async () => {
+            run.status = "waiting_agent";
+            await this.save(run);
+            await this.emitEvent(run, "run.waiting_input", { from: run.pendingAsk?.from ?? null, text: run.pendingAsk?.text ?? null }, { runId: run.id });
+          });
+        }
+      } else if (ownsLifecycle) {
       // 轮间插话收尾：拓扑走完后仍排队的追问按 FIFO 逐轮续跑，直到清空/封顶/取消（不打断子进程）
-      while ((run.pendingSteer || []).length) {
+      while ((run.pendingSteer || []).length || run.activeSteer) {
         if (!(await this.injectNextSteer(run))) break;
         run.result = { ...(run.result || {}), continued: run.turns.at(-1)?.text ?? null };
       }
-      // abort 与拓扑收尾竞态：取消回执优先，不改回 succeeded
-      run.status = controller.signal.aborted ? "cancelled" : "succeeded";
-      await this.save(run);
-      await this.emitEvent(run, "run.completed", { status: run.status, rounds: run.round, sessions: run.sessions }, { runId: run.id });
+      await this.withProjectionEffect(run, controller, async () => {
+        run.status = "succeeded";
+        await this.save(run);
+        await this.emitEvent(run, "run.completed", { status: run.status, rounds: run.round, sessions: run.sessions }, { runId: run.id });
+      });
+      }
     } catch (error) {
-      run.status = controller.signal.aborted || error.code === "ABORTED" ? "cancelled" : "failed";
-      run.error = error.message;
-      await this.save(run);
-      await this.emitEvent(run, "run.failed", { status: run.status, code: error.code || null, message: error.message }, { runId: run.id });
+      // 同类所有权闸：resume/continue 已接管时不写 failed/cancelled 终态（否则新协程撞 TERMINAL
+      // 早退、回答/追问被吞）——错误如实进 auditErrors 留痕，run 结果由接管协程呈现
+      if (controller.signal.aborted || error.code === "ABORTED") return this.get(id);
+      if (this.controllers.get(id) === controller) {
+        const recoveryBlocked = this.requiresRecovery(run, error);
+        run.status = recoveryBlocked
+          ? "recovery_required"
+          : controller.signal.aborted || error.code === "ABORTED" ? "cancelled" : "failed";
+        run.error = error.message;
+        if (recoveryBlocked) {
+          // 分级恢复文案：interrupt 已获 provider 确认时"可能有活跃工作占用会话"不再成立，
+          // 如实降级为"确认无活跃占用、可能有部分产出"——否则等于对操作者撒谎式恐吓。
+          run.recoveryNote = error.interruptConfirmed === true
+            ? `Native turn was confirmed interrupted (${error.code || "TURN_TIMEOUT"}); no live work owns the session. Partial output may exist — inspect the transcript before acknowledging continuation.`
+            : `Execution stopped while durable work may still own a native turn (${error.code || "EXECUTION_RECOVERY_REQUIRED"}). Inspect the claimed work before acknowledging recovery.`;
+        }
+        await this.save(run);
+        await this.emitEvent(run, run.status === "recovery_required" ? "run.recovery_required" : "run.failed", {
+          status: run.status,
+          code: error.code || null,
+          message: error.message,
+        }, { runId: run.id });
+      } else {
+        run.auditErrors = [...(run.auditErrors || []), { type: "execute.superseded", message: error.message, at: new Date().toISOString() }].slice(-20);
+        await this.save(run).catch(() => {});
+      }
     } finally {
       // 只删自己的 controller：terminal 置位到此处之间新 continue 可能已接管同键（烛 wave2 R5 余波）
       if (this.controllers.get(id) === controller) this.controllers.delete(id);
+      // 远程 run 终态处置其专用 adapter（远端进程树随关通道+pgid kill 回收）；
+      // waiting_agent/recovery_required 保留——续跑/确认后复用同一只（会话连续性）
+      if (run.remote && TERMINAL.has(run.status)) await this.disposeRemoteAdapters(id);
     }
     return this.get(id);
   }
@@ -644,6 +2402,511 @@ export class Orchestrator {
     return execution;
   }
 
+  // P3 build 隔离：build 会话在执行前为 run 建 git worktree，写盘轮 cwd 指到隔离副本——
+  // 真实项目目录不被多 agent 写冲突/半成品污染。限 spawn 型适配器（codex app-server 常驻进程 cwd 固定，如实不适用）。
+  async ensureRunWorktree(run) {
+    if (run.worktreePath) return (await attestRunWorkspace(run)).path;
+    if (run.permissionMode !== "build" || !run.execute || !run.cwd) return null;
+    const probe = await execFileAsync("git", ["-C", run.cwd, "rev-parse", "--show-toplevel"], { timeout: 15_000 }).catch((error) => {
+      throw Object.assign(new Error(`build 会话需要 git 仓库以隔离工作树，${run.cwd} 不是 git 仓库：${error.message}`), { code: "VALIDATION_FAILED" });
+    });
+    const repoTop = probe.stdout.trim();
+    // 随机后缀防同秒并发 run 撞路径（烛建议5：秒级时间戳不是唯一性保证）
+    const stamp = `${new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14)}-${randomUUID().slice(0, 8)}`;
+    const worktreePath = join(repoTop, "..", `${basename(repoTop)}-wt-${stamp}`);
+    await execFileAsync("git", ["-C", repoTop, "worktree", "add", "--detach", worktreePath], { timeout: 60_000 }).catch((error) => {
+      throw Object.assign(new Error(`git worktree add 失败：${String(error.message).slice(0, 200)}`), { code: "VALIDATION_FAILED" });
+    });
+    run.worktreePath = worktreePath;
+    run.worktreeBase = repoTop; // 清理时 git -C <base> worktree remove 用（烛致命10）
+    try {
+      await attestRunWorkspace(run);
+      await this.save(run);
+    } catch (error) {
+      // save 失败即回滚 worktree（烛建议5）：不留没有台账的孤儿工作树
+      await execFileAsync("git", ["-C", repoTop, "worktree", "remove", "--force", worktreePath], { timeout: 60_000 }).catch(() => {});
+      run.worktreePath = null;
+      run.worktreeBase = null;
+      throw error;
+    }
+    await this.emitEvent(run, "run.worktree_created", { worktree: worktreePath, base: repoTop }, { runId: run.id });
+    return worktreePath;
+  }
+
+  /** run 清除时的 worktree 回收：git 感知删除 + prune 兜底；失败如实留痕不阻断清除。 */
+  async removeRunWorktree(run) {
+    if (!run.worktreePath || !run.worktreeBase) return;
+    try {
+      await execFileAsync("git", ["-C", run.worktreeBase, "worktree", "remove", "--force", run.worktreePath], { timeout: 60_000 });
+    } catch {
+      await execFileAsync("git", ["-C", run.worktreeBase, "worktree", "prune"], { timeout: 30_000 }).catch(() => {});
+    }
+  }
+
+  async claimResumeItem(run) {
+    return this.withRunTransition(run.id, async () => {
+      const previousQueue = run.resumeQueue;
+      const previousClaim = run.resumeClaim || null;
+      run.resumeQueue = mergeResumeQueues(run.resumeQueue);
+      let item = null;
+      if (run.resumeClaim?.itemId) {
+        item = run.resumeQueue.find((candidate) => candidate.itemId === run.resumeClaim.itemId) || null;
+        if (!item) {
+          this.markRecoveryIssue(run, "RESUME_CLAIM_ORPHANED", new Error("resume claim no longer owns a queued item"));
+          await this.save(run).catch(() => {});
+          throw Object.assign(new Error("resume claim is orphaned"), { code: "RECOVERY_REQUIRED" });
+        }
+        return item;
+      }
+      item = run.resumeQueue[0] || null;
+      if (!item) return null;
+      run.resumeClaim = {
+        itemId: item.itemId,
+        busMessageId: item.busMessageId || null,
+        to: item.to,
+        claimedAt: new Date().toISOString(),
+      };
+      try {
+        await this.save(run);
+      } catch (error) {
+        run.resumeQueue = previousQueue;
+        run.resumeClaim = previousClaim;
+        throw error;
+      }
+      return item;
+    });
+  }
+
+  async ackResumeItem(run, item, generatedQueue = []) {
+    return this.withRunTransition(run.id, async () => {
+      if (run.resumeClaim?.itemId !== item.itemId) {
+        throw Object.assign(new Error("resume item acknowledgement lost ownership"), { code: "RESUME_OWNERSHIP_LOST" });
+      }
+      const previousQueue = [...(run.resumeQueue || [])];
+      const previousClaim = run.resumeClaim;
+      const remaining = previousQueue.filter((candidate) => candidate.itemId !== item.itemId);
+      if (remaining.length === previousQueue.length) {
+        throw Object.assign(new Error("resume item is missing from the durable queue"), { code: "RESUME_OWNERSHIP_LOST" });
+      }
+      run.resumeQueue = mergeResumeQueues(remaining, generatedQueue);
+      run.resumeClaim = null;
+      try {
+        await this.save(run);
+      } catch (error) {
+        run.resumeQueue = previousQueue;
+        run.resumeClaim = previousClaim;
+        throw error;
+      }
+      return true;
+    });
+  }
+
+  async enqueueSocialFinalization(run, coordinatorId) {
+    return this.withRunTransition(run.id, async () => {
+      const existing = run.resumeClaim?.itemId
+        ? (run.resumeQueue || []).find((item) => item.itemId === run.resumeClaim.itemId && item.kind === "finalize")
+        : (run.resumeQueue || []).find((item) => item.kind === "finalize");
+      if (existing) return existing;
+      const priorAttemptId = run.turnAttempts?.at(-1)?.attemptId || "initial";
+      const item = {
+        itemId: operationMessageId("work", JSON.stringify({ runId: run.id, kind: "finalize", priorAttemptId })),
+        to: coordinatorId,
+        kind: "finalize",
+      };
+      const previousQueue = run.resumeQueue;
+      run.resumeQueue = mergeResumeQueues(run.resumeQueue, [item]);
+      try {
+        await this.save(run);
+      } catch (error) {
+        run.resumeQueue = previousQueue;
+        throw error;
+      }
+      return item;
+    });
+  }
+
+  async processSocialFinalization(run, controller, item, { coordinatorId, teamContext }) {
+    if (!item || item.kind !== "finalize" || item.to !== coordinatorId) {
+      throw Object.assign(new Error("social finalization work item is invalid"), { code: "RECOVERY_REQUIRED" });
+    }
+    const snapshot = this.bus.snapshot(await this.bus.read(run.id), { forAgent: coordinatorId });
+    const final = await this.turn(
+      run,
+      coordinatorId,
+      `${teamContext}你是团队 leader「${coordinatorId}」。团队对话已收敛，请基于以下线程输出最终答复：结论、已验证证据、未完成风险与下一步。不要隐藏工具失败。\n\n线程快照：\n${snapshot}`,
+      { sourceWorkItemId: item.itemId },
+    );
+    await this.withProjectionEffect(run, controller, async () => {
+      await this.appendBus(run, {
+        id: operationMessageId("decision", item.itemId),
+        from: coordinatorId,
+        to: "lo",
+        kind: "decide",
+        text: final,
+      });
+      run.result = { mode: "social", final, bus: this.bus.file(run.id), worktree: run.worktreePath ?? null };
+      // The ack save is the durable commit for both the final result and work ownership. If
+      // shutdown aborts the projection postcheck immediately afterwards, restart still sees a
+      // truthful terminal result instead of a queue-less waiting_agent with no execution owner.
+      run.status = "succeeded";
+      await this.ackResumeItem(run, item);
+    });
+    return final;
+  }
+
+  // ===== v3.6 社会模拟编排：消息驱动主循环 =====
+  // bus.jsonl 是唯一真相：任务/各轮输出全落 bus，turn 上下文从 bus 有界快照编织（不再由主脑人肉转述）。
+  // agent 用 [[msg:目标]] 发起对话；同对往返>2 轮转 leader 收敛（防互问死循环）；非强制沟通——
+  // 没被点名可以不发言，leader 默认拆解任务但不再是唯一入口（startAgentId 可选）。
+  async socialLoop(run, controller) {
+    const coordinatorId = run.coordinatorId || "claude-fable";
+    const members = (run.teamMembers ?? []).length ? run.teamMembers : [coordinatorId];
+    const startAgentId = run.startAgentId && members.includes(run.startAgentId) ? run.startAgentId : coordinatorId;
+    const teamContext = run.teamBrief ? `${run.teamBrief}\n\n` : "";
+    const rosterLine = members.map((member) => `- ${member}`).join("\n");
+    // worktree 隔离已统一在 execute() 入口（social/pipeline 同一道闸，烛致命8）
+    // 恢复队列是 durable work ledger：队首在 provider 前 claim，但直到输出、路由和 ask
+    // 投影全部持久化后才 ack。崩溃时项目仍留在 run JSON，禁止 splice(0) 先清空所有权。
+    if (!run.resumeClaim && !(run.resumeQueue || []).length) {
+      await this.withRunTransition(run.id, async () => {
+        if (run.resumeClaim || (run.resumeQueue || []).length) return;
+        run.resumeQueue = mergeResumeQueues([{
+          to: startAgentId,
+          busMessageId: operationMessageId("task", run.id),
+          kind: "task",
+        }]);
+        await this.save(run);
+      });
+    }
+    const pingPong = new Map(); // "from>to" → 已路由次数
+    let guard = 0;
+    let finalizationCompleted = false;
+    let budgetStopped = false;
+    const guardLimit = Math.max(4, run.maxRounds * 2); // turn() 的 ROUND_LIMIT 之外的第二道闸
+    const hasWork = () => Boolean(run.resumeClaim || (run.resumeQueue || []).length);
+    while (hasWork() && !controller.signal.aborted) {
+      const preparedClaim = run.resumeClaim?.itemId
+        ? (run.turnAttempts || []).some((attempt) =>
+            attempt.sourceWorkItemId === run.resumeClaim.itemId && attempt.phase === "prepared")
+        : false;
+      if (guard++ >= guardLimit || (run.round >= run.maxRounds && !preparedClaim)) break;
+      if (this.budgetExhausted(run)) {
+        // run 级累计成本闸（烛致命9）：已知成本回执超硬顶即停派——落 system 证据，不静默烧穿
+        await this.withProjectionEffect(run, controller, async () => {
+          await this.appendBus(run, { from: "system", to: coordinatorId, kind: "system", text: `run 累计成本 ${run.costUsdTotal.toFixed(4)} USD 已达硬顶，停止派发新轮` });
+          await this.withRunTransition(run.id, async () => {
+            if (run.resumeClaim) {
+              throw Object.assign(new Error("budget stop encountered a claimed durable work item"), { code: "RECOVERY_REQUIRED" });
+            }
+            const previousQueue = run.resumeQueue;
+            const dropped = (run.resumeQueue || []).length;
+            run.resumeQueue = [];
+            try {
+              await this.save(run);
+            } catch (error) {
+              run.resumeQueue = previousQueue;
+              throw error;
+            }
+            if (dropped) {
+              await this.emitEvent(run, "run.resume_dropped", { reason: "BUDGET_EXHAUSTED", count: dropped }, { runId: run.id });
+            }
+          });
+          await this.emitEvent(run, "run.budget_exhausted", { costUsdTotal: run.costUsdTotal }, { runId: run.id });
+        });
+        budgetStopped = true;
+        break;
+      }
+      const next = await this.claimResumeItem(run);
+      if (!next) break;
+      if (!members.includes(next.to)) {
+        this.markRecoveryIssue(run, "RESUME_TARGET_NOT_TEAM_MEMBER", new Error(`durable work target is outside the persisted team: ${next.to}`));
+        await this.save(run).catch(() => {});
+        throw Object.assign(new Error(`durable work target is outside the persisted team: ${next.to}`), { code: "RECOVERY_REQUIRED" });
+      }
+      if (next.kind === "finalize") {
+        await this.processSocialFinalization(run, controller, next, { coordinatorId, teamContext });
+        finalizationCompleted = true;
+        await this.injectNextSteer(run);
+        continue;
+      }
+      if (next.kind === "task") {
+        await this.withProjectionEffect(run, controller, async () => {
+          run.pausedForInput = false;
+          const existingTask = (await this.bus.read(run.id)).find((message) =>
+            message.kind === "task"
+            && message.from === "lo"
+            && message.to === next.to
+            && message.text === run.prompt);
+          if (!existingTask) {
+            await this.appendBus(run, {
+              id: next.busMessageId || operationMessageId("task", run.id),
+              from: "lo",
+              to: next.to,
+              kind: "task",
+              text: run.prompt,
+            });
+          }
+          if (!run.initialTaskProjectedAt) {
+            await this.emitEvent(run, "user.message", { text: run.prompt }, { runId: run.id, agentId: "LO" });
+            run.initialTaskProjectedAt = new Date().toISOString();
+            await this.save(run);
+          }
+        });
+      }
+      const snapshot = this.bus.snapshot(await this.bus.read(run.id), { forAgent: next.to });
+      const prompt = `${teamContext}你是 514cc 团队成员「${next.to}」，正在参与一次团队对话（社会模拟编排）。
+团队名录（可对任意成员发起对话）：
+${rosterLine}
+对话规则：
+- 需要谁回答，另起一行写 [[msg:目标]]，内容随其后；对全员说话写 [[msg:team]]；需要用户拍板写 [[msg:lo]]。
+- 有值得所有后续成员共享的事实/结论/坑，写 [[memo]] 内容（全员黑板，后续轮自动可见）。
+- 指令以外的正文视为发给 team；没被点名可以不发言，只输出有价值的部分。
+- 你只按既有权限行动，禁止声称已写入、已部署或未验证的完成；证据优先。
+对话快照（bus 有界尾部）：
+      ${snapshot}`;
+      const allowWrite = next.to === executionOwnerIdOf(run);
+      const text = await this.turn(run, next.to, prompt, {
+        allowWorkspaceWrite: allowWrite,
+        cwd: allowWrite && run.worktreePath ? run.worktreePath : null,
+        sourceWorkItemId: next.itemId || null,
+        sourceBusMessageId: next.busMessageId || null,
+      });
+      let askRaised = false;
+      await this.withProjectionEffect(run, controller, async () => {
+        await this.registerRoster(run, next.to);
+        const sourceAttemptId = run.turns.at(-1)?.id || null;
+        const { cleaned, directives } = parseDirectives(text);
+        const body = cleaned || (directives.length ? "" : text);
+        if (body) await this.appendBus(run, { from: next.to, to: "team", kind: "say", text: body });
+        let loDirectiveSeen = false;
+        const generatedQueue = [];
+        for (const directive of directives) {
+        if (directive.to === "memo") {
+          // P3 共享黑板：[[memo]] 写入全员可见的运行记忆（快照治理类恒入选，成员间认知互补）
+          await this.appendBus(run, { from: next.to, to: "team", kind: "memo", text: directive.text });
+          await this.emitEvent(run, "bus.routed", { from: next.to, to: "memo", text: directive.text.slice(0, 140) }, { runId: run.id, agentId: next.to });
+          continue;
+        }
+        if (directive.to === "lo") {
+          if (loDirectiveSeen) {
+            await this.emitEvent(run, "run.directive_rejected", {
+              from: next.to,
+              to: "lo",
+              reason: "MULTIPLE_LO_ASKS",
+            }, { runId: run.id, agentId: next.to });
+            continue;
+          }
+          loDirectiveSeen = true;
+          // ask 频次熔断（2026-07-20 LO 报障：grok 每轮拿结论当提问，ask→answer→resume 无限
+          // 打转）：计数持久化在 run 上（pingPong 表是本函数局部量，resume 即归零管不住跨恢复
+          // 循环）——同 agent 每 run 至多挂起 2 次，超限降级为普通发言并落 system 证据，循环
+          // 走向自然收敛而不是第 N 次伸手要回答
+          run.askCounts ||= {};
+          const asks = run.askCounts[next.to] ?? 0;
+          if (asks >= 2) {
+            await this.appendBus(run, { from: next.to, to: "team", kind: "say", text: directive.text });
+            await this.appendBus(run, { from: "system", to: coordinatorId, kind: "system", text: `${next.to} 对 LO 的提问已达单 run 上限（2 次），本条按结论处理不再挂起等待` });
+            await this.emitEvent(run, "run.ask_throttled", { from: next.to, asks }, { runId: run.id, agentId: next.to });
+            continue;
+          }
+          const askMessage = await this.appendBus(run, {
+            from: next.to,
+            to: "lo",
+            kind: "ask",
+            text: directive.text,
+            refs: sourceAttemptId ? { sourceAttemptId } : null,
+          });
+          run.askCounts[next.to] = asks + 1;
+          // ask/answer 挂起语义（烛致命5：ask 后继续消费队列会烧到轮顶，把 run 锁死在
+          // 不可恢复的 waiting_agent）——ask 是硬状态转换，本轮 directive 处理完立即停止派发
+          run.pendingAsk = { id: askMessage.id, from: next.to, text: directive.text, at: askMessage.ts };
+          askRaised = true;
+          await this.emitEvent(run, "bus.routed", { from: next.to, to: "lo", text: directive.text.slice(0, 140) }, { runId: run.id, agentId: next.to });
+          continue;
+        }
+        let routeDisposition = "broadcast";
+        let hops = null;
+        let delegationContext = null;
+        let depthLimitReached = false;
+        if (directive.to !== "team") {
+          if (!members.includes(directive.to)) {
+            routeDisposition = "dropped";
+          } else {
+            const pairKey = `${next.to}>${directive.to}`;
+            hops = (pingPong.get(pairKey) ?? 0) + 1;
+            pingPong.set(pairKey, hops);
+            delegationContext = this.#delegationContext(run, sourceAttemptId);
+            const delegationDepthLimit = Math.max(1, Math.min(8, Number(run.delegationDepthLimit) || 4));
+            depthLimitReached = delegationContext.depth > delegationDepthLimit;
+            routeDisposition = hops > 2 || depthLimitReached ? "dropped" : "queued";
+          }
+        }
+        const routedMessage = await this.appendBus(run, {
+          from: next.to,
+          to: directive.to,
+          kind: "say",
+          text: directive.text,
+          refs: {
+            ...(sourceAttemptId ? { sourceAttemptId } : {}),
+            routeDisposition,
+            ...(delegationContext ? {
+              delegationDepth: delegationContext.depth,
+              delegationDepthLimit: Math.max(1, Math.min(8, Number(run.delegationDepthLimit) || 4)),
+              ...(depthLimitReached ? { rejectionReason: "DELEGATION_DEPTH_LIMIT" } : {}),
+            } : {}),
+          },
+        });
+        await this.emitEvent(run, "bus.routed", {
+          from: next.to,
+          to: directive.to,
+          text: directive.text.slice(0, 140),
+          disposition: routeDisposition,
+        }, { runId: run.id, agentId: next.to });
+        if (directive.to === "team") continue; // team 广播成员在快照自取
+        if (routeDisposition === "dropped") {
+          if (depthLimitReached) {
+            this.recordTaskGraphDelegation(run, {
+              fromAgentId: next.to,
+              toAgentId: directive.to,
+              busMessageId: routedMessage.id,
+              kind: "route",
+              state: "rejected",
+              attemptId: sourceAttemptId,
+            });
+            await this.appendBus(run, {
+              from: "system",
+              to: coordinatorId,
+              kind: "system",
+              text: `${next.to} → ${directive.to} 达到委派深度上限 ${Math.max(1, Math.min(8, Number(run.delegationDepthLimit) || 4))}，本条路由已拒绝`,
+            });
+          }
+          if (members.includes(directive.to) && hops > 2) {
+          // 同对往返超限：指令丢弃 + 系统注记（不补队——否则 leader 的同类输出会自我续队）
+            await this.appendBus(run, { from: "system", to: coordinatorId, kind: "system", text: `${next.to} 与 ${directive.to} 的往返已超 2 轮，本条路由被丢弃，移交 leader 收敛` });
+          }
+          continue;
+        }
+        const delegation = this.recordTaskGraphDelegation(run, {
+          fromAgentId: next.to,
+          toAgentId: directive.to,
+          busMessageId: routedMessage.id,
+          kind: "route",
+          state: "queued",
+          attemptId: sourceAttemptId,
+        });
+        if (delegation?.depthLimitReached) continue;
+        generatedQueue.push({
+          to: directive.to,
+          busMessageId: routedMessage.id,
+          sourceAttemptId,
+          kind: "route",
+        });
+        }
+        await this.ackResumeItem(run, next, generatedQueue);
+      });
+      // Persist every bus projection of the provider response before consuming
+      // a continuation that arrived while that provider turn was in flight.
+      // If the response raised an ask, ownership stays with the ask/answer path. Only an
+      // explicitly legacy/untargeted queued continuation may be promoted by execute().
+      if (!askRaised) await this.injectNextSteer(run);
+      if (askRaised) {
+        break; // 队列剩余项持久冻结；LO 回答后连同 asker 一起复跑
+      }
+    }
+    if (finalizationCompleted) return;
+    if (budgetStopped) {
+      run.result = {
+        mode: "social",
+        final: run.turns.at(-1)?.text ?? null,
+        bus: this.bus.file(run.id),
+        worktree: run.worktreePath ?? null,
+        truncated: true,
+        reason: "budget_exhausted",
+      };
+      return;
+    }
+    // 挂起优先于收敛：有未回答的 [[msg:lo]] → 等 LO 回答（execute 收尾转 waiting_agent，continue 恢复）。
+    // 策略硬顶下连回答轮都腾不出时不挂起（挂了永远无法恢复，烛致命5）——如实按截断收敛
+    if (run.pendingAsk && !controller.signal.aborted && run.round >= this.policy.limits.maxRounds) {
+      await this.withProjectionEffect(run, controller, async () => {
+        await this.appendBus(run, { from: "system", to: "team", kind: "system", text: `${run.pendingAsk.from} 的提问已到策略轮次硬顶，无轮次可回答，按截断收敛` });
+        run.pendingAsk = null;
+      });
+    }
+    if (run.pendingAsk && !controller.signal.aborted) {
+      await this.withProjectionEffect(run, controller, async () => {
+        run.pausedForInput = true;
+        await this.save(run);
+      });
+      return;
+    }
+    run.pausedForInput = false;
+    // 自然收敛后将 leader 最终答复先登记为 durable work；prepared checkpoint 可安全复跑，
+    // submitted/ambiguous/completed-but-unacked 则由重启门 fail closed，避免无 owner 永久停车。
+    if (!controller.signal.aborted && run.round < run.maxRounds) {
+      await this.enqueueSocialFinalization(run, coordinatorId);
+      const finalization = await this.claimResumeItem(run);
+      await this.processSocialFinalization(run, controller, finalization, { coordinatorId, teamContext });
+      await this.injectNextSteer(run);
+    } else {
+      run.result = { mode: "social", final: run.turns.at(-1)?.text ?? null, bus: this.bus.file(run.id), worktree: run.worktreePath ?? null, truncated: true };
+    }
+  }
+
+  // 运行时 roster：每个 turn 完成即登记（agentId → 会话/cwd/心跳）——"谁在线、持有什么会话"程序化可查
+  async registerRoster(run, agentId) {
+    const file = join(this.dataRoot, "roster.json");
+    const entry = {
+      agentId,
+      sessionId: run.sessions[agentId] ?? null,
+      runId: run.id,
+      teamId: run.teamId ?? null,
+      cwd: run.cwd ?? null,
+      status: run.status,
+      lastSeenAt: new Date().toISOString(),
+    };
+    this.rosterChain = this.rosterChain
+      .then(async () => {
+        let roster = { agents: {} };
+        try {
+          roster = JSON.parse(await readFile(file, "utf8"));
+        } catch {
+          // 首写/坏文件：从空开始
+        }
+        roster.agents ||= {};
+        roster.agents[agentId] = entry;
+        await mkdir(this.dataRoot, { recursive: true });
+        await writeFile(file, `${JSON.stringify(roster, null, 2)}\n`, "utf8");
+      })
+      .catch(() => {}); // roster 是辅助资产，写失败不打断编排
+    await this.rosterChain;
+  }
+
+  /** run 清除时的 roster 回收（烛致命10）：runId 归属的条目一并移除。 */
+  async removeRosterEntries(runId) {
+    const file = join(this.dataRoot, "roster.json");
+    this.rosterChain = this.rosterChain
+      .then(async () => {
+        let roster;
+        try {
+          roster = JSON.parse(await readFile(file, "utf8"));
+        } catch {
+          return; // 无 roster 文件即无事可清
+        }
+        const agents = roster?.agents ?? {};
+        let dirty = false;
+        for (const [agentId, entry] of Object.entries(agents)) {
+          if (entry?.runId === runId) {
+            delete agents[agentId];
+            dirty = true;
+          }
+        }
+        if (dirty) await writeFile(file, `${JSON.stringify(roster, null, 2)}\n`, "utf8");
+      })
+      .catch(() => {});
+    await this.rosterChain;
+  }
+
   // 收尾窗口兜底：terminal 置位与 controller/executions 释放之间排入的插话没有活跃消费者，
   // 协程链彻底结束后补启后台 drain——排队项最多滞留一瞬，绝不静默丢失。队列空/run 已清除时 no-op。
   ensureSteerDrained(id) {
@@ -651,7 +2914,7 @@ export class Orchestrator {
     const run = this.runs.get(id);
     if (!run || this.clearedRuns.has(id)) return;
     if (this.executions.has(id)) return; // 已有 execute/drain 在消费——再建 controller 只会覆盖占位（烛 R6）
-    if (!(run.pendingSteer || []).length) return;
+    if (!(run.pendingSteer || []).length && !run.activeSteer) return;
     // 仅 succeeded 补收：cancelled/failed 的留队是取消/失败语义的如实呈现，重启消费违背用户意图（烛 R6）
     if (run.status !== "succeeded") return;
     // 封顶主动留队（丢弃即停排、剩余如实可见）不是滞留——补启只会把留队项逐条丢光，违背审计语义
@@ -661,22 +2924,331 @@ export class Orchestrator {
     this.startSteerDrain(id, controller);
   }
 
+  /**
+   * 放弃可疑轮的唯一收口。两条恢复确认路径（queueSteer 排队 / continue 直发）语义必须完全一致——
+   * 各写一份的结果就是漂移：注记文案不同、`inflightTurns` 只有排队那条清（同一个坑修了一半，
+   * 直发路径照旧卡在"正在准备会话"）。改动请只改这里。
+   *
+   * 调用方负责：先快照 abandonmentSnapshot(run)，save 失败时 restoreAbandonment 回滚。
+   */
+  acknowledgeAbandonedWork(run) {
+    const resumeItemId = run.resumeClaim?.itemId || null;
+    const steerId = run.activeSteer?.steerId || null;
+    if (resumeItemId) run.resumeQueue = (run.resumeQueue || []).filter((item) => item?.itemId !== resumeItemId);
+    if (steerId) run.pendingSteer = (run.pendingSteer || []).filter((item) => item?.id !== steerId);
+    run.resumeClaim = null;
+    run.activeSteer = null;
+    // inflight 记账必须一并作废：否则该成员永远显示"正在准备会话"，新消息被当成排队而发不出去，
+    // 确认恢复按钮等于无效（LO 2026-08-08：余额恢复后既不能发送也不能恢复）。
+    run.inflightTurns = {};
+    run.recoveryAcknowledgedAt = new Date().toISOString();
+    run.recoveryNote = "Operator acknowledged and abandoned the claimed work before continuing.";
+    return this.refundAbandonedRound(run);
+  }
+
+  /**
+   * 只有机械证明未被 provider 接受的轮次才可退：prepared/session_ready 尚未提交 prompt，
+   * rejected 是 turn/start 的窄白名单准入拒绝。submitting/submitted/ambiguous 都可能已经
+   * 到达 provider，退还会允许超过 maxRounds 次真实派发。
+   */
+  refundableAbandonedAttempt(run) {
+    const refunded = Math.max(0, Math.trunc(Number(run.roundsRefunded) || 0));
+    const cap = Math.max(0, Math.trunc(Number(run.maxRounds) || 0));
+    const round = Math.max(0, Math.trunc(Number(run.round) || 0));
+    if (refunded >= cap || round === 0) return null;
+    const attempt = (run.turnAttempts || []).at(-1);
+    if (!attempt || Number(attempt.round) !== round) return null;
+    if (!["prepared", "session_ready", "rejected"].includes(attempt.phase)) return null;
+    return { attempt, refunded, round };
+  }
+
+  canRefundAbandonedRound(run) {
+    return Boolean(this.refundableAbandonedAttempt(run));
+  }
+
+  refundAbandonedRound(run) {
+    const candidate = this.refundableAbandonedAttempt(run);
+    if (!candidate) return null;
+    const { attempt, refunded, round } = candidate;
+    run.round = round - 1;
+    run.roundsRefunded = refunded + 1;
+    return { round: run.round, roundsRefunded: run.roundsRefunded, attemptId: attempt.attemptId, phase: attempt.phase };
+  }
+
+  /** 恢复确认涉及的全部字段快照——save 失败必须整体回滚，不能留半套状态。 */
+  abandonmentSnapshot(run) {
+    return {
+      resumeQueue: [...(run.resumeQueue || [])],
+      pendingSteer: [...(run.pendingSteer || [])],
+      resumeClaim: run.resumeClaim || null,
+      activeSteer: run.activeSteer || null,
+      inflightTurns: { ...(run.inflightTurns || {}) },
+      round: run.round,
+      roundsRefunded: run.roundsRefunded,
+      recoveryAcknowledgedAt: run.recoveryAcknowledgedAt,
+      recoveryNote: run.recoveryNote,
+    };
+  }
+
+  restoreAbandonment(run, snapshot) {
+    if (!snapshot) return;
+    Object.assign(run, snapshot);
+  }
+
+  async queueSteer(run, {
+    prompt,
+    agentId,
+    answerCandidate = false,
+    admissionEpoch = null,
+    acknowledgeRecovery = false,
+  }) {
+    const queued = {
+      id: randomUUID(),
+      prompt,
+      agentId,
+      queuedAt: new Date().toISOString(),
+      ...(answerCandidate ? { answerCandidate: true } : {}),
+    };
+    let refund = null;
+    await this.withRunTransition(run.id, async () => {
+      if (admissionEpoch != null) this.assertContinuationAdmission(run.id, admissionEpoch);
+      const previousRecovery = acknowledgeRecovery ? this.abandonmentSnapshot(run) : null;
+      if (run.status === "recovery_required" && acknowledgeRecovery) {
+        refund = this.acknowledgeAbandonedWork(run);
+      }
+      run.pendingSteer ||= [];
+      run.pendingSteer.push(queued);
+      try {
+        await this.save(run);
+        await this.emitEvent(run, "run.steer_queued", {
+          text: prompt,
+          agentId,
+          depth: run.pendingSteer.length,
+        }, { runId: run.id, agentId: "LO" });
+      } catch (error) {
+        const ownedIndex = run.pendingSteer.findIndex((item) => item?.id === queued.id);
+        if (ownedIndex >= 0) run.pendingSteer.splice(ownedIndex, 1);
+        this.restoreAbandonment(run, previousRecovery);
+        refund = null;
+        throw error;
+      }
+    });
+    // 退还只在落盘成功后才播报，避免回滚过的账目出现在会话流里
+    if (refund) await this.emitRoundRefund(run, refund);
+    return queued;
+  }
+
+  /** 轮次退还的审计与可见性：不落事件就等于悄悄改配额，人看不见也审计不到。 */
+  async emitRoundRefund(run, refund) {
+    await this.emitEvent(run, "run.round_refunded", {
+      round: refund.round,
+      maxRounds: run.maxRounds,
+      roundsRefunded: refund.roundsRefunded,
+      attemptId: refund.attemptId,
+      phase: refund.phase,
+    }, { runId: run.id });
+  }
+
+  // Provider 在途时，旧客户端可能在 ask 尚未出现前发送无定向 continuation。只有这种
+  // answerCandidate 可以升级；先把 answer 追加到 durable bus，成功后才转移 pendingAsk/queue 所有权。
+  async promoteQueuedAnswer(run) {
+    await this.ensureStablePendingAsk(run);
+    const ask = run.pendingAsk;
+    if (!ask) return false;
+    const candidateIndex = (run.pendingSteer || []).findIndex((item) => item?.answerCandidate === true);
+    if (candidateIndex < 0) return false;
+    if (this.askClaims.has(run.id)) return false;
+    const candidate = run.pendingSteer[candidateIndex];
+    const claimId = ask.id;
+    this.askClaims.set(run.id, claimId);
+    try {
+      const answerMessage = await this.appendBus(run, {
+        id: operationMessageId("answer", ask.id),
+        from: "lo",
+        to: ask.from,
+        kind: "answer",
+        text: candidate.prompt,
+        refs: { answerToAskId: ask.id, queuedSteerId: candidate.id },
+      });
+      await this.withRunTransition(run.id, async () => {
+        if (run.pendingAsk?.id !== ask.id) {
+          throw Object.assign(new Error("the pending ask changed before the queued answer committed"), { code: "ASK_MISMATCH" });
+        }
+        const liveIndex = (run.pendingSteer || []).findIndex((item) => item?.id === candidate.id);
+        if (liveIndex < 0) {
+          throw Object.assign(new Error("the queued answer no longer owns its pending steer"), { code: "ANSWER_OWNERSHIP_LOST" });
+        }
+        const previous = {
+          pendingAsk: run.pendingAsk,
+          pausedForInput: run.pausedForInput,
+          resumeQueue: [...(run.resumeQueue || [])],
+          maxRounds: run.maxRounds,
+        };
+        run.pendingSteer.splice(liveIndex, 1);
+        run.pendingAsk = null;
+        run.pausedForInput = false;
+        run.resumeQueue = mergeResumeQueues(
+          [{ to: ask.from, busMessageId: answerMessage.id, kind: "answer" }],
+          run.resumeQueue,
+        );
+        run.maxRounds = Math.min(this.policy.limits.maxRounds, Math.max(run.maxRounds, run.round + 2));
+        try {
+          await this.save(run);
+        } catch (error) {
+          if (!(run.pendingSteer || []).some((item) => item?.id === candidate.id)) {
+            run.pendingSteer.splice(Math.min(liveIndex, run.pendingSteer.length), 0, candidate);
+          }
+          run.pendingAsk = previous.pendingAsk;
+          run.pausedForInput = previous.pausedForInput;
+          run.resumeQueue = previous.resumeQueue;
+          run.maxRounds = previous.maxRounds;
+          throw error;
+        }
+      });
+      await this.emitEvent(run, "user.message", { text: candidate.prompt }, { runId: run.id, agentId: "LO" });
+      return true;
+    } catch (error) {
+      run.auditErrors = [...(run.auditErrors || []), {
+        type: "answer.promotion_deferred",
+        message: error.message,
+        at: new Date().toISOString(),
+      }].slice(-20);
+      if (error.code === "BUS_MESSAGE_CONFLICT") {
+        await this.withRunTransition(run.id, async () => {
+          this.markRecoveryIssue(run, "ANSWER_MESSAGE_CONFLICT", error);
+          await this.save(run).catch(() => {});
+        });
+      }
+      await this.emitEvent(run, "run.answer_deferred", {
+        code: error.code || null,
+        message: error.message,
+      }, { runId: run.id, agentId: "LO" });
+      return false;
+    } finally {
+      if (this.askClaims.get(run.id) === claimId) this.askClaims.delete(run.id);
+    }
+  }
+
   // 取最早一条排队追问注入为下一轮：先发 user.message（前端实时可见），再走既有 turn 路径。
   // 只在 turn 边界被调用（execute 轮间 / 排干 driver），绝不打断进行中的子进程。
   // 轮预算尽量自带（maxRounds+1、封顶策略上限，不吃拓扑既有轮次）；腾挪不出一轮时如实丢弃留痕，不把 run 打 failed。
   // 返回 false = 轮次封顶已丢弃，调用方应停止排干（剩余追问留在队列里如实可见）。
   async injectNextSteer(run) {
-    const steer = (run.pendingSteer || []).shift();
-    if (!steer) return true;
-    run.maxRounds = Math.min(this.policy.limits.maxRounds, run.maxRounds + 1);
-    if (run.round >= run.maxRounds) {
-      await this.save(run); // 出队落盘，重启后队列状态如实恢复
-      await this.emitEvent(run, "run.steer_dropped", { text: steer.prompt, agentId: steer.agentId, reason: "ROUND_LIMIT" }, { runId: run.id, agentId: "LO" });
+    const controller = this.controllers.get(run.id);
+    if (controller) this.assertLifecycleOwner(run, controller);
+    const project = (operation) => controller
+      ? this.withProjectionEffect(run, controller, operation)
+      : operation();
+    const steer = run.activeSteer?.steerId
+      ? (run.pendingSteer || []).find((item) => item?.id === run.activeSteer.steerId)
+      : (run.pendingSteer || [])[0];
+    if (!steer) {
+      if (run.activeSteer) {
+        this.markRecoveryIssue(run, "STEER_CLAIM_ORPHANED", new Error("active steer no longer owns a queued item"));
+        await this.save(run).catch(() => {});
+        throw Object.assign(new Error("active steer claim is orphaned"), { code: "RECOVERY_REQUIRED" });
+      }
+      return true;
+    }
+    const priorMaxRounds = run.activeSteer?.priorMaxRounds ?? run.maxRounds;
+    const nextMaxRounds = run.activeSteer?.maxRounds
+      ?? Math.min(this.policy.limits.maxRounds, run.maxRounds + 1);
+    if (!run.activeSteer && run.round >= nextMaxRounds) {
+      await project(async () => {
+        await this.withRunTransition(run.id, async () => {
+          const liveIndex = (run.pendingSteer || []).findIndex((item) => item?.id === steer.id);
+          if (liveIndex < 0) return;
+          run.pendingSteer.splice(liveIndex, 1);
+          run.maxRounds = nextMaxRounds;
+          try {
+            await this.save(run);
+          } catch (error) {
+            run.pendingSteer.splice(Math.min(liveIndex, run.pendingSteer.length), 0, steer);
+            run.maxRounds = priorMaxRounds;
+            throw error;
+          }
+        });
+        await this.emitEvent(run, "run.steer_dropped", { text: steer.prompt, agentId: steer.agentId, reason: "ROUND_LIMIT" }, { runId: run.id, agentId: "LO" });
+      });
       return false;
     }
-    await this.save(run); // 出队 + 轮预算一并落盘
-    await this.emitEvent(run, "user.message", { text: steer.prompt }, { runId: run.id, agentId: "LO" });
-    await this.turn(run, steer.agentId || run.coordinatorId || "claude-fable", steer.prompt);
+    const targetAgentId = steer.agentId || run.coordinatorId || "claude-fable";
+    let steerMessage = null;
+    await project(async () => {
+      if (run.orchestrationMode === "social") {
+        steerMessage = await this.appendBus(run, {
+          id: operationMessageId("steer", steer.id),
+          from: "lo",
+          to: targetAgentId,
+          kind: "steer",
+          text: steer.prompt,
+          refs: steer.id ? { queuedSteerId: steer.id } : null,
+        });
+      }
+      await this.withRunTransition(run.id, async () => {
+        const liveIndex = (run.pendingSteer || []).findIndex((item) => item?.id === steer.id);
+        if (liveIndex < 0) {
+          throw Object.assign(new Error("the queued steer no longer owns its pending entry"), { code: "STEER_OWNERSHIP_LOST" });
+        }
+        if (run.activeSteer && run.activeSteer.steerId !== steer.id) {
+          throw Object.assign(new Error("another queued steer already owns the active claim"), { code: "STEER_OWNERSHIP_LOST" });
+        }
+        const previousActive = run.activeSteer || null;
+        const previousMaxRounds = run.maxRounds;
+        run.activeSteer ||= {
+          steerId: steer.id,
+          busMessageId: steerMessage?.id || null,
+          to: targetAgentId,
+          priorMaxRounds,
+          maxRounds: nextMaxRounds,
+          claimedAt: new Date().toISOString(),
+        };
+        run.maxRounds = nextMaxRounds;
+        try {
+          await this.save(run);
+        } catch (error) {
+          run.activeSteer = previousActive;
+          run.maxRounds = previousMaxRounds;
+          throw error;
+        }
+      });
+      await this.emitEvent(run, "user.message", { text: steer.prompt }, { runId: run.id, agentId: "LO" });
+    });
+    const response = await this.turn(run, targetAgentId, steer.prompt, {
+      sourceWorkItemId: steer.id,
+      sourceBusMessageId: steerMessage?.id || run.activeSteer?.busMessageId || null,
+    });
+    await project(async () => {
+      if (run.orchestrationMode === "social") {
+        await this.appendBus(run, {
+          id: operationMessageId("steer-reply", steer.id),
+          from: targetAgentId,
+          to: "lo",
+          kind: "say",
+          text: response,
+          refs: { queuedSteerId: steer.id },
+        });
+      }
+      await this.withRunTransition(run.id, async () => {
+        if (run.activeSteer?.steerId !== steer.id) {
+          throw Object.assign(new Error("queued steer acknowledgement lost ownership"), { code: "STEER_OWNERSHIP_LOST" });
+        }
+        const liveIndex = (run.pendingSteer || []).findIndex((item) => item?.id === steer.id);
+        if (liveIndex < 0) {
+          throw Object.assign(new Error("queued steer disappeared before acknowledgement"), { code: "STEER_OWNERSHIP_LOST" });
+        }
+        const previousActive = run.activeSteer;
+        run.pendingSteer.splice(liveIndex, 1);
+        run.activeSteer = null;
+        try {
+          await this.save(run);
+        } catch (error) {
+          run.pendingSteer.splice(Math.min(liveIndex, run.pendingSteer.length), 0, steer);
+          run.activeSteer = previousActive;
+          throw error;
+        }
+      });
+    });
     return true;
   }
 
@@ -684,17 +3256,30 @@ export class Orchestrator {
   async drainSteer(id, controller) {
     const run = this.get(id);
     try {
-      while ((run.pendingSteer || []).length && !controller.signal.aborted) {
+      while (((run.pendingSteer || []).length || run.activeSteer) && !controller.signal.aborted) {
         if (!(await this.injectNextSteer(run))) break;
-        run.status = controller.signal.aborted ? "cancelled" : "succeeded"; // 轮内被取消不覆盖 cancel 回执
-        run.result = { ...(run.result || {}), continued: run.turns.at(-1)?.text ?? null };
-        await this.save(run);
+        await this.withProjectionEffect(run, controller, async () => {
+          run.status = "succeeded";
+          run.result = { ...(run.result || {}), continued: run.turns.at(-1)?.text ?? null };
+          await this.save(run);
+        });
       }
     } catch (error) {
-      run.status = controller.signal.aborted ? "cancelled" : "failed";
+      if (controller.signal.aborted || error.code === "ABORTED" || error.code === "RUN_CANCELLED") return;
+      const recoveryBlocked = this.requiresRecovery(run, error);
+      run.status = recoveryBlocked
+        ? "recovery_required"
+        : controller.signal.aborted ? "cancelled" : "failed";
       run.error = error.message;
+      if (recoveryBlocked) {
+        run.recoveryNote = `Queued continuation stopped while its durable claim may own a native turn (${error.code || "STEER_RECOVERY_REQUIRED"}). Inspect the claimed work before acknowledging recovery.`;
+      }
       await this.save(run);
-      await this.emitEvent(run, "run.failed", { status: run.status, code: error.code || null, message: error.message }, { runId: id });
+      await this.emitEvent(run, run.status === "recovery_required" ? "run.recovery_required" : "run.failed", {
+        status: run.status,
+        code: error.code || null,
+        message: error.message,
+      }, { runId: id });
     } finally {
       if (this.controllers.get(id) === controller) this.controllers.delete(id);
     }
@@ -711,9 +3296,34 @@ export class Orchestrator {
     return drain;
   }
 
-  async continue(id, { prompt, agentId = null, acknowledgeRecovery = false }) {
+  async continue(id, request = {}) {
     const run = this.get(id);
-    agentId = agentId || run.coordinatorId || "claude-fable"; // 续聊缺省回到团队主脑（会话入口）
+    const admissionEpoch = this.cancelEpoch(id);
+    this.assertContinuationAdmission(id, admissionEpoch);
+    const explicitAgentTarget = typeof request.agentId === "string" && request.agentId.trim().length > 0;
+    let { prompt, agentId = null, answerToAskId = null, messageIntent = null, acknowledgeRecovery = false } = request;
+    answerToAskId = answerToAskId == null ? null : String(answerToAskId).trim();
+    messageIntent = messageIntent == null ? null : String(messageIntent).trim().toLowerCase();
+    if (messageIntent && !["answer", "steer"].includes(messageIntent)) {
+      throw Object.assign(new Error("messageIntent must be answer or steer"), { code: "VALIDATION_FAILED" });
+    }
+    if (answerToAskId && !/^[A-Za-z0-9._:-]{1,160}$/.test(answerToAskId)) {
+      throw Object.assign(new Error("answerToAskId is invalid"), { code: "VALIDATION_FAILED" });
+    }
+    if (messageIntent === "answer" && !answerToAskId) {
+      if (run.pendingAsk && !run.pendingAsk.id) {
+        await this.ensureStablePendingAsk(run);
+        answerToAskId = run.pendingAsk?.id || null;
+      }
+      if (!answerToAskId) {
+        throw Object.assign(new Error("messageIntent answer requires answerToAskId"), { code: "VALIDATION_FAILED" });
+      }
+    }
+    if (messageIntent === "steer" && answerToAskId) {
+      throw Object.assign(new Error("messageIntent steer cannot include answerToAskId"), { code: "VALIDATION_FAILED" });
+    }
+    const pendingAskOwnerId = String(run.pendingAsk?.from || "").trim();
+    agentId = agentId || (run.pendingAsk && messageIntent !== "steer" ? pendingAskOwnerId : executionOwnerIdOf(run));
     if (this.closing) throw Object.assign(new Error("control plane is shutting down"), { code: "CONTROL_PLANE_CLOSING" });
     const nextPrompt = String(prompt || "").trim();
     if (!nextPrompt) throw Object.assign(new Error("prompt is required"), { code: "INVALID_PROMPT" });
@@ -725,27 +3335,57 @@ export class Orchestrator {
     if (run.status === "recovery_required" && acknowledgeRecovery !== true) {
       throw Object.assign(new Error("the previous native turn has an ambiguous submission state"), { code: "RECOVERY_REQUIRED" });
     }
-    if (!this.adapters.get(agentId)) throw Object.assign(new Error(`no executable adapter for ${agentId}`), { code: "ADAPTER_UNAVAILABLE" });
     // 续聊只能派给团队成员（派工白名单服务端强制，不信前端下拉）——旧 run 无快照时放行兼容
     if (Array.isArray(run.teamMembers) && !run.teamMembers.includes(agentId)) {
       throw Object.assign(new Error(`${agentId} is not a member of this run's team`), { code: "NOT_TEAM_MEMBER" });
     }
-    if (run.round >= this.policy.limits.maxRounds) {
-      throw Object.assign(new Error("maximum collaboration rounds reached"), { code: "ROUND_LIMIT" });
+    const runtimeProfileId = this.runtimeProfileIdFor(run, agentId);
+    if (!this.adapters.get(runtimeProfileId)) {
+      throw Object.assign(new Error(`no executable adapter for ${agentId} (${runtimeProfileId})`), { code: "ADAPTER_UNAVAILABLE" });
     }
-    // recovery 确认在全部准入校验通过后才写入（烛 wave2 回炉 P2）：先写后校验会在校验抛错时
-    // 留下未持久化的孤儿字段，内存与磁盘分叉
-    if (run.status === "recovery_required") {
-      run.recoveryAcknowledgedAt = new Date().toISOString();
-      run.recoveryNote = "Operator acknowledged the ambiguous prior turn before sending a new prompt.";
+    // 显式 answerToAskId 是 answer 所有权凭据；messageIntent 区分新客户端的 answer/steer。
+    // 旧客户端没有 messageIntent，继续按历史 pendingAsk=answer 语义兼容。
+    if ((answerToAskId || messageIntent === "answer") && !run.pendingAsk) {
+      throw Object.assign(new Error("the referenced ask is no longer pending"), { code: "ASK_NOT_PENDING" });
+    }
+    if (run.orchestrationMode === "social" && run.pendingAsk) {
+      if (answerToAskId && answerToAskId !== run.pendingAsk.id) {
+        throw Object.assign(new Error("answerToAskId does not own the current pending ask"), { code: "ASK_MISMATCH" });
+      }
+      // No messageIntent is the compatibility path for pre-contract clients, whose UI always
+      // included agentId even when submitting an answer. New clients must state answer/steer.
+      const wantsAnswer = Boolean(answerToAskId) || messageIntent === "answer" || messageIntent == null;
+      if (wantsAnswer && (!pendingAskOwnerId || agentId !== pendingAskOwnerId)) {
+        throw Object.assign(new Error("answers must be sent from the member tab that owns the pending ask"), {
+          code: "ASK_OWNER_MISMATCH",
+          expectedAgentId: pendingAskOwnerId || null,
+        });
+      }
+      if (wantsAnswer && !this.askClaims.has(id)) {
+        await this.resumePendingAsk(id, nextPrompt, { answerToAskId, admissionEpoch });
+        return this.get(id);
+      }
+      if (wantsAnswer) {
+        throw Object.assign(new Error("an answer for this ask is already being persisted"), { code: "ANSWER_IN_PROGRESS" });
+      }
+      if (messageIntent === "steer") {
+        await this.queueSteer(run, { prompt: nextPrompt, agentId, admissionEpoch, acknowledgeRecovery });
+        return this.get(id);
+      }
+    }
+    if (run.round >= this.policy.limits.maxRounds && !this.canRefundAbandonedRound(run)) {
+      throw Object.assign(new Error("maximum collaboration rounds reached"), { code: "ROUND_LIMIT" });
     }
     if (this.controllers.has(id)) {
       // 轮间插话：run 活跃时 continue 不再抛 RUN_ACTIVE——准入校验同上，排队持久化到 run.pendingSteer，
       // 当前 turn 边界由编排器按 FIFO 取出注入（injectNextSteer：先 user.message 再续轮），不打断子进程。
-      run.pendingSteer ||= [];
-      run.pendingSteer.push({ prompt: nextPrompt, agentId, queuedAt: new Date().toISOString() });
-      await this.save(run);
-      await this.emitEvent(run, "run.steer_queued", { text: nextPrompt, agentId, depth: run.pendingSteer.length }, { runId: run.id, agentId: "LO" });
+      await this.queueSteer(run, {
+        prompt: nextPrompt,
+        agentId,
+        answerCandidate: messageIntent == null && !answerToAskId && !run.pendingAsk && !explicitAgentTarget,
+        admissionEpoch,
+        acknowledgeRecovery,
+      });
       return this.get(id);
     }
     // HTTP 直接续聊注册进 executions（烛 wave2 回炉 R5/R6）：close() 等待、isBusy() 计入——
@@ -754,41 +3394,253 @@ export class Orchestrator {
     // controller 建立、状态变更与 executions 注册同 tick 完成（首个 await 前）——close 的
     // active 快照不再有"已进入但未注册"的漏等窗口。
     const controller = new AbortController();
-    this.controllers.set(id, controller);
-    run.status = "running";
-    run.maxRounds = Math.min(this.policy.limits.maxRounds, Math.max(run.maxRounds, run.round + 1));
+    const directPromptMessageId = run.orchestrationMode === "social"
+      ? operationMessageId("steer", randomUUID())
+      : null;
     const continuation = (async () => {
       let drainStarted = false;
+      let admissionCommitted = false;
+      let promptProjected = false;
+      let directRefund = null;
       try {
-        await this.save(run);
-        // 续聊的用户追问进对话历史（实时+重启后都可见）——否则只有 assistant 回复、看不到问的是什么
-        await this.emitEvent(run, "user.message", { text: nextPrompt }, { runId: run.id, agentId: "LO" });
+        await this.withRunTransition(id, async () => {
+          this.assertContinuationAdmission(id, admissionEpoch);
+          if (this.controllers.has(id)) {
+            throw Object.assign(new Error("another continuation became active before admission committed"), { code: "RUN_ACTIVE" });
+          }
+          const previous = { status: run.status, maxRounds: run.maxRounds, ...this.abandonmentSnapshot(run) };
+          if (run.status === "recovery_required") {
+            directRefund = this.acknowledgeAbandonedWork(run);
+          } else if (this.canRefundAbandonedRound(run)) {
+            // A definitively rejected/pre-submit attempt needs no ambiguous-recovery acknowledgement.
+            // Refund at continuation admission, then persist it atomically with the new running state.
+            directRefund = this.refundAbandonedRound(run);
+          }
+          this.controllers.set(id, controller);
+          run.status = "running";
+          run.maxRounds = Math.min(this.policy.limits.maxRounds, Math.max(run.maxRounds, run.round + 1));
+          try {
+            await this.save(run);
+            admissionCommitted = true;
+          } catch (error) {
+            if (this.controllers.get(id) === controller) this.controllers.delete(id);
+            Object.assign(run, previous);
+            directRefund = null;
+            throw error;
+          }
+        });
+        if (directRefund) await this.emitRoundRefund(run, directRefund);
+        await this.withProjectionEffect(run, controller, async () => {
+          if (run.orchestrationMode === "social") {
+            await this.appendBus(run, {
+              id: directPromptMessageId,
+              from: "lo",
+              to: agentId,
+              kind: "steer",
+              text: nextPrompt,
+              refs: { directContinuation: true },
+            });
+            promptProjected = true;
+          }
+          // 续聊的用户追问进对话历史（实时+重启后都可见）——否则只有 assistant 回复、看不到问的是什么
+          await this.emitEvent(run, "user.message", { text: nextPrompt }, { runId: run.id, agentId: "LO" });
+          if (run.orchestrationMode !== "social") promptProjected = true;
+        });
         const text = await this.turn(run, agentId, nextPrompt);
-        // abort 与轮完成竞态：cancel 已对用户回执 cancelled，即使轮恰好跑完也不改回 succeeded
-        run.status = controller.signal.aborted ? "cancelled" : "succeeded";
-        run.result = { ...(run.result || {}), continued: text };
-        await this.save(run);
+        await this.withProjectionEffect(run, controller, async () => {
+          if (run.orchestrationMode === "social") {
+            await this.appendBus(run, { from: agentId, to: "lo", kind: "say", text });
+          }
+          run.result = { ...(run.result || {}), continued: text };
+        });
+        if (run.orchestrationMode === "social" && (run.resumeClaim || (run.resumeQueue || []).length)) {
+          await this.socialLoop(run, controller);
+        }
+        await this.withProjectionEffect(run, controller, async () => {
+          if (run.pausedForInput) {
+            run.status = "waiting_agent";
+            await this.save(run);
+            await this.emitEvent(run, "run.waiting_input", {
+              from: run.pendingAsk?.from ?? null,
+              text: run.pendingAsk?.text ?? null,
+            }, { runId: run.id });
+          } else if (run.resumeClaim || (run.resumeQueue || []).length) {
+            run.status = "recovery_required";
+            run.recoveryNote = "Acknowledged recovery left safe queued work that could not be drained within the current round budget.";
+            await this.save(run);
+            await this.emitEvent(run, "run.recovery_required", {
+              status: run.status,
+              code: "RESUME_WORK_REMAINS",
+              message: run.recoveryNote,
+            }, { runId: run.id });
+          } else {
+            run.status = "succeeded";
+            await this.save(run);
+          }
+        });
         // 本轮结束后仍有排队追问 → 后台 driver 接管同一 controller 逐轮排干（HTTP 即刻返回，不等排干）
-        if ((run.pendingSteer || []).length) {
+        if (run.status === "succeeded" && ((run.pendingSteer || []).length || run.activeSteer)) {
           this.startSteerDrain(id, controller);
           drainStarted = true;
         }
         return this.get(id);
       } catch (error) {
-        run.status = controller.signal.aborted ? "cancelled" : "failed";
+        if (controller.signal.aborted || ["ABORTED", "RUN_CANCELLED", "CONTROL_PLANE_CLOSING"].includes(error.code)) {
+          if (admissionCommitted && this.controllers.get(id) === controller && run.status === "running") {
+            await this.withRunTransition(id, async () => {
+              if (this.controllers.get(id) !== controller || run.status !== "running") return;
+              run.status = "cancelled";
+              const shutdown = this.closing;
+              run.error = shutdown
+                ? "Continuation was cancelled while the control plane was shutting down."
+                : "Continuation was superseded by run cancellation.";
+              run.recoveryNote = promptProjected
+                ? shutdown
+                  ? "Control plane shutdown cancelled this continuation after the prompt was recorded but before provider completion."
+                  : "Run cancellation superseded this continuation after the prompt was recorded."
+                : shutdown
+                  ? "Control plane shutdown cancelled this continuation before prompt was projected."
+                  : "Run cancellation superseded this continuation before prompt was projected.";
+              await this.save(run);
+            }).catch(() => {});
+          }
+          return this.get(id);
+        }
+        const recoveryBlocked = this.requiresRecovery(run, error);
+        run.status = recoveryBlocked ? "recovery_required" : "failed";
         run.error = error.message;
+        if (recoveryBlocked) {
+          run.recoveryNote = `Recovery acknowledgement could not drain durable work (${error.code || "RESUME_DRAIN_FAILED"}). Inspect the claimed work before acknowledging another continuation.`;
+        }
         await this.save(run);
+        if (recoveryBlocked) {
+          await this.emitEvent(run, "run.recovery_required", {
+            status: run.status,
+            code: error.code || "RESUME_DRAIN_FAILED",
+            message: run.error,
+          }, { runId: run.id });
+        } else {
+          await this.emitEvent(run, "run.failed", {
+            status: run.status,
+            code: error.code || null,
+            message: run.error,
+          }, { runId: run.id });
+        }
         throw error;
       } finally {
         if (!drainStarted && this.controllers.get(id) === controller) this.controllers.delete(id);
       }
     })();
+    const executionKey = `continue:${id}`;
     const tracked = continuation.finally(() => {
-      this.executions.delete(`continue:${id}`);
+      if (this.executions.get(executionKey) === tracked) this.executions.delete(executionKey);
       this.ensureSteerDrained(id); // 直接续聊的收尾窗兜底（同 startExecution 链）；同步 no-op 不阻塞 HTTP 返回
     });
-    this.executions.set(`continue:${id}`, tracked);
+    this.executions.set(executionKey, tracked);
     return tracked;
+  }
+
+  async addSources(id, value) {
+    const sources = normalizeRunSources(value);
+    const run = this.get(id);
+    if (!sources.length) return run;
+    await this.withRunTransition(id, async () => {
+      const merged = normalizeRunSources([...(run.sources || []), ...sources]);
+      run.sources = merged;
+      run.updatedAt = new Date().toISOString();
+      await this.save(run);
+    });
+    await this.emitEvent(run, "run.sources_added", {
+      count: sources.length,
+      names: sources.map((item) => item.name),
+    }, { runId: run.id, agentId: "LO" });
+    return run;
+  }
+
+  // answer 恢复主体：claim/controller 在首个 await 前占位；pendingAsk 直到 durable bus append
+  // 成功后才转移，EIO 时原 ask 保持可回答。显式 answerToAskId 同时阻止陈旧 UI 回答新问题。
+  async resumePendingAsk(id, answerText, {
+    answerToAskId = null,
+    admissionEpoch = this.cancelEpoch(id),
+  } = {}) {
+    const run = this.get(id);
+    await this.ensureStablePendingAsk(run);
+    this.assertContinuationAdmission(id, admissionEpoch);
+    const ask = run.pendingAsk;
+    if (!ask) throw Object.assign(new Error("run has no pending ask"), { code: "ASK_NOT_PENDING" });
+    if (answerToAskId && answerToAskId !== ask.id) {
+      throw Object.assign(new Error("answerToAskId does not own the current pending ask"), { code: "ASK_MISMATCH" });
+    }
+    const claimId = ask.id;
+    if (this.askClaims.has(id)) throw Object.assign(new Error("an answer is already being persisted"), { code: "ANSWER_IN_PROGRESS" });
+    this.askClaims.set(id, claimId);
+    const placeholder = new AbortController();
+    this.controllers.set(id, placeholder);
+    let transferError = null;
+    let committed = false;
+    try {
+      // 挂起置位（waiting_agent save）与 execute 协程 settle 之间有窗口：executions 里的旧链
+      // 未删时 startExecution 会拿到垂死链直接返回、复跑被静默吞掉——先等旧链收尾再重启
+      const previous = this.executions.get(id);
+      if (previous) await Promise.resolve(previous).catch(() => {});
+      if (placeholder.signal.aborted || this.closing) return;
+      if (run.pendingAsk?.id !== ask.id) {
+        throw Object.assign(new Error("the pending ask changed before the answer could commit"), { code: "ASK_MISMATCH" });
+      }
+      const answerMessage = await this.withProjectionEffect(run, placeholder, () => this.appendBus(run, {
+        id: operationMessageId("answer", ask.id),
+        from: "lo",
+        to: ask.from,
+        kind: "answer",
+        text: answerText,
+        refs: { answerToAskId: ask.id },
+      }));
+      // cancel/close wins after the durable append: answer remains auditable but no new execution starts.
+      if (placeholder.signal.aborted || this.closing) return;
+      await this.withRunTransition(id, async () => {
+        this.assertContinuationAdmission(id, admissionEpoch);
+        if (placeholder.signal.aborted || this.closing || run.status === "cancelled") return;
+        if (run.pendingAsk?.id !== ask.id) {
+          throw Object.assign(new Error("the pending ask changed before the answer state committed"), { code: "ASK_MISMATCH" });
+        }
+        const previousState = {
+          pendingAsk: run.pendingAsk,
+          pausedForInput: run.pausedForInput,
+          resumeQueue: [...(run.resumeQueue || [])],
+          maxRounds: run.maxRounds,
+        };
+        run.pendingAsk = null;
+        run.pausedForInput = false;
+        run.resumeQueue = mergeResumeQueues(
+          [{ to: ask.from, busMessageId: answerMessage.id, kind: "answer" }],
+          run.resumeQueue,
+        );
+        run.maxRounds = Math.min(this.policy.limits.maxRounds, Math.max(run.maxRounds, run.round + 2)); // 回答轮+收敛轮预算
+        try {
+          await this.save(run);
+          committed = true;
+        } catch (error) {
+          run.pendingAsk = previousState.pendingAsk;
+          run.pausedForInput = previousState.pausedForInput;
+          run.resumeQueue = previousState.resumeQueue;
+          run.maxRounds = previousState.maxRounds;
+          transferError = error;
+        }
+      });
+      if (committed) {
+        await this.withProjectionEffect(run, placeholder, () =>
+          this.emitEvent(run, "user.message", { text: answerText }, { runId: id, agentId: "LO" }));
+      }
+    } finally {
+      if (this.askClaims.get(id) === claimId) this.askClaims.delete(id);
+      if (this.controllers.get(id) === placeholder) this.controllers.delete(id);
+    }
+    // 占位期间被 cancel（cancel 会 abort 占位并置 cancelled）：如实返回，不复跑
+    if (placeholder.signal.aborted || this.closing) return;
+    this.assertContinuationAdmission(id, admissionEpoch);
+    if (transferError) throw transferError;
+    if (!committed) return;
+    this.startExecution(id); // execute 同 tick 自建 controller 接管同键，socialLoop 从 resumeQueue 复跑
   }
 
   // 会话元数据（侧栏右键菜单）：白名单字段浅更新——置顶/归档/未读/重命名，全部走 save 持久化
@@ -803,6 +3655,127 @@ export class Orchestrator {
       run.title = title;
     }
     await this.save(run);
+    return this.get(id);
+  }
+
+  // 会话中控制热改：模型（Codex turn/start 接受 per-turn 覆盖）与 Effort 随改随下一轮生效；
+  // 权限仅放行 PERMISSION_HOT_TRANSITIONS 白名单（降档 / Codex ask↔auto），sandbox 轴不开口子。
+  // 每次实改落 run.control_changed 审计事件——热改不等于免审计。
+  async updateRunControls(id, patch = {}, { actor = "operator", acknowledgeRecovery = false } = {}) {
+    const run = this.get(id);
+    // 闸与 continue() 准入对齐：审批待决（改动会污染动作绑定审批语义）不可热改；
+    // 恢复未确认（提交状态不明）须先确认——确认语义与 continue() 相同，可随热改一次性携带。
+    // succeeded/failed/cancelled 的闲置会话可改，下一轮生效。
+    if (run.status === "waiting_approval" || run.buildApproval?.status === "pending") {
+      throw Object.assign(new Error("run is waiting for its action-bound build approval; controls cannot change mid-approval"), { code: "APPROVAL_REQUIRED" });
+    }
+    const recovery = run.status === "recovery_required";
+    if (recovery && acknowledgeRecovery !== true) {
+      throw Object.assign(new Error("the previous native turn has an ambiguous submission state; acknowledge recovery before changing controls"), { code: "RECOVERY_REQUIRED" });
+    }
+    const executionOwnerId = executionOwnerIdOf(run);
+    const executionRuntimeProfileId = this.runtimeProfileIdFor(run, executionOwnerId);
+    const executionProfile = this.models?.profiles?.find((item) => item.id === executionRuntimeProfileId) || null;
+    const executionAdapterTemplate = executionProfile
+      ? ADAPTER_TEMPLATES.find((item) => item.id === executionProfile.adapter) || null
+      : null;
+    const changes = [];
+    // 恢复确认与热改必须原子：确认放弃 claim 之后任何校验/落盘失败都要整体回滚，
+    // 否则留下"claim 已作废但档位没改成"的半状态。
+    const previous = recovery
+      ? {
+        status: run.status,
+        modelOverride: run.modelOverride ?? null,
+        effortOverride: run.effortOverride ?? null,
+        permissionMode: run.permissionMode,
+        ...this.abandonmentSnapshot(run),
+      }
+      : null;
+    let recoveryRefund = null;
+    try {
+      if (recovery) {
+        // 与 continue() 准入同一确认：放弃可能仍占用原生轮的 claim。热改本身不跑轮，
+        // 确认后停在 failed 闲置终态（可续聊/可再热改），recoveryNote 如实记录"已确认放弃"。
+        recoveryRefund = this.acknowledgeAbandonedWork(run);
+        run.status = "failed";
+      }
+
+      if (patch.model !== undefined) {
+        const requested = String(patch.model ?? "").trim();
+        // 空串 = 清除 override，回席位/CLI 默认；Codex 实证 turn/start 接受 per-turn model（0.146.0 探针）
+        const next = requested
+          ? await this.validateModelOverride(
+            { executionOwnerId, executionRuntimeProfileId, executionProfile, executionAdapterTemplate },
+            requested,
+          )
+          : null;
+        const current = run.modelOverride ?? null;
+        if (next !== current) {
+          run.modelOverride = next;
+          changes.push({ field: "model", from: current, to: next });
+        }
+      }
+
+      if (patch.effort !== undefined) {
+        const requested = String(patch.effort ?? "").trim().toLowerCase();
+        // 空串 = 清除 override，回席位/CLI 默认
+        const next = requested
+          ? await this.validateEffortOverride(
+            { executionOwnerId, executionRuntimeProfileId, executionProfile, executionAdapterTemplate },
+            requested,
+          )
+          : null;
+        const current = run.effortOverride ?? null;
+        if (next !== current) {
+          run.effortOverride = next;
+          changes.push({ field: "effort", from: current, to: next });
+        }
+      }
+
+      if (patch.permissionMode !== undefined) {
+        const target = String(patch.permissionMode ?? "").trim().toLowerCase();
+        if (!["plan", "review", "build", ...Object.keys(CODEX_PRESET_NATIVE_MODES)].includes(target)) {
+          throw Object.assign(new Error(`unsupported permission mode: ${target}`), { code: "VALIDATION_FAILED" });
+        }
+        if (!this.policy.modes?.[target]) {
+          throw Object.assign(new Error(`permission mode ${target} is not configured`), { code: "POLICY_VIOLATION" });
+        }
+        if (CODEX_PRESET_NATIVE_MODES[target] && !executionAdapterTemplate?.permissionModes?.includes("danger-full-access")) {
+          throw Object.assign(new Error(`${executionOwnerId} adapter does not support Codex official preset ${target}`), { code: "UNSUPPORTED_PERMISSION" });
+        }
+        if (target !== run.permissionMode) {
+          const allowed = PERMISSION_HOT_TRANSITIONS[run.permissionMode] || [];
+          if (!allowed.includes(target)) {
+            const reason = CODEX_PRESET_NATIVE_MODES[run.permissionMode] || CODEX_PRESET_NATIVE_MODES[target]
+              ? "Codex 沙箱轴绑在原生 thread（thread/start），会话存续期不可变——请新建任务"
+              : target === "build"
+                ? "升 build 必须走创建时的动作绑定审批门——请新建任务"
+                : "会话中只允许降档（写面收缩），升档请新建任务";
+            throw Object.assign(
+              new Error(`permission ${run.permissionMode} → ${target} is not hot-switchable: ${reason}`),
+              { code: "CONTROL_TRANSITION_FORBIDDEN" },
+            );
+          }
+          const from = run.permissionMode;
+          run.permissionMode = target;
+          changes.push({ field: "permissionMode", from, to: target });
+        }
+      }
+
+      // 纯确认（无档位变化）也要落盘：status/recoveryNote/inflight 清理都是状态变更
+      if (changes.length || recovery) await this.save(run);
+    } catch (error) {
+      if (previous) Object.assign(run, previous);
+      throw error;
+    }
+    // 事件只在落盘成功后播报——确认恢复与轮次退还都不能出现"回了滚却已广播"的假账
+    if (recovery) {
+      await this.emitEvent(run, "run.recovery_acknowledged", { actor, via: "controls" }, { runId: run.id });
+      if (recoveryRefund) await this.emitRoundRefund(run, recoveryRefund);
+    }
+    if (changes.length) {
+      await this.emitEvent(run, "run.control_changed", { changes, actor }, { runId: run.id });
+    }
     return this.get(id);
   }
 
@@ -823,19 +3796,97 @@ export class Orchestrator {
 
   async cancel(id) {
     const run = this.get(id);
-    run.status = "cancelled";
-    if (run.buildApproval && run.buildApproval.status !== "denied") run.buildApproval.status = "revoked";
-    await this.approvalBroker.denyRun(id);
+    // Cancellation ownership must cross the in-memory execution boundary before any
+    // broker or persistence await; otherwise an active provider can still complete.
+    const cancelEpoch = this.cancelEpoch(id) + 1;
+    this.cancelEpochs.set(id, cancelEpoch);
+    this.cancellingRuns.add(id);
     this.controllers.get(id)?.abort();
-    await this.save(run);
-    await this.emitEvent(run, "run.cancelled", { round: run.round }, { runId: id });
-    return this.get(id);
+    try {
+      const projection = this.projectionChains.get(id);
+      if (projection) await projection.catch(() => {});
+      await this.withRunTransition(id, async () => {
+        run.status = "cancelled";
+        // 挂起态一并清场：取消后不存在"等回答"或排队追问。
+        run.pendingAsk = null;
+        run.pausedForInput = false;
+        run.resumeQueue = [];
+        run.resumeClaim = null;
+        run.activeSteer = null;
+        if (run.buildApproval && run.buildApproval.status !== "denied") run.buildApproval.status = "revoked";
+        this.revokeCapabilityLease(run, "run-cancelled");
+        if (run.taskGraph?.tasks?.length) {
+          const stamp = new Date().toISOString();
+          for (const task of run.taskGraph.tasks) {
+            if (!["succeeded", "failed", "cancelled"].includes(task.status)) {
+              task.status = "cancelled";
+              task.updatedAt = stamp;
+            }
+          }
+          if (Array.isArray(run.taskGraph.delegations)) {
+            for (const edge of run.taskGraph.delegations) {
+              if (!["cancelled", "completed", "failed"].includes(edge.state)) edge.state = "cancelled";
+            }
+          }
+          run.taskGraph.updatedAt = stamp;
+        }
+        await this.save(run);
+      });
+      let brokerError = null;
+      try {
+        await this.approvalBroker.denyRun(id);
+      } catch (error) {
+        brokerError = error;
+        await this.emitEvent(run, "run.cancel_degraded", {
+          code: error.code || null,
+          message: error.message,
+        }, { runId: id });
+      }
+      // 多 CLI 取消可见性：返回/广播本 run 涉及的成员与会话，前端可展示「级联中止」
+      const cancelledAgents = [...new Set([
+        ...(Array.isArray(run.teamMembers) ? run.teamMembers : []),
+        run.coordinatorId,
+        run.startAgentId,
+        ...Object.keys(run.sessions || {}),
+        ...(Array.isArray(run.turns) ? run.turns.map((turn) => turn?.agentId) : []),
+      ].filter(Boolean))];
+      const cancelledSessions = Object.fromEntries(
+        Object.entries(run.sessions || {}).map(([agentId, session]) => [
+          agentId,
+          typeof session === "string" ? session : (session?.sessionId || session?.id || null),
+        ]),
+      );
+      await this.emitEvent(run, "run.cancelled", {
+        round: run.round,
+        cascade: "run",
+        agents: cancelledAgents,
+        sessions: cancelledSessions,
+        scope: "self|descendants|provider-tree",
+      }, { runId: id });
+      if (brokerError) {
+        brokerError.runCancelled = true;
+        throw brokerError;
+      }
+      const snapshot = this.get(id);
+      snapshot.cancelCascade = {
+        agents: cancelledAgents,
+        sessions: cancelledSessions,
+        scope: "self|descendants|provider-tree",
+      };
+      return snapshot;
+    } finally {
+      if (this.cancelEpoch(id) === cancelEpoch) this.cancellingRuns.delete(id);
+      // 远程 run 取消=终态：waiting_agent 挂起的 run 没有 execute 在飞（不会走那边的 finally），
+      // 这里兜底处置专用 adapter——远端进程树绝不因取消路径不同而漏杀
+      if (run.remote) await this.disposeRemoteAdapters(id);
+    }
   }
 
   async revokeBuildGrants(reason = "runtime policy changed") {
     for (const run of this.runs.values()) {
       if (run.permissionMode !== "build" || !run.buildApproval || ["revoked", "denied", "expired"].includes(run.buildApproval.status)) continue;
       run.buildApproval.status = "revoked";
+      this.revokeCapabilityLease(run, reason);
       run.recoveryNote = `Build authorization revoked: ${reason}`;
       this.controllers.get(run.id)?.abort();
       await this.approvalBroker.denyRun(run.id, reason);
@@ -844,51 +3895,71 @@ export class Orchestrator {
     }
   }
 
-  async close() {
-    if (this.closing) return;
+  close() {
+    if (this.closePromise) return this.closePromise;
     this.closing = true;
-    for (const controller of this.controllers.values()) controller.abort();
-    const active = [...this.executions.values()];
-    if (active.length) {
-      let drainTimer;
-      await Promise.race([
-        Promise.allSettled(active),
-        new Promise((resolveTimeout) => { drainTimer = setTimeout(resolveTimeout, 2_000); }),
-      ]);
-      clearTimeout(drainTimer);
-    }
-    const closeErrors = await Promise.all([...new Set(this.adapters.values())].map((adapter) => closeWithin(adapter)));
-    for (const error of closeErrors.filter(Boolean)) {
-      await this.eventStore.emit("adapter.close_degraded", { message: error.message }, { agentId: "control-plane" }).catch(() => {});
-    }
-    await Promise.allSettled(active);
-    // 关闭前循环收敛全部在途写链（烛 wave2 回炉 P1b）：直接 HTTP continue 的写盘不在 executions
-    // 集合内；一次性快照会漏掉等待期间新挂的链（abort/catch 路径仍可 save）。每轮等完快照后
-    // 兜底清除"已 settle 但未自清"的条目（save() 的 finally 自清只覆盖它自己建的链），否则
-    // size 恒>0 死循环；被新链替换的条目留到下轮继续等。上游 server 先停 HTTP 再调 close，
-    // 新链来源有限、循环必然收敛。
-    while (this.saveChains.size) {
-      const snapshot = [...this.saveChains.entries()];
-      await Promise.allSettled(snapshot.map(([, chain]) => chain));
-      for (const [runId, chain] of snapshot) {
-        if (this.saveChains.get(runId) === chain) this.saveChains.delete(runId);
+    this.closePromise = Promise.resolve().then(async () => {
+      for (const controller of this.controllers.values()) controller.abort();
+      const initialExecutions = [...this.executions.values()];
+      if (initialExecutions.length) {
+        let drainTimer;
+        await Promise.race([
+          Promise.allSettled(initialExecutions),
+          new Promise((resolveTimeout) => { drainTimer = setTimeout(resolveTimeout, 2_000); }),
+        ]);
+        clearTimeout(drainTimer);
       }
-    }
+      const closeErrors = await Promise.all([...new Set(this.adapters.values())].map((adapter) => closeWithin(adapter)));
+      for (const error of closeErrors.filter(Boolean)) {
+        await this.eventStore.emit("adapter.close_degraded", { message: error.message }, { agentId: "control-plane" }).catch(() => {});
+      }
+      // 远程 run 专用 adapter 一并关闭（控制面关停绝不把远端常驻进程留成孤儿）
+      const remotePending = [...this.remoteAdapters.values()];
+      this.remoteAdapters.clear();
+      for (const pending of remotePending) {
+        const pair = await pending.catch(() => null);
+        for (const adapter of [pair?.adapter, pair?.fallback]) {
+          if (typeof adapter?.close === "function") {
+            await adapter.close().catch(async (error) => {
+              await this.eventStore.emit("adapter.close_degraded", { message: `remote: ${error.message}` }, { agentId: "control-plane" }).catch(() => {});
+            });
+          }
+        }
+      }
+
+      // Fixed-point drain: shutdown admission is closed, so every chain that appears here
+      // was spawned by work already in flight. Waiting snapshots until all maps are empty
+      // covers successor chains without deleting a newer owner under the same run key.
+      const chainMaps = [this.executions, this.transitionChains, this.projectionChains, this.lifecycleChains, this.saveChains];
+      while (chainMaps.some((map) => map.size)) {
+        const snapshot = chainMaps.flatMap((map) => [...map.entries()].map(([key, chain]) => ({ map, key, chain })));
+        await Promise.allSettled(snapshot.map(({ chain }) => chain));
+        for (const { map, key, chain } of snapshot) {
+          if (map.get(key) === chain) map.delete(key);
+        }
+      }
+    });
+    return this.closePromise;
   }
 
   isBusy() {
     return this.controllers.size > 0 || this.executions.size > 0;
   }
 
-  async replaceRuntime({ router, adapters, policy }) {
+  swapRuntime({ router, adapters, policy, models = this.models }) {
     if (this.isBusy()) throw Object.assign(new Error("active runs prevent an atomic runtime graph swap"), { code: "RUNTIME_BUSY" });
     const previousAdapters = this.adapters;
     this.router = router;
     this.adapters = adapters;
     this.policy = policy;
+    this.models = models;
     const retained = new Set(adapters.values());
     const retired = [...new Set(previousAdapters.values())].filter((adapter) => !retained.has(adapter));
-    const results = await Promise.all(retired.map((adapter) => closeWithin(adapter)));
-    return results.filter(Boolean).map((error) => error.message || String(error));
+    return Promise.all(retired.map((adapter) => closeWithin(adapter)))
+      .then((results) => results.filter(Boolean).map((error) => error.message || String(error)));
+  }
+
+  async replaceRuntime(runtime) {
+    return this.swapRuntime(runtime);
   }
 }

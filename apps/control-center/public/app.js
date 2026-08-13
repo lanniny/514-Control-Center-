@@ -1,153 +1,199 @@
 import { renderMarkdown } from "./markdown.js";
+import { createMissionControlDock } from "./mission-control.js";
+import { createWorkbenchEnvironmentPanel } from "./environment-panel.js";
+import { createRailTools } from "./rail-tools.js";
+import { createRailPanels } from "./modules/rail-panels.js";
+import { normalizePathKey } from "./path-key.js";
+import { lucideIcon, mountLucideSprite, remapLegacyIconUses } from "./lucide.js";
+import {
+  nextStreamEpochState,
+  readStreamEpochFromHeaders,
+  readStreamEpochFromReadyPayload,
+} from "./modules/stream-epoch.js";
+import { welcomeTipMarkup as buildWelcomeTipMarkup } from "./modules/welcome-tips.js";
+import { resumeHintsFromSessions, resumeHintsMarkup } from "./modules/resume-hints.js";
+import { AGENT_ROLE_BLURB as MODULE_AGENT_ROLE_BLURB, roleBlurbFor } from "./modules/agent-roles.js";
+import { mountCcSwitchPanel } from "./modules/ccswitch-panel.js";
+import { attachJsonEditor } from "./modules/json-editor.js";
+import { createMemberLibrary } from "./modules/member-library.js";
+import { createRuntimeSeatManager } from "./modules/runtime-seat-manager.js";
+import { renderRichContent } from "./rich-render.js";
+import { initCommandPalette as initCmdPalette, openCommandPalette as openForgePalette } from "./command-palette.js";
+import {
+  buildTeamPanelData,
+  initTeamPanel,
+  normalizeRunSessions,
+  profileRolePresentation,
+  resolveCatalogBrand,
+  selectPipelineRoot,
+  sessionAgentId,
+  sessionAgentIds,
+  updateTeamData,
+  PROFILE_META,
+} from "./team-panel.js";
+import { refreshCollabFlow } from "./collab-flow.js";
+import {
+  TEAM_PRESETS,
+  presetById,
+  resolvePreset,
+  buildTeamPack,
+  parseTeamPack,
+  planMemberResolution,
+  remappedTeamPayload,
+} from "./modules/team-config-kit.js";
+import { initDeltaTimeline, refreshDeltaTimeline } from "./delta-timeline.js";
+import { initProjectBootstrapper } from "./project-bootstrapper.js";
+import {
+  escapeHtml, redact, formatDate, formatTime, formatRelative, formatDuration,
+  compactHash, normalizeStatus, statusText, runStatusText, unwrapList, objectList,
+} from "./utils.js";
+import {
+  API, TOKEN_KEY, ApiError, request as apiRequest, getAccessToken, setAccessToken,
+  initializeAccessToken as initToken,
+} from "./api.js";
+import {
+  state, ACTIVE_RUN_STATES, TERMINAL_RUN_STATES, VIEW_TITLES,
+  DEFAULT_COMPONENTS, DEFAULT_MODELS, DEFAULT_POLICIES, DEFAULT_SECRETS,
+  MAX_REQUESTED_AGENTS, addRequestedAgentId, pruneRequestedAgentIds, removeRequestedAgentMention,
+} from "./state.js";
 
-const API = Object.freeze({
-  bootstrap: "/api/bootstrap",
-  health: "/api/health",
-  sources: "/api/config/sources",
-  runs: "/api/runs",
-  routerPreview: "/api/router/preview",
-  events: "/api/events",
-  approvals: "/api/approvals",
-  runtimeReload: "/api/runtime/reload",
-  obsSummary: "/api/observability/summary",
-  obsRouteGate: "/api/observability/routegate",
-  obsDelta: "/api/observability/delta",
-  obsHandoffs: "/api/observability/handoffs",
-  obsDrift: "/api/observability/drift",
-  sessions: "/api/sessions",
-  sessionProjects: "/api/sessions/projects",
-  teams: "/api/teams",
+// 兼容层：旧代码中的 request() 和 accessToken 引用
+const request = apiRequest;
+
+// v4.0 Forge 路由白名单本地扩展：团队协作视图由本波次新增，state.js 的 VIEW_TITLES
+// 属并行波次文件——在此合并放开，state.js 后续补上同键时语义一致（团队协作）。
+const FORGE_VIEW_TITLES = Object.freeze({ ...VIEW_TITLES, team: "团队协作" });
+
+// 面包屑分组：与侧栏 nav-group 的 IA 五组对齐（协作/创建/观测/资源/系统）
+const FORGE_VIEW_GROUPS = Object.freeze({
+  workbench: "协作",
+  team: "协作",
+  channels: "协作",
+  bootstrapper: "创建",
+  office: "创建",
+  terminal: "创建",
+  overview: "观测",
+  observability: "观测",
+  sessions: "观测",
+  hero: "观测",
+  market: "资源",
+  hosts: "资源",
+  config: "系统",
+  router: "系统",
+  security: "系统",
 });
 
-const TOKEN_KEY = "514cc-control-token";
-let accessToken = "";
+const CONFIG_SURFACES = Object.freeze(["providers", "capabilities", "sources"]);
+const CONFIG_SURFACE_SET = new Set(CONFIG_SURFACES);
+const CONFIG_SURFACE_LABELS = Object.freeze({ providers: "供应商与应用", capabilities: "Agent · Skill · MCP", sources: "运行席位与真源" });
 
-const VIEW_TITLES = Object.freeze({
-  overview: "系统总览",
-  workbench: "协作台",
-  config: "配置中心",
-  router: "模型路由",
-  security: "安全诊断",
-  observability: "体系观测",
-  sessions: "会话聚合",
-});
+function cleanForgeRouteId(value) {
+  const id = String(value ?? "").trim();
+  return /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id) ? id : null;
+}
 
-const ACTIVE_RUN_STATES = new Set([
-  "queued",
-  "waiting_agent",
-  "waiting_approval",
-  "planning",
-  "waiting_for_approval",
-  "executing",
-  "integrating",
-  "verifying",
-  "active",
-  "running",
-  "recovery_required",
-]);
+function configRouteHash(surface, { memberId = null, runtimeProfileId = null } = {}) {
+  const next = CONFIG_SURFACE_SET.has(surface) ? surface : "providers";
+  const query = new URLSearchParams();
+  const member = cleanForgeRouteId(memberId);
+  const runtime = cleanForgeRouteId(runtimeProfileId);
+  if (member) query.set("member", member);
+  if (runtime) query.set("runtime", runtime);
+  return `#config/${next}${query.size ? `?${query}` : ""}`;
+}
 
-const TERMINAL_RUN_STATES = new Set(["complete", "completed", "succeeded", "failed", "blocked", "cancelled", "canceled"]);
+function successfulLoadResult(data = null, details = {}) {
+  return { __forgeLoadResult: true, ok: true, data, ...details };
+}
 
-const DEFAULT_COMPONENTS = Object.freeze([
-  { id: "control-api", name: "Control API", detail: "/api/bootstrap", status: "pending" },
-  { id: "claude", name: "Claude 主脑", detail: "规划与统一编排", status: "unknown" },
-  { id: "codex", name: "Codex 技术执行", detail: "实现、评审与验证", status: "unknown" },
-  { id: "event-bus", name: "事件总线", detail: "SSE /api/events", status: "pending" },
-]);
+function failedLoadResult(error) {
+  return { __forgeLoadResult: true, ok: false, error };
+}
 
-const DEFAULT_MODELS = Object.freeze([
-  { role: "主脑", adapter: "Claude CLI", model: "运行时选择", strengths: ["规划", "编排", "综合"], status: "unknown" },
-  { role: "技术", adapter: "Codex CLI", model: "运行时选择", strengths: ["实现", "代码评审", "验证"], status: "unknown" },
-  { role: "搜索", adapter: "Grok Search", model: "运行时选择", strengths: ["当前资料", "快速检索"], status: "unknown" },
-  { role: "快执行", adapter: "Grok Build", model: "grok-4.5", strengths: ["快执行", "快综合"], status: "unknown" },
-  { role: "扩展", adapter: "Pi", model: "运行时选择", strengths: ["RPC", "工具编排"], status: "unknown" },
-]);
+function loadResultFailed(value) {
+  return value?.__forgeLoadResult === true && value.ok === false;
+}
 
-const DEFAULT_POLICIES = Object.freeze([
-  { name: "Plan / Review", detail: "只读模式", value: "禁止写入", status: "ok" },
-  { name: "Build", detail: "授权工作区内写入", value: "按动作审批", status: "ok" },
-  { name: "危险操作", detail: "删除、部署、密钥与系统配置", value: "二次确认", status: "warning" },
-  { name: "保护路径", detail: ".env、凭据、.git 与系统目录", value: "默认拒绝", status: "ok" },
-]);
+function shouldHydrateTeamFormAfterLoad(result, { initialized, dirty, busy }) {
+  return !loadResultFailed(result) && result?.stale !== true && !initialized && !dirty && !busy;
+}
 
-const DEFAULT_SECRETS = Object.freeze([
-  { name: "Claude Provider", reference: "secret reference", configured: null },
-  { name: "Grok Search", reference: "secret reference", configured: null },
-  { name: "MCP Connectors", reference: "environment references", configured: null },
-]);
+function parseForgeRoute(hashValue = location.hash) {
+  const raw = String(hashValue).replace(/^#/, "");
+  const [path, queryString = ""] = raw.split("?", 2);
+  const query = new URLSearchParams(queryString);
+  const memberId = cleanForgeRouteId(query.get("member"));
+  const runtimeProfileId = cleanForgeRouteId(query.get("runtime"));
+  if (path === "capabilities") {
+    return { view: "config", configSurface: "capabilities", memberId, runtimeProfileId };
+  }
+  const [view, candidateSurface] = path.split("/", 2);
+  if (view === "config") {
+    return {
+      view,
+      configSurface: CONFIG_SURFACE_SET.has(candidateSurface) ? candidateSurface : "providers",
+      memberId,
+      runtimeProfileId,
+    };
+  }
+  return {
+    view,
+    configSurface: null,
+    memberId: null,
+    runtimeProfileId: null,
+  };
+}
 
-const state = {
-  view: "workbench",
-  bootstrap: {},
-  health: null,
-  components: [...DEFAULT_COMPONENTS],
-  sources: [],
-  sourceFilter: "",
-  selectedSourceId: null,
-  config: null,
-  versions: [],
-  pendingPlan: null,
-  configBusy: false,
-  runs: [],
-  selectedRunId: null,
-  events: [],
-  routePreview: null,
-  models: [...DEFAULT_MODELS],
-  policies: [...DEFAULT_POLICIES],
-  secrets: [...DEFAULT_SECRETS],
-  approvals: [],
-  diagnostics: [],
-  diagnosticLog: [],
-  apiState: "pending",
-  eventState: "pending",
-  eventController: null,
-  lastEventSequence: 0,
-  obsRouteGate: null,
-  obsDelta: null,
-  obsHandoffs: [],
-  obsSummary: null,
-  obsDrift: null,
-  obsLoaded: false,
-  sessionsData: null,
-  sessionsError: null,
-  projectsData: null,
-  expandedProjects: new Set(),
-  // 历史对话摘要默认关闭（烛 R5 致命1：summaries=1 固定开会绕过"摘要 opt-in"隐私纪律）；
-  // opt-in 记在 sessionStorage——与访问 token 同生命周期，重开 Console 需重新选择
-  projectSummaries: false,
-  sessionPreview: null,
-  attachments: [], // ➕ 附加的资料文件路径（随任务/续聊提交并入 prompt，Claude 自行读取）
-  projectPrefs: { projects: {} }, // 项目侧栏偏好：置顶/重命名/隐藏（服务端 project-prefs.json）
-  deepLinkRunId: null, // #run=<id> 深度链接：runs 首载后选中一次性消费
-  previewSeq: 0,
-  projectsSeq: 0,
-  teams: [],
-  selectedTeamId: "team-514cc",
-  editingTeamId: null,
-  // recovery 死路：确认恢复的 run id——下一次续聊自动带 acknowledgeRecovery:true（orchestrator 584-590）
-  recoveryAckRunId: null,
-};
+// API, TOKEN_KEY, state, VIEW_TITLES 等已迁移至 api.js / state.js / utils.js
+
+// TOKEN_KEY, accessToken, VIEW_TITLES, ACTIVE_RUN_STATES, TERMINAL_RUN_STATES,
+// DEFAULT_COMPONENTS, DEFAULT_MODELS, DEFAULT_POLICIES, DEFAULT_SECRETS,
+// escapeHtml, redact, formatDate, formatTime, formatRelative, formatDuration,
+// compactHash, normalizeStatus, statusText, runStatusText, unwrapList, objectList
+// → 已从 api.js / state.js / utils.js 导入
+
+// state 对象已迁移至 state.js（通过 import 导入）
 
 const elements = {};
 const byId = (id) => document.getElementById(id);
+let missionControlDock = null;
+let workbenchEnvironmentPanel = null;
+let railTools = null;
+let railPanels = null;
+let memberLibrary = null;
+let runtimeSeatManager = null;
+let memberConfigTargetEpoch = 0;
 
-class ApiError extends Error {
-  constructor(message, status = 0, payload = null) {
-    super(message);
-    this.name = "ApiError";
-    this.status = status;
-    this.payload = payload;
-  }
+function clearMemberConfigTarget({ cancelPending = true } = {}) {
+  state.configMemberFocusId = null;
+  state.configRuntimeFocusId = null;
+  if (cancelPending) memberConfigTargetEpoch += 1;
 }
+
+// 高频 rail/tree 渲染先比较应用自己上次提交的模板。状态未变时不触碰 DOM，
+// 避免 renderRuns/renderProjects 连续到达时重复销毁焦点、布局与可访问树。
+const committedMarkup = new WeakMap();
+function commitMarkup(element, markup) {
+  if (!element || committedMarkup.get(element) === markup) return false;
+  element.innerHTML = markup;
+  committedMarkup.set(element, markup);
+  return true;
+}
+
+// ApiError 已迁移至 api.js（通过 import 导入）
 
 function cacheElements() {
   [
     "current-view-title",
+    "current-view-group",
     "api-connection-badge",
     "theme-toggle",
     "sidebar-status-dot",
     "sidebar-status-label",
     "sidebar-version",
+    "global-status-dot",
+    "global-status-label",
+    "global-status-version",
     "refresh-button",
     "metric-services",
     "metric-services-detail",
@@ -167,38 +213,79 @@ function cacheElements() {
     "run-count",
     "clear-runs-button",
     "workbench-run-list",
-    "team-picker",
+    "composer-team",
+    "start-agent",
     "manage-teams-button",
-    "team-dialog",
+    "team-settings-panel",
     "team-form",
-    "team-dialog-title",
+    "team-form-title",
+    "team-form-status",
+    "team-switch-select",
+    "team-active-status",
+    "team-activate-button",
+    "team-activate-label",
+    "team-apply-providers-button",
+    "team-edit-button",
+    "team-runtime-team-name",
     "team-builtin-note",
     "team-new-button",
-    "team-close-button",
+    "team-preset-select",
+    "team-import-button",
+    "team-import-file",
+    "team-export-button",
     "team-name-input",
     "team-description-input",
     "team-prompt-input",
+    "team-roster-summary",
+    "team-members-search",
+    "team-member-create-button",
     "team-members-list",
-    "team-skills-input",
-    "team-mcp-input",
+    "team-skills-chips",
+    "team-mcp-chips",
     "team-delete-button",
     "team-cancel-button",
     "team-save-button",
+    "team-save-label",
     "project-count",
     "project-summaries-toggle",
+    "subagents-toggle",
+    "show-hidden-toggle",
+    "recent-only-toggle",
     "workbench-project-tree",
     "conversation-title",
     "conversation-meta",
     "cancel-run-button",
     "conversation-stream",
+    "conversation-live-status",
     "recovery-bar",
     "followup-agent",
-    "followup-agent-pick",
     "task-form",
     "task-input",
     "task-effort",
     "task-permission",
     "task-permission-pick",
+    "permission-pill",
+    "permission-pill-label",
+    "permission-menu",
+    "composer-cli-console",
+    "composer-cli-console-toggle",
+    "composer-cli-console-panel",
+    "composer-cli-console-title",
+    "composer-cli-console-summary",
+    "composer-cli-console-state",
+    "composer-cli-command-list",
+    "composer-cli-command-note",
+    "composer-cli-default-model",
+    "composer-cli-default-effort",
+    "composer-cli-default-permission",
+    "composer-cli-default-save",
+    "composer-cli-command-value",
+    "composer-cli-open-seat",
+    "composer-cli-open-capabilities",
+    "composer-cli-open-connection",
+    "composer-cli-connection-copy",
+    "composer-cli-diagnostic-actions",
+    "composer-cli-diagnostic-output",
     "attach-button",
     "attach-chips",
     "rail-working",
@@ -207,6 +294,14 @@ function cacheElements() {
     "rail-pinned",
     "pinned-run-list",
     "pinned-count",
+    "rail-archived",
+    "archived-toggle",
+    "archived-run-list",
+    "archived-count",
+    "rail-automations",
+    "automations-list",
+    "automations-count",
+    "save-automation-button",
     "context-menu",
     "input-dialog",
     "input-dialog-eyebrow",
@@ -221,13 +316,34 @@ function cacheElements() {
     "composer-new-task",
     "composer-cwd",
     "new-session-button",
+    "new-task-row",
+    "team-newsession-button",
+    "rail-search-row",
+    "team-tree-toggle",
+    "team-rail-title",
     "session-dialog",
     "session-form",
     "session-cwd-input",
     "session-cwd-hint",
     "session-close-button",
     "session-cancel-button",
-    "session-browse-button",
+    "session-step-type",
+    "session-step-info",
+    "session-prev-button",
+    "session-next-button",
+    "session-submit-button",
+    "session-dirpick",
+    "session-name-input",
+    "session-dialog-title",
+    "session-local-fields",
+    "session-remote-fields",
+    "session-remote-badge",
+    "session-remote-host",
+    "session-remote-path",
+    "session-remote-name",
+    "session-remote-up",
+    "session-remote-browser",
+    "session-remote-hint",
     "project-paths",
     "rail-statusline",
     "submit-task-button",
@@ -235,7 +351,15 @@ function cacheElements() {
     "session-topology",
     "event-live-state",
     "workbench-event-list",
+    "config-workspace-status",
     "config-global-status",
+    "config-topology-tabs",
+    "config-host-bar",
+    "config-topology-nav",
+    "config-surface-remote",
+    "config-topology-provider-count",
+    "config-topology-capability-count",
+    "config-topology-source-count",
     "source-count",
     "source-filter",
     "source-list",
@@ -255,8 +379,152 @@ function cacheElements() {
     "editor-cursor-status",
     "editor-validation-status",
     "version-list",
+    "version-preview",
+    "version-preview-status",
+    "version-preview-meta",
+    "version-preview-diff",
+    "version-preview-close",
+    "version-preview-rollback",
     "diff-summary",
     "diff-output",
+    "provider-columns",
+    "provider-add-button",
+    "provider-team-select",
+    "provider-apply-team-button",
+    "provider-dialog",
+    "provider-form",
+    "provider-dialog-title",
+    "provider-name-input",
+    "provider-baseurl-input",
+    "provider-key-input",
+    "provider-website-input",
+    "provider-notes-input",
+    "provider-models-claude",
+    "provider-models-codex",
+    "provider-models-gemini",
+    "provider-models-grokbuild",
+    "provider-models-kimi",
+    "provider-models-opencode",
+    "provider-models-openclaw",
+    "provider-models-hermes",
+    "provider-claude-model",
+    "provider-claude-haiku",
+    "provider-claude-sonnet",
+    "provider-claude-opus",
+    "provider-claude-fable",
+    "provider-claude-subagent",
+    "provider-claude-sonnet-name",
+    "provider-claude-opus-name",
+    "provider-claude-fable-name",
+    "provider-claude-haiku-name",
+    "provider-claude-model-1m",
+    "provider-claude-sonnet-1m",
+    "provider-claude-opus-1m",
+    "provider-claude-fable-1m",
+    "provider-claude-haiku-1m",
+    "provider-claude-subagent-1m",
+    "provider-api-format",
+    "provider-proxy-ua",
+    "provider-proxy-headers",
+    "provider-proxy-body",
+    "provider-codex-model",
+    "provider-codex-effort",
+    "provider-gemini-model",
+    "provider-grokbuild-model",
+    "provider-kimi-model",
+    "provider-opencode-model",
+    "provider-openclaw-model",
+    "provider-hermes-model",
+    "provider-delete-button",
+    "provider-save-button",
+    "provider-cancel-button",
+    "provider-close-button",
+    "provider-tools-button",
+    "provider-sort-exit",
+    "provider-endpoint-list",
+    "provider-endpoint-input",
+    "provider-endpoint-add-button",
+    "provider-endpoint-test-button",
+    "provider-endpoint-autoselect",
+    "provider-usage-enabled",
+    "provider-usage-template",
+    "provider-usage-timeout",
+    "provider-usage-interval",
+    "provider-usage-userid",
+    "provider-usage-apikey",
+    "provider-usage-baseurl",
+    "provider-usage-token",
+    "provider-usage-code",
+    "provider-usage-test-button",
+    "provider-usage-test-result",
+    "provider-proxy-enabled",
+    "provider-proxy-type",
+    "provider-proxy-host",
+    "provider-proxy-port",
+    "provider-proxy-username",
+    "provider-proxy-password",
+    "provider-test-timeout",
+    "provider-test-retries",
+    "provider-test-degraded",
+    "provider-test-model",
+    "provider-test-prompt",
+    "provider-model-test-button",
+    "provider-model-test-result",
+    "provider-category",
+    "provider-apikey-field",
+    "provider-cost-multiplier",
+    "provider-limit-daily",
+    "provider-limit-monthly",
+    "provider-preset-block",
+    "provider-preset-search",
+    "provider-preset-clear-button",
+    "provider-preset-grid",
+    "provider-preset-hint",
+    "provider-reset-button",
+    "provider-catalog-list",
+    "provider-app-bar",
+    "provider-baseurl-hint",
+    "provider-config-json-block",
+    "provider-preview-tabs",
+    "provider-preview-reset-button",
+    "provider-common-json",
+    "provider-common-json-editor",
+    "provider-edit-common-button",
+    "common-config-claude-editor",
+    "common-config-dialog",
+    "common-config-form",
+    "common-config-close-button",
+    "common-config-cancel-button",
+    "common-config-save-button",
+    "common-config-claude",
+    "common-config-codex",
+    "common-config-gemini",
+    "common-config-grokbuild",
+    "common-config-kimi",
+    "common-config-opencode",
+    "common-config-openclaw",
+    "common-config-hermes",
+    "common-toggle-attribution",
+    "common-toggle-teams",
+    "common-toggle-toolsearch",
+    "common-toggle-effort",
+    "common-toggle-autoupdate",
+    "team-provider-claude",
+    "team-provider-codex",
+    "team-provider-gemini",
+    "team-provider-grokbuild",
+    "team-provider-kimi",
+    "team-provider-opencode",
+    "team-provider-openclaw",
+    "team-provider-hermes",
+    "provider-deeplink-dialog",
+    "provider-deeplink-form",
+    "provider-deeplink-input",
+    "provider-deeplink-preview",
+    "provider-deeplink-preview-button",
+    "provider-deeplink-import-button",
+    "provider-deeplink-close-button",
+    "provider-deeplink-cancel-button",
     "router-status",
     "router-form",
     "router-prompt",
@@ -279,7 +547,22 @@ function cacheElements() {
     "reload-runtime-button",
     "diagnostics-table-body",
     "diagnostic-log",
+    "diagnostic-log-filter",
     "copy-log-button",
+    "cap-agents-grid",
+    "cap-skills-head",
+    "cap-skills-body",
+    "cap-skills-summary",
+    "cap-skills-coverage",
+    "cap-skills-scope",
+    "cap-skills-filter",
+    "cap-skills-ghosts",
+    "cap-mcp-body",
+    "cap-mcp-summary",
+    "cap-mcp-map",
+    "capabilities-refresh-button",
+    "conv-tabs",
+    "member-strip",
     "action-dialog",
     "dialog-eyebrow",
     "dialog-title",
@@ -309,133 +592,9 @@ function cacheElements() {
   });
 }
 
-function escapeHtml(value) {
-  return String(value ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
-
-function redact(value) {
-  return String(value ?? "")
-    .replace(/(bearer\s+)[a-z0-9._~+/=-]{8,}/gi, "$1[REDACTED]")
-    .replace(/(basic\s+)[a-z0-9+/=]{12,}/gi, "$1[REDACTED]")
-    .replace(/((?:api[-_]?key|access[-_]?key|secret|token|password|passwd|passphrase|auth(?:orization)?|credential|private[-_]?key|cookie)\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;}]+)/gi, "$1[REDACTED]")
-    .replace(/\b(?:sk-(?:proj-)?|xai-|gh[pousr]_|github_pat_)[a-z0-9_.-]{12,}\b/gi, "[REDACTED]")
-    .replace(/\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g, "[REDACTED]")
-    .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g, "[REDACTED]");
-}
-
-function unwrapList(payload, keys = []) {
-  if (Array.isArray(payload)) return payload;
-  if (!payload || typeof payload !== "object") return [];
-  for (const key of [...keys, "items", "data", "results"]) {
-    if (Array.isArray(payload[key])) return payload[key];
-  }
-  return [];
-}
-
-function objectList(payload, keys = []) {
-  const list = unwrapList(payload, keys);
-  if (list.length) return list;
-  if (!payload || typeof payload !== "object") return [];
-  for (const key of keys) {
-    const value = payload[key];
-    if (value && typeof value === "object" && !Array.isArray(value)) {
-      return Object.entries(value).map(([id, item]) =>
-        item && typeof item === "object" ? { id, ...item } : { id, status: item },
-      );
-    }
-  }
-  return [];
-}
-
-function normalizeStatus(value) {
-  if (value === true) return "ok";
-  if (value === false) return "error";
-  const raw = String(value ?? "unknown").toLowerCase().replaceAll("-", "_");
-  if (["ok", "healthy", "ready", "connected", "online", "available", "consistent", "pass", "passed"].includes(raw)) return "ok";
-  if (["warn", "warning", "degraded", "drift", "stale", "partial", "pending", "connecting", "external_unverified", "unconfigured", "disabled"].includes(raw)) return raw === "pending" || raw === "connecting" ? "pending" : "warning";
-  if (["error", "failed", "down", "offline", "unavailable", "invalid", "blocked", "missing"].includes(raw)) return "error";
-  return "unknown";
-}
-
-function statusText(value) {
-  const status = normalizeStatus(value);
-  return {
-    ok: "正常",
-    warning: "需关注",
-    error: "异常",
-    pending: "检查中",
-    unknown: "未知",
-  }[status];
-}
-
-function runStatusText(value) {
-  const status = String(value ?? "unknown").toLowerCase().replaceAll("-", "_");
-  return {
-    planning: "规划中",
-    waiting_for_approval: "等待审批",
-    waiting_approval: "等待审批",
-    waiting_agent: "等待 Agent",
-    recovery_required: "需人工恢复",
-    queued: "已排队",
-    executing: "执行中",
-    running: "执行中",
-    active: "执行中",
-    integrating: "综合中",
-    verifying: "验证中",
-    complete: "已完成",
-    completed: "已完成",
-    succeeded: "已完成",
-    blocked: "已阻塞",
-    failed: "失败",
-    cancelled: "已取消",
-    canceled: "已取消",
-  }[status] ?? "未知";
-}
-
-function formatDate(value, fallback = "--") {
-  if (!value) return fallback;
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return String(value);
-  return new Intl.DateTimeFormat("zh-CN", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  }).format(date);
-}
-
-function formatTime(value, fallback = "--") {
-  if (!value) return fallback;
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return String(value);
-  return new Intl.DateTimeFormat("zh-CN", {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  }).format(date);
-}
-
-function formatDuration(value) {
-  const number = Number(value);
-  if (!Number.isFinite(number)) return "--";
-  const milliseconds = number > 0 && number < 20 ? number * 1000 : number;
-  if (milliseconds < 1000) return `${Math.round(milliseconds)} ms`;
-  return `${(milliseconds / 1000).toFixed(milliseconds < 10000 ? 1 : 0)} s`;
-}
-
-function compactHash(value) {
-  const hash = String(value ?? "").trim();
-  if (!hash) return "--";
-  return hash.length > 18 ? `${hash.slice(0, 10)}…${hash.slice(-6)}` : hash;
-}
+// escapeHtml, redact, unwrapList, objectList, normalizeStatus, statusText,
+// runStatusText, formatDate, formatTime, formatRelative, formatDuration, compactHash
+// → 已迁移至 utils.js（通过 import 导入）
 
 function getVersion() {
   return (
@@ -446,56 +605,51 @@ function getVersion() {
   );
 }
 
-async function request(path, options = {}) {
-  const method = options.method ?? "GET";
-  const headers = new Headers(options.headers ?? {});
-  headers.set("Accept", "application/json");
-  if (accessToken) headers.set("Authorization", `Bearer ${accessToken}`);
-  const init = { method, headers, signal: options.signal };
-  if (options.body !== undefined) {
-    headers.set("Content-Type", "application/json");
-    init.body = JSON.stringify(options.body);
-  }
+// request() 和 ApiError 已迁移至 api.js（通过 import 导入）
 
-  let response;
-  try {
-    response = await fetch(path, init);
-  } catch (error) {
-    throw new ApiError(`无法连接控制面：${error?.message ?? error}`);
-  }
-
-  const contentType = response.headers.get("content-type") ?? "";
-  let payload = null;
-  try {
-    payload = contentType.includes("json") ? await response.json() : await response.text();
-  } catch {
-    payload = null;
-  }
-
-  if (!response.ok) {
-    const errorPayload = payload && typeof payload === "object" ? payload.error : null;
-    const detail =
-      errorPayload && typeof errorPayload === "object"
-        ? errorPayload.message ?? errorPayload.detail ?? errorPayload.code
-        : errorPayload ?? (payload && typeof payload === "object" ? payload.message ?? payload.detail : payload);
-    throw new ApiError(detail ? String(detail) : `${method} ${path} 返回 HTTP ${response.status}`, response.status, payload);
-  }
-  return payload;
-}
-
-function initializeAccessToken() {
+async function initializeAccessToken() {
   const url = new URL(window.location.href);
   const fragment = new URLSearchParams(url.hash.startsWith("#") ? url.hash.slice(1) : url.hash);
   const fragmentToken = fragment.get("token")?.trim() ?? "";
-  const deepLinkRun = fragment.get("run")?.trim() ?? ""; // 深度链接：#token=...&run=<id>
+  const deepLinkRun = fragment.get("run")?.trim() ?? "";
   if (deepLinkRun) state.deepLinkRunId = deepLinkRun;
+  const deepLinkSession = fragment.get("session")?.trim() ?? "";
+  if (deepLinkSession) {
+    const parts = deepLinkSession.split("::").filter(Boolean);
+    if (parts.length === 3) state.deepLinkSession = { cli: parts[0], projectId: parts[1], sessionId: parts[2] };
+    else if (parts.length === 2) state.deepLinkSession = { cli: "claude", projectId: parts[0], sessionId: parts[1] };
+  }
+  const deepLinkProject = fragment.get("project")?.trim() ?? "";
+  if (deepLinkProject) state.deepLinkProjectId = deepLinkProject;
+  const bootstrapNonce = fragment.get("bootstrap")?.trim() ?? "";
+  if (bootstrapNonce) {
+    let response;
+    try {
+      response = await fetch("/auth/bootstrap", {
+        method: "POST",
+        headers: { Accept: "application/json", "Content-Type": "application/json" },
+        body: JSON.stringify({ nonce: bootstrapNonce }),
+      });
+      const payload = await response.json().catch(() => null);
+      const issuedToken = typeof payload?.token === "string" ? payload.token.trim() : "";
+      if (!response.ok || !issuedToken) {
+        const detail = payload?.error?.message ?? payload?.error ?? payload?.message ?? `HTTP ${response.status}`;
+        throw new ApiError(`启动登录凭据兑换失败：${detail}`, response.status, payload);
+      }
+      sessionStorage.setItem(TOKEN_KEY, issuedToken);
+      setAccessToken(issuedToken);
+    } finally {
+      history.replaceState(null, "", `${url.pathname}${url.search}`);
+    }
+    return;
+  }
   if (fragmentToken) {
     sessionStorage.setItem(TOKEN_KEY, fragmentToken);
-    accessToken = fragmentToken;
+    setAccessToken(fragmentToken);
     history.replaceState(null, "", `${url.pathname}${url.search}`);
     return;
   }
-  accessToken = sessionStorage.getItem(TOKEN_KEY) ?? "";
+  setAccessToken(sessionStorage.getItem(TOKEN_KEY) ?? "");
 }
 
 // ===== 主题：亮色暖纸 / 暗色暖墨 =====
@@ -520,10 +674,10 @@ function applyTheme(theme, { persist = true } = {}) {
       localStorage.setItem(THEME_KEY, next);
     } catch {}
   }
-  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", next === "dark" ? "#171512" : "#faf9f5");
+  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", next === "dark" ? "#15171a" : "#f5f6f8");
   const toggle = elements["theme-toggle"];
   if (toggle) {
-    toggle.querySelector("use")?.setAttribute("href", next === "dark" ? "#icon-sun" : "#icon-moon");
+    toggle.querySelector("use")?.setAttribute("href", next === "dark" ? "#lucide-sun" : "#lucide-moon");
     toggle.title = next === "dark" ? "切换为浅色" : "切换为深色";
     toggle.setAttribute("aria-label", toggle.title);
   }
@@ -554,6 +708,9 @@ function setApiState(next, detail = "") {
   elements["sidebar-status-dot"].className = `status-dot is-${normalized}`;
   elements["sidebar-status-label"].textContent = label.textContent;
   elements["sidebar-version"].textContent = String(getVersion());
+  elements["global-status-dot"].className = `status-dot is-${normalized}`;
+  elements["global-status-label"].textContent = label.textContent;
+  elements["global-status-version"].textContent = String(getVersion());
 }
 
 function setEventState(next) {
@@ -566,19 +723,36 @@ function setEventState(next) {
   elements["event-live-state"].className = `event-live-state is-${normalized}`;
 }
 
+function compactToastRegion() {
+  const region = elements["toast-region"];
+  if (!region) return;
+  const seen = new Set();
+  for (const item of [...region.children].reverse()) {
+    const key = `${item.dataset.toastType || "info"}\u0000${item.textContent || ""}`;
+    if (seen.has(key)) item.remove();
+    else seen.add(key);
+  }
+  const limit = window.matchMedia?.("(max-width: 680px)").matches ? 2 : 4;
+  while (region.childElementCount > limit) region.firstElementChild?.remove();
+}
+
 function toast(message, type = "info", duration = 3600) {
   const item = document.createElement("div");
   item.className = `toast is-${type}`;
+  item.dataset.toastType = type;
   item.textContent = redact(message);
   elements["toast-region"].append(item);
+  compactToastRegion();
   window.setTimeout(() => item.remove(), duration);
 }
 
-function appendDiagnostic(message, level = "info") {
+window.addEventListener("resize", compactToastRegion, { passive: true });
+
+function appendDiagnostic(message, level = "info", { render = true } = {}) {
   const now = new Date().toISOString();
   state.diagnosticLog.unshift(`[${now}] [${level.toUpperCase()}] ${redact(message)}`);
   state.diagnosticLog = state.diagnosticLog.slice(0, 120);
-  renderDiagnosticLog();
+  if (render) renderDiagnosticLog();
 }
 
 function normalizeSource(item, index) {
@@ -610,12 +784,11 @@ function normalizeRun(item, index) {
   const id = String(item.id ?? item.run_id ?? item.runId ?? `run-${index}`);
   const prompt = item.prompt ?? item.task ?? item.message ?? item.input ?? "";
   const route = item.route ?? item.routing ?? item.decision ?? null;
+  const coordinatorId = String(item.coordinatorId ?? item.coordinator_id ?? "");
+  const startAgentId = String(item.startAgentId ?? item.start_agent_id ?? "");
+  const executionOwnerId = String(item.executionOwnerId ?? item.execution_owner_id ?? startAgentId);
   const rawSessions = item.sessions ?? item.agents ?? [];
-  const sessions = Array.isArray(rawSessions)
-    ? rawSessions
-    : rawSessions && typeof rawSessions === "object"
-      ? Object.entries(rawSessions).map(([agentId, sessionId]) => ({ agentId, sessionId, name: agentId, role: agentId === "claude-fable" ? "orchestrator" : "worker" }))
-      : [];
+  const sessions = normalizeRunSessions(rawSessions, coordinatorId);
   return {
     ...item,
     id,
@@ -626,18 +799,24 @@ function normalizeRun(item, index) {
     createdAt: item.created_at ?? item.createdAt ?? item.started_at ?? item.startedAt ?? null,
     updatedAt: item.updated_at ?? item.updatedAt ?? item.finished_at ?? item.finishedAt ?? null,
     route,
+    coordinatorId: coordinatorId || null,
+    startAgentId: startAgentId || null,
+    executionOwnerId: executionOwnerId || null,
     sessions,
     messages: unwrapList(item.messages ?? item.turns ?? [], ["messages", "turns"]),
   };
 }
 
 function normalizeComponent(item, index) {
+  const rawStatus = item.status ?? item.state ?? item.ok;
   return {
     ...item,
     id: String(item.id ?? item.key ?? item.name ?? `component-${index}`),
     name: String(item.name ?? item.label ?? item.id ?? `组件 ${index + 1}`),
-    detail: String(item.detail ?? item.description ?? item.message ?? item.version ?? ""),
-    status: normalizeStatus(item.status ?? item.state ?? item.ok),
+    // detail 兜底链补 reason：dormant/missing 等状态的解释在 reason 字段（version 只有在线组件有）
+    detail: String(item.detail ?? item.description ?? item.message ?? item.version ?? item.reason ?? ""),
+    status: normalizeStatus(rawStatus),
+    rawStatus, // 原始态供 statusText 出专属文案（待命/未安装/未配置——normalize 会压扁语义）
     latency: item.latency_ms ?? item.latency ?? item.duration_ms ?? null,
   };
 }
@@ -698,6 +877,13 @@ function normalizeRoute(payload) {
 function extractBootstrapData(payload) {
   if (!payload || typeof payload !== "object") return;
   state.bootstrap = payload;
+  state.memberCatalog = Array.isArray(payload.memberCatalog)
+    ? payload.memberCatalog
+    : Array.isArray(payload.teamCatalog) ? payload.teamCatalog : [];
+  state.runtimeCatalog = Array.isArray(payload.runtimeCatalog) ? payload.runtimeCatalog : [];
+  memberLibrary?.syncBootstrap();
+  runtimeSeatManager?.refreshBindings?.(); // bootstrap 慢聚合晚到时，席位绑定区块从「未绑定」旧空态自愈
+  syncModelPick(); // providers（含 modelOptions）就绪后立刻联动 /model 目录——renderTeams 可能已先跑过
 
   const models = objectList(payload, ["providers", "models", "model_registry", "adapters"]);
   if (models.length) state.models = models.map(normalizeModel);
@@ -754,11 +940,14 @@ function applyHealthToModels(healthPayload) {
 }
 
 async function loadBootstrap() {
+  const previousTeamCatalog = teamCatalogSignature();
   const payload = await request(API.bootstrap);
   extractBootstrapData(payload);
   elements["sidebar-version"].textContent = String(getVersion());
   renderModels();
   renderSecurity();
+  reconcileTeamFormCatalog(previousTeamCatalog);
+  refreshTeamData();
   return payload;
 }
 
@@ -792,16 +981,33 @@ async function loadHealth() {
   } finally {
     renderOverview();
     renderDiagnostics();
+    renderTeamPulse();
+    refreshTeamData();
+    missionControlDock?.refreshIdle?.();
   }
 }
 
 async function loadSources({ preserveSelection = true } = {}) {
+  const previousSelection = state.selectedSourceId;
   const payload = await request(API.sources);
   state.sources = unwrapList(payload, ["sources", "config_sources"]).map(normalizeSource);
-  if (!preserveSelection || !state.sources.some((item) => item.id === state.selectedSourceId)) {
+  const selectedSourceExists = state.sources.some((item) => item.id === previousSelection);
+  const preserveDirtyDraft = Boolean(previousSelection) && !selectedSourceExists && configIsDirty();
+  if (preserveDirtyDraft) {
+    appendDiagnostic(`配置源 ${previousSelection} 已不在索引中；保留未保存草稿与原选择`, "warning");
+    toast("当前配置源已从索引移除；未保存草稿仍保留，请确认后再切换", "warning", 7000);
+  } else if (!preserveSelection || !selectedSourceExists) {
     state.selectedSourceId = state.sources[0]?.id ?? null;
   }
+  if (state.selectedSourceId !== previousSelection) {
+    state.config = null;
+    state.versions = [];
+    state.configVersionPreview = null;
+    state.pendingPlan = null;
+    renderConfig();
+  }
   renderSources();
+  renderConfigTopology();
   renderOverview();
   return payload;
 }
@@ -811,24 +1017,46 @@ async function loadRuns() {
   state.runs = unwrapList(payload, ["runs"]).map(normalizeRun);
   // 深度链接一次性消费：#run=<id> 指定的任务优先选中
   if (state.deepLinkRunId) {
-    if (state.runs.some((run) => run.id === state.deepLinkRunId)) state.selectedRunId = state.deepLinkRunId;
-    else toast("深度链接指向的任务不存在（可能已被清除）", "warning");
-    state.deepLinkRunId = null;
+    if (state.runs.some((run) => run.id === state.deepLinkRunId)) {
+      state.selectedRunId = state.deepLinkRunId;
+      state.selectionClearedByUser = false;
+    }
+    else {
+      toast("深度链接指向的任务不存在（可能已被清除）", "warning");
+      state.deepLinkRunId = null;
+    }
   }
-  if (state.selectedRunId && !state.runs.some((run) => run.id === state.selectedRunId)) state.selectedRunId = null;
-  if (!state.selectedRunId) {
+  if (state.selectedRunId && !state.runs.some((run) => run.id === state.selectedRunId)) {
+    state.selectedRunId = null;
+    state.selectionClearedByUser = false; // 选中失效非用户意图，允许下方自动接力
+  }
+  // 自动选择只补「从未选过」的位：用户显式切新任务模式（selectionClearedByUser）时不得回盖——
+  // 否则笔按钮/新任务后下一次 loadRuns 轮询把旧 run 重新刷回会话区（LO 2026-08-11）
+  if (!state.selectedRunId && !state.selectionClearedByUser) {
     state.selectedRunId = state.runs.find((run) => ACTIVE_RUN_STATES.has(run.status))?.id ?? state.runs[0]?.id ?? null;
   }
   renderRuns();
   renderOverview();
+  // 状态翻页必须连会话视图一起刷：loadRuns 是 run.completed/failed 等纯状态事件的唯一通道
+  // （它们不在 conversationEvent 白名单）——不补这刀，停止键/composer 禁用态/恢复条停在旧快照
+  renderSelectedRun();
+  const run = selectedRun();
+  missionControlDock?.selectRun(run?.id ?? null, run ? `${run.updatedAt ?? run.createdAt ?? ""}:${run.status}:${run.round ?? 0}` : null);
+  syncRailToActiveRun();
+  refreshTeamData();
   return payload;
 }
 
 async function loadApprovals() {
-  const payload = await request(API.approvals);
+  const [payload, leasePayload] = await Promise.all([
+    request(API.approvals),
+    request(API.leases),
+  ]);
   state.approvals = unwrapList(payload, ["approvals"]);
+  state.leases = unwrapList(leasePayload, ["leases"]);
   renderApprovals();
   renderSelectedRun(); // 内联审批卡挂在协作台会话流末尾，与安全诊断列表同一份数据同步刷新
+  missionControlDock?.refresh();
   return payload;
 }
 
@@ -838,19 +1066,22 @@ async function loadInitial() {
   let earlySuccess = false;
   const track = (job) =>
     job.then((value) => {
-      if (!earlySuccess) {
+      if (!earlySuccess && !loadResultFailed(value)) {
         earlySuccess = true;
         setApiState("ok");
       }
       return value;
     });
   const sourcesJob = loadSources().then(async (payload) => {
-    if (state.selectedSourceId && !state.config) await loadSelectedConfig();
+    if (state.selectedSourceId && !state.config) {
+      const detailResult = await loadSelectedConfig();
+      if (loadResultFailed(detailResult)) return detailResult;
+    }
     return payload;
   });
-  const jobs = [track(loadBootstrap()), track(loadHealth()), track(sourcesJob), track(loadRuns()), track(loadApprovals())];
+  const jobs = [track(loadBootstrap()), track(loadHealth()), track(sourcesJob), track(loadRuns()), track(loadApprovals()), track(loadAutomations()), track(loadTeams())];
   const settled = await Promise.allSettled(jobs);
-  const successes = settled.filter((item) => item.status === "fulfilled").length;
+  const successes = settled.filter((item) => item.status === "fulfilled" && !loadResultFailed(item.value)).length;
   if (successes > 0) {
     setApiState("ok");
     appendDiagnostic(`控制面初始化完成：${successes}/${settled.length} 个端点成功`);
@@ -861,12 +1092,60 @@ async function loadInitial() {
 
   settled.forEach((item) => {
     if (item.status === "rejected") appendDiagnostic(item.reason?.message ?? item.reason, "warning");
+    else if (loadResultFailed(item.value)) appendDiagnostic(item.value.error?.message ?? item.value.error, "warning");
   });
   renderAll();
 }
 
-function setView(view, { updateHash = true, focus = true } = {}) {
-  if (!VIEW_TITLES[view]) return;
+function setConfigSurface(surface, { updateHash = true, focus = false, preserveMemberTarget = false } = {}) {
+  const next = CONFIG_SURFACE_SET.has(surface) ? surface : "providers";
+  if (!preserveMemberTarget) clearMemberConfigTarget();
+  state.configSurface = next;
+  document.querySelectorAll("[data-config-surface-panel]").forEach((panel) => {
+    const active = panel.dataset.configSurfacePanel === next;
+    panel.hidden = !active;
+    panel.classList.toggle("is-active", active);
+  });
+  document.querySelectorAll("[data-config-surface]").forEach((button) => {
+    const active = button.dataset.configSurface === next;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-selected", String(active));
+    button.tabIndex = active ? 0 : -1;
+  });
+  if (state.view === "config" && updateHash) {
+    history.replaceState(null, "", configRouteHash(next, {
+      memberId: state.configMemberFocusId,
+      runtimeProfileId: state.configRuntimeFocusId,
+    }));
+  }
+  renderConfigTopology();
+  // 远程配置目标生效期间，程序化 surface 切换不得把本机三面图谱重新放出来
+  if (state.configHostId) syncConfigHostView();
+  if (next === "providers" && !state.providersData) void loadTeams().then(() => loadProviders());
+  if (next === "capabilities" && !state.capabilitiesData) void loadCapabilities();
+  if (next === "capabilities" && state.capabilitiesData) renderCapabilities();
+  if (next === "sources") runtimeSeatManager?.setMode(state.runtimeWorkspaceMode, { focus: false });
+  if (focus) {
+    const heading = byId(`config-surface-${next}`)?.querySelector("h2");
+    if (heading) {
+      heading.setAttribute("tabindex", "-1");
+      requestAnimationFrame(() => heading.focus({ preventScroll: true }));
+    }
+  }
+}
+
+function setView(view, {
+  updateHash = true,
+  focus = true,
+  configSurface = null,
+  preserveMemberTarget = false,
+} = {}) {
+  if (view === "capabilities") {
+    view = "config";
+    configSurface = "capabilities";
+  }
+  if (!FORGE_VIEW_TITLES[view]) return;
+  if (view !== "config") clearMemberConfigTarget();
   state.view = view;
   document.querySelectorAll("[data-view-panel]").forEach((panel) => {
     const active = panel.dataset.viewPanel === view;
@@ -879,9 +1158,26 @@ function setView(view, { updateHash = true, focus = true } = {}) {
     if (active) button.setAttribute("aria-current", "page");
     else button.removeAttribute("aria-current");
   });
-  elements["current-view-title"].textContent = VIEW_TITLES[view];
-  document.title = `${VIEW_TITLES[view]} · 514cc Control Center`;
-  if (updateHash) history.replaceState(null, "", `#${view}`);
+  elements["current-view-title"].textContent = FORGE_VIEW_TITLES[view];
+  if (elements["current-view-group"]) {
+    elements["current-view-group"].textContent = FORGE_VIEW_GROUPS[view] ?? "";
+  }
+  document.title = `${FORGE_VIEW_TITLES[view]} · 514 Forge`;
+  if (view === "config") {
+    setConfigSurface(configSurface ?? state.configSurface, {
+      updateHash: false,
+      focus: false,
+      preserveMemberTarget,
+    });
+  }
+  if (updateHash) {
+    history.replaceState(null, "", view === "config"
+      ? configRouteHash(state.configSurface, {
+          memberId: state.configMemberFocusId,
+          runtimeProfileId: state.configRuntimeFocusId,
+        })
+      : `#${view}`);
+  }
   if (focus) {
     const heading = byId(`view-${view}`)?.querySelector("h1");
     if (heading) {
@@ -893,8 +1189,2140 @@ function setView(view, { updateHash = true, focus = true } = {}) {
   if (view === "security" && state.diagnostics.length === 0) void runDiagnostics();
   if (view === "observability" && !state.obsLoaded) void loadObservability();
   if (view === "sessions" && !state.sessionsData) void loadSessions();
+  // 统一配置图谱每次进入都回读供应商、能力和真源摘要；三个配置面共用同一份状态。
+  if (view === "config") {
+    void loadTeams().then(() => loadProviders());
+    if (!state.capabilitiesData) void loadCapabilities();
+    if (state.configSurface === "sources") void runtimeSeatManager?.load();
+    void loadConfigHosts({ force: true }); // 配置目标台账每进刷新（远程主机视图里增删过也能跟上）
+    if (state.configHostId) syncConfigHostView(); // 带着远程目标回到本视图时恢复面板显隐
+  }
   if (view === "workbench" && !state.projectsData) void loadProjects();
   if (view === "workbench" && !state.teams.length) void loadTeams();
+  if (view === "team") {
+    if (!state.teams.length) {
+      void loadTeams().then((result) => {
+        if (shouldHydrateTeamFormAfterLoad(result, {
+          initialized: teamFormInitialized,
+          dirty: teamFormDirty,
+          busy: teamFormBusy,
+        })) fillTeamForm(currentTeam());
+      });
+    } else if (!teamFormInitialized) {
+      fillTeamForm(currentTeam());
+    }
+    refreshTeamData();
+    void refreshCollabFlow();
+  }
+  // 隐藏视图的数据只落 state；切到该视图时再消费，避免 SSE/轮询持续改写屏外 DOM。
+  if (view === "overview") renderOverview();
+  if (view === "workbench") {
+    renderRuns();
+    if (state.projectsData) renderProjects();
+  }
+}
+
+function renderConfigTopology() {
+  const providers = state.providersData?.providers ?? [];
+  const runtimeSeats = state.runtimeSeatsData?.seats ?? [];
+  const adapterTemplates = state.adapterTemplatesData?.templates ?? [];
+  const runtimeError = state.runtimeSeatsData?.error;
+  const providerError = state.providersData?.error;
+  const providerBlocked = state.providersData?.storeStatus?.state === "blocked";
+  const skills = state.capabilitiesData?.skills;
+  const mcp = state.capabilitiesData?.mcp;
+  const capabilityStatus = skills?.configurationStatus ?? {};
+  const mcpStatus = mcp?.configurationStatus ?? {};
+  const localDriftCount = state.sources.filter((source) => ["drift", "warning", "stale"].includes(source.status)).length;
+  const remoteTarget = Boolean(state.configHostId);
+  const remoteEntry = remoteTarget ? state.configHostGraph.get(configRemoteTargetKey()) : null;
+  const remoteGraph = remoteEntry?.status === "ok" ? remoteEntry.data ?? {} : null;
+  const remoteProbe = remoteTarget ? state.configHostProbes.get(state.configHostId) : null;
+  const remoteDraftCount = remoteTarget ? configRemoteDirtyDraftCount(configRemoteTargetKey()) : 0;
+  const remoteRecovery = remoteTarget ? configRemoteRecoveryForTarget() : null;
+  const remoteCount = (readyLabel) => remoteEntry?.status === "error" ? "读取失败" : remoteGraph ? readyLabel(remoteGraph) : "读取中";
+
+  if (elements["config-topology-provider-count"]) {
+    elements["config-topology-provider-count"].textContent = remoteTarget
+      ? remoteCount((graph) => `${(graph.providers ?? []).filter((row) => row.exists).length} live · ${(graph.providers ?? []).length} 配置`)
+      : providerError
+      ? "读取失败"
+      : state.providersData
+        ? `${providers.filter((provider) => PROVIDER_APPS.some((app) => provider.apps?.[app])).length} 档案 · ${PROVIDER_APPS.length} 应用`
+        : "读取中";
+  }
+  if (elements["config-topology-capability-count"]) {
+    elements["config-topology-capability-count"].textContent = remoteTarget
+      ? remoteCount((graph) => `${(graph.capabilities ?? []).filter((cap) => cap.kind === "agent").length} Agent · ${(graph.capabilities ?? []).filter((cap) => cap.kind === "skill").length} Skill · ${(graph.mcp ?? []).length} MCP`)
+      : state.capabilitiesError
+      ? "扫描失败"
+      : skills && mcp
+        ? `${skills.agents?.length ?? 0} Agent · ${skills.items?.length ?? 0} Skill · ${mcp.servers?.length ?? 0} MCP`
+        : "扫描中";
+  }
+  if (elements["config-topology-source-count"]) {
+    elements["config-topology-source-count"].textContent = remoteTarget
+      ? remoteCount((graph) => `${remoteProbe?.data?.clis?.filter((cli) => cli.installed).length ?? 0} CLI · ${(graph.sources ?? []).filter((file) => file.exists).length} 真源`)
+      : runtimeError
+      ? "席位读取失败"
+      : state.runtimeSeatsData
+        ? `${runtimeSeats.length} 席位 · ${adapterTemplates.length} Adapter`
+        : "读取中";
+  }
+
+  const providerNode = byId("config-topology-providers");
+  const capabilityNode = byId("config-topology-capabilities");
+  const sourceNode = byId("config-topology-sources");
+  providerNode?.classList.toggle("is-error", remoteTarget ? remoteEntry?.status === "error" : Boolean(providerError));
+  providerNode?.classList.toggle("is-warning", remoteTarget ? false : !providerError && providerBlocked);
+  capabilityNode?.classList.toggle("is-error", remoteTarget ? remoteEntry?.status === "error" : Boolean(state.capabilitiesError || capabilityStatus.failClosed || mcpStatus.failClosed));
+  sourceNode?.classList.toggle("is-warning", remoteTarget ? remoteDraftCount > 0 || Boolean(remoteRecovery) : localDriftCount > 0);
+  sourceNode?.classList.toggle("is-error", remoteTarget ? remoteEntry?.status === "error" : Boolean(runtimeError));
+
+  const workspaceStatus = elements["config-workspace-status"];
+  if (!workspaceStatus) return;
+  let tone = "neutral";
+  let label = "正在汇总";
+  if (remoteTarget) {
+    if (remoteRecovery) { tone = "error"; label = "远程提交待核对，写入已阻断"; }
+    else if (remoteDraftCount) { tone = "warning"; label = `${remoteDraftCount} 个远程真源草稿未保存`; }
+    else if (remoteEntry?.status === "error") { tone = "error"; label = "远程图谱读取失败"; }
+    else if (!remoteGraph) label = "正在读取远程图谱";
+    else if (state.configSurface === "providers") {
+      tone = "ok";
+      label = `${remoteGraph.providers?.filter((row) => row.exists).length ?? 0} 个 live 配置`;
+    } else if (state.configSurface === "capabilities") {
+      tone = "ok";
+      label = `${remoteGraph.capabilities?.length ?? 0} 项能力 · ${remoteGraph.mcp?.length ?? 0} MCP`;
+    } else {
+      tone = remoteProbe?.status === "error" ? "warning" : "ok";
+      label = `${remoteProbe?.data?.clis?.filter((cli) => cli.installed).length ?? 0} 个 CLI · ${remoteGraph.sources?.filter((file) => file.exists).length ?? 0} 个真源`;
+    }
+  } else if (state.configSurface === "providers") {
+    if (providerError) { tone = "error"; label = "供应商读取失败"; }
+    else if (providerBlocked) { tone = "warning"; label = "供应商已冻结"; }
+    else if (state.providersData) { tone = "ok"; label = `${providers.length} 个供应商档案`; }
+  } else if (state.configSurface === "capabilities") {
+    if (state.capabilitiesError) { tone = "error"; label = "能力配置读取失败"; }
+    else if (capabilityStatus.failClosed && mcpStatus.failClosed) { tone = "error"; label = "Skill 与 MCP 配置已降级"; }
+    else if (capabilityStatus.failClosed) { tone = "error"; label = "Skill 配置已降级"; }
+    else if (mcpStatus.failClosed) { tone = "error"; label = "MCP 配置已降级"; }
+    else if (skills && mcp) { tone = "ok"; label = `${skills.items?.length ?? 0} Skill · ${mcp.servers?.length ?? 0} MCP`; }
+    else { label = "正在扫描能力"; }
+  } else if (state.configSurface === "sources") {
+    if (state.runtimeWorkspaceMode === "seats") {
+      if (runtimeError) { tone = "error"; label = "运行席位读取失败"; }
+      else if (runtimeSeatManager?.isDirty()) { tone = "warning"; label = "运行席位有未保存变更"; }
+      else if (state.runtimeSeatsLoading || !state.runtimeSeatsData) { label = "正在读取运行席位"; }
+      else if (state.runtimeSeatsData?.runtime?.activation === "restart-required") {
+        tone = "warning";
+        label = `${runtimeSeats.length} 个席位 · 待重载`;
+      } else { tone = "ok"; label = `${runtimeSeats.length} 个运行席位`; }
+    } else if (!state.sources.length) label = "正在读取真源";
+    else if (state.config?.transactionBlocked) { tone = "error"; label = "事务写入已阻断"; }
+    else if (configIsDirty()) { tone = "warning"; label = "有未保存变更"; }
+    else if (localDriftCount) { tone = "warning"; label = `${localDriftCount} 项配置漂移`; }
+    else { tone = "ok"; label = `${state.sources.length} 个真源已索引`; }
+  }
+  workspaceStatus.textContent = label;
+  workspaceStatus.className = `status-label is-${tone}`;
+}
+
+/* ===== 配置目标切换（v41 波六：本机 / 远程主机 / 远程项目都是三面图谱） =====
+ * 远程项目是 {hostId,path} 独立目标：主机级运行席位叠加项目级配置、能力和真源，
+ * 同一主机上的多个项目缓存与展开状态严格隔离；本机三面板让位给统一远程面板。
+ * 探测/装 CLI/同步本机配置走波一 remote-ops，图谱/真源走波五 remote-graph，与远程主机视图同源。 */
+
+/**
+ * 配置目标的加载问题分两类：
+ *   - 501 / REMOTE_GATE_BLOCKED = 远程能力尚未授权，是「还没开」而不是「坏了」；
+ *   - 其余 = 真故障，需要红字告警。
+ * 两者以前都被拼成一条红色技术文案常驻在每个配置面（390px 下占三行），这里按语义分开。
+ * 完整原文不丢——收进 detail，由 title 悬浮可见。
+ */
+function configTargetLoadIssue(reason, fallback) {
+  const message = reason?.message ?? fallback;
+  const code = reason?.payload?.code ?? reason?.payload?.error?.code ?? "";
+  const blocked = reason?.status === 501 || code === "REMOTE_GATE_BLOCKED";
+  return { kind: blocked ? "gated" : "error", message: blocked ? "远程能力尚未授权" : message, detail: message };
+}
+
+async function loadConfigHosts({ force = false } = {}) {
+  if (state.configHosts && state.configProjectsLoaded && !force) {
+    renderConfigHostBar();
+    return;
+  }
+  const [hostsResult, projectsResult] = await Promise.allSettled([
+    request("/api/ssh/hosts"),
+    request("/api/remote-projects"),
+  ]);
+  if (hostsResult.status === "fulfilled") {
+    state.configHosts = hostsResult.value?.hosts ?? [];
+    state.configHostsError = null;
+  } else {
+    // 门闸未开/台账故障：只留本机 chip 并如实提示，不拖垮配置图谱。
+    // 501=能力尚未授权（不是故障），与真故障分开呈现——否则主界面每一面都常驻一条红色技术文案。
+    state.configHosts = [];
+    state.configHostsError = configTargetLoadIssue(hostsResult.reason, "SSH 主机台账不可用");
+  }
+  if (projectsResult.status === "fulfilled") {
+    state.remoteProjects = projectsResult.value?.projects ?? [];
+    state.remoteProjectsError = null;
+  } else {
+    state.remoteProjects = [];
+    state.remoteProjectsError = configTargetLoadIssue(projectsResult.reason, "远程项目台账不可用");
+  }
+  state.configProjectsLoaded = true;
+  const alive = new Set(state.configHosts.map((host) => host.id));
+  for (const id of [...state.configHostProbes.keys()]) if (!alive.has(id)) state.configHostProbes.delete(id);
+  const aliveProjects = new Set(state.remoteProjects.map((project) => project.id));
+  if (state.configProjectId && !aliveProjects.has(state.configProjectId)) {
+    state.configProjectId = null;
+    state.configHostId = null;
+    syncConfigHostView();
+  } else if (!state.configProjectId && state.configHostId && !alive.has(state.configHostId)) {
+    state.configHostId = null; // 台账里被删掉的主机自动回落本机
+    syncConfigHostView();
+  }
+  renderConfigHostBar();
+}
+
+function renderConfigHostBar() {
+  const bar = elements["config-host-bar"];
+  if (!bar) return;
+  const chip = ({ type, id = null, label, dotCls = null, status = "", title, disabled = false, draftCount = 0 }) => {
+    const active = type === "local"
+      ? !state.configHostId && !state.configProjectId
+      : type === "project"
+        ? state.configProjectId === id
+        : !state.configProjectId && state.configHostId === id;
+    const data = type === "project" ? `data-config-project="${escapeHtml(id)}"` : `data-config-host="${escapeHtml(id ?? "")}"`;
+    const icon = type === "project" ? `<svg class="icon lucide" aria-hidden="true"><use href="#lucide-folder-git-2"></use></svg>` : "";
+    const statusText = status ? `<span class="config-host-chip-status">${escapeHtml(status)}</span>` : "";
+    const draft = draftCount ? `<span class="config-host-chip-draft" aria-label="${draftCount} 个未保存草稿">${draftCount}</span>` : "";
+    return `<button type="button" class="config-host-chip is-${type}${active ? " is-active" : ""}" ${data} title="${escapeHtml(title)}" aria-pressed="${active}"${disabled ? " disabled" : ""}>
+      ${icon}${dotCls == null ? "" : `<i class="remote-dot ${dotCls}"></i>`}<span class="config-host-chip-label">${escapeHtml(label)}</span>${statusText}${draft}</button>`;
+  };
+  const hosts = (state.configHosts ?? []).map((host) => {
+    const disabled = host.enabled === false;
+    const probe = state.configHostProbes.get(host.id);
+    const dotCls = disabled ? "is-off" : probe?.status === "ok" ? "is-ok" : probe?.status === "error" ? "is-error" : probe?.status === "loading" ? "is-loading" : "";
+    const status = disabled ? "停用" : probe?.status === "ok" ? "在线" : probe?.status === "error" ? "离线" : probe?.status === "loading" ? "探测中" : host.trusted ? "未探测" : "待信任";
+    return chip({ type: "host", id: host.id, label: host.name ?? host.id, dotCls, status, disabled, draftCount: configRemoteDirtyDraftCount(`host:${host.id}`), title: `${host.user ?? ""}@${host.host ?? ""}:${host.port ?? ""} · ${status}` });
+  }).join("");
+  const projects = (state.remoteProjects ?? []).map((project) => {
+    const disabled = project.hostMissing || project.host?.enabled === false;
+    const probe = state.configHostProbes.get(project.hostId);
+    const dotCls = disabled ? "is-off" : probe?.status === "ok" ? "is-ok" : probe?.status === "error" ? "is-error" : probe?.status === "loading" ? "is-loading" : "";
+    const status = disabled ? project.hostMissing ? "主机缺失" : "停用" : probe?.status === "ok" ? "在线" : probe?.status === "error" ? "离线" : probe?.status === "loading" ? "探测中" : "未探测";
+    const hostLabel = project.host?.name ?? project.hostId;
+    return chip({ type: "project", id: project.id, label: project.name, dotCls, status, disabled, draftCount: configRemoteDirtyDraftCount(`project:${project.id}`), title: `${hostLabel} · ${project.path} · ${status}` });
+  }).join("");
+  bar.innerHTML = `<span class="config-host-bar-label">配置目标</span>`
+    + chip({ type: "local", label: "本机", title: "本机配置图谱（供应商 / Agent·Skill·MCP / 运行席位与真源）" })
+    + (hosts ? `<span class="config-target-divider">主机</span>${hosts}` : "")
+    + (projects ? `<span class="config-target-divider">项目</span>${projects}` : "")
+    + configTargetIssueMarkup(state.configHostsError, "主机")
+    + configTargetIssueMarkup(state.remoteProjectsError, "项目")
+    + `<button type="button" class="text-button config-host-manage" data-config-host-manage title="在远程主机视图添加 / 编辑 / 删除连接">管理主机…</button>`;
+}
+
+/** 目标栏提示：未授权走中性徽标 + 授权入口，真故障才用告警色；原文进 title，不铺在正文里。 */
+function configTargetIssueMarkup(issue, scope) {
+  if (!issue) return "";
+  const gated = issue.kind === "gated";
+  return `<span class="config-host-bar-hint${gated ? " is-gated" : " is-error"}" title="${escapeHtml(issue.detail ?? issue.message)}">
+    <svg class="icon lucide" aria-hidden="true"><use href="#lucide-${gated ? "lock" : "triangle-alert"}"></use></svg>
+    <span>${escapeHtml(scope)}${gated ? "" : "台账"}${escapeHtml(gated ? "：远程能力尚未授权" : `不可用：${issue.message}`)}</span>
+    ${gated ? '<button type="button" class="text-button" data-config-open-gates>去授权</button>' : ""}
+  </span>`;
+}
+
+function configRemoteDirtyDraftCount(targetKey = null) {
+  let count = 0;
+  for (const [key, draft] of state.configHostSourceDrafts) {
+    if (!draft?.dirty || targetKey && !key.startsWith(`${targetKey}:`)) continue;
+    count += 1;
+  }
+  return count;
+}
+
+function hasUnsavedConfigChanges() {
+  return configIsDirty()
+    || configRemoteDirtyDraftCount() > 0
+    || teamFormDirty
+    || Boolean(memberLibrary?.isDirty())
+    || Boolean(runtimeSeatManager?.isDirty());
+}
+
+function selectConfigHost(id) {
+  state.configProjectId = null;
+  state.configHostId = id || null;
+  if (state.configHostResult && state.configHostResult.targetKey !== configRemoteTargetKey()) state.configHostResult = null;
+  state.configHostSourceOpen = null; // 真源展开态不跨主机保留
+  syncConfigHostView(); // remote 分支内部 renderConfigRemotePanel
+  renderConfigHostBar();
+  if (state.configHostId) {
+    if (!state.configHostProbes.has(state.configHostId)) void probeConfigHost(state.configHostId);
+    void loadConfigHostGraph(state.configHostId);
+  }
+}
+
+function selectConfigProject(id) {
+  const project = (state.remoteProjects ?? []).find((entry) => entry.id === id);
+  if (!project) return;
+  state.configProjectId = project.id;
+  state.configHostId = project.hostId;
+  if (state.configHostResult && state.configHostResult.targetKey !== configRemoteTargetKey()) state.configHostResult = null;
+  state.configHostSourceOpen = null;
+  syncConfigHostView();
+  renderConfigHostBar();
+  if (!state.configHostProbes.has(project.hostId)) void probeConfigHost(project.hostId);
+  void loadConfigHostGraph(project.hostId);
+}
+
+// 远程目标选中（v41 波五改写）：远程也是三面图谱——拓扑导航保留可切，本机三面板让位给远程面板，
+// 远程面板按当前 surface 出「供应商与应用 / Agent·Skill·MCP / 运行席位与真源」的远端实况；回本机按 surface 恢复显隐。
+function syncConfigHostView() {
+  const remote = Boolean(state.configHostId || state.configProjectId);
+  renderConfigTopology();
+  const nav = byId("config-topology-nav");
+  if (nav) nav.hidden = false; // 远程目标同样三面图谱，导航不再让位
+  const panel = byId("config-surface-remote");
+  if (remote) {
+    document.querySelectorAll("[data-config-surface-panel]").forEach((item) => {
+      item.hidden = true;
+      item.classList.remove("is-active");
+    });
+    if (panel) panel.hidden = false;
+    renderConfigRemotePanel(); // surface 切换经 setConfigSurface 尾钩走到这里，内容必须跟随重渲
+  } else {
+    if (panel) panel.hidden = true;
+    setConfigSurface(state.configSurface, { updateHash: false });
+  }
+}
+
+function configRemoteHost() {
+  const projectHost = configRemoteProject()?.host;
+  if (projectHost) return projectHost;
+  return (state.configHosts ?? []).find((entry) => entry.id === state.configHostId) ?? null;
+}
+
+function configRemoteProject() {
+  return (state.remoteProjects ?? []).find((entry) => entry.id === state.configProjectId) ?? null;
+}
+
+function configRemoteTargetKey() {
+  if (state.configProjectId) return `project:${state.configProjectId}`;
+  return state.configHostId ? `host:${state.configHostId}` : "local";
+}
+
+const CONFIG_REMOTE_RECOVERY_STORAGE_KEY = "514cc-config-remote-recovery-v1";
+
+function configRemoteTargetSnapshotForKey(targetKey = configRemoteTargetKey()) {
+  if (targetKey.startsWith("project:")) {
+    const projectId = targetKey.slice("project:".length);
+    const project = (state.remoteProjects ?? []).find((entry) => entry.id === projectId);
+    return { key: targetKey, hostId: project?.hostId ?? null, projectId };
+  }
+  if (targetKey.startsWith("host:")) {
+    return { key: targetKey, hostId: targetKey.slice("host:".length) || null, projectId: null };
+  }
+  return { key: targetKey, hostId: null, projectId: null };
+}
+
+function configRemoteRecoveryKey({ hostId, kind, transactionId } = {}) {
+  if (!hostId || !kind || !transactionId) return null;
+  return `${hostId}:${kind}:${transactionId}`;
+}
+
+function configRemoteRecoveryEntriesForTarget(target = configRemoteTargetSnapshotForKey()) {
+  const snapshot = typeof target === "string" ? configRemoteTargetSnapshotForKey(target) : target;
+  return [...(state.configRemoteRecovery?.entries?.() ?? [])]
+    .filter(([, recovery]) => (
+      (snapshot?.hostId && recovery?.hostId === snapshot.hostId)
+      || (!snapshot?.hostId && recovery?.targetKey === snapshot?.key)
+    ))
+    .sort((left, right) => Number(left[1]?.recordedAt ?? 0) - Number(right[1]?.recordedAt ?? 0));
+}
+
+function configRemoteRecoveryEntryForTarget(target = configRemoteTargetSnapshotForKey()) {
+  return configRemoteRecoveryEntriesForTarget(target)[0] ?? null;
+}
+
+function configRemoteRecoveryForTarget(target = configRemoteTargetSnapshotForKey()) {
+  return configRemoteRecoveryEntryForTarget(target)?.[1] ?? null;
+}
+
+function notifyConfigRemoteRecoveryChanged() {
+  if (typeof window === "undefined" || typeof window.dispatchEvent !== "function" || typeof CustomEvent !== "function") return;
+  const hostIds = [...new Set([...(state.configRemoteRecovery?.values?.() ?? [])].map((entry) => entry?.hostId).filter(Boolean))];
+  window.dispatchEvent(new CustomEvent("forge:config-remote-recovery-changed", { detail: { hostIds } }));
+}
+
+function clearConfigRemoteRecovery(kind, transactionId, hostId = null) {
+  let changed = false;
+  for (const [key, recovery] of state.configRemoteRecovery?.entries?.() ?? []) {
+    if (recovery?.kind === kind && recovery?.transactionId === transactionId && (!hostId || recovery?.hostId === hostId)) {
+      state.configRemoteRecovery.delete(key);
+      changed = true;
+    }
+  }
+  if (changed) {
+    persistConfigRemoteRecoveries();
+    notifyConfigRemoteRecoveryChanged();
+  }
+  return changed;
+}
+
+function persistConfigRemoteRecoveries() {
+  try {
+    const records = [...(state.configRemoteRecovery?.values?.() ?? [])].map((recovery) => ({
+      kind: recovery.kind ?? null,
+      transactionId: recovery.transactionId ?? null,
+      targetKey: recovery.targetKey ?? null,
+      hostId: recovery.hostId ?? null,
+      projectId: recovery.projectId ?? null,
+      scope: recovery.scope ?? null,
+      appliedCount: recovery.appliedCount ?? recovery.applied?.length ?? 0,
+      uncertainCount: recovery.uncertainCount ?? recovery.uncertain?.length ?? 0,
+      causeCode: recovery.causeCode ?? null,
+      serverPersisted: recovery.serverPersisted === true,
+      message: recovery.message ?? "远端提交状态需要核对",
+      recordedAt: recovery.recordedAt ?? Date.now(),
+    }));
+    localStorage.setItem(CONFIG_REMOTE_RECOVERY_STORAGE_KEY, JSON.stringify({ schema: 1, records }));
+    return true;
+  } catch (error) {
+    console.warn("remote recovery evidence could not be persisted", error);
+    return false;
+  }
+}
+
+function restoreConfigRemoteRecoveries() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(CONFIG_REMOTE_RECOVERY_STORAGE_KEY) ?? "null");
+    if (saved?.schema !== 1 || !Array.isArray(saved.records)) return;
+    for (const record of saved.records) {
+      if (!record || !["provider", "graph", "sync"].includes(record.kind)) continue;
+      if (typeof record.transactionId !== "string" || !record.transactionId) continue;
+      if (typeof record.targetKey !== "string" || !/^(host|project):[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(record.targetKey)) continue;
+      if (typeof record.hostId !== "string" || !record.hostId) continue;
+      const recovery = {
+        ...record,
+        applied: [],
+        uncertain: [],
+        backups: [],
+        locks: [],
+        rollbackErrors: [],
+      };
+      const recoveryKey = configRemoteRecoveryKey(recovery);
+      if (recoveryKey) state.configRemoteRecovery.set(recoveryKey, recovery);
+    }
+    notifyConfigRemoteRecoveryChanged();
+  } catch (error) {
+    console.warn("remote recovery evidence could not be restored", error);
+  }
+}
+
+async function loadConfigRemoteRecoveries() {
+  try {
+    const result = await request("/api/ssh/hosts/recoveries");
+    const serverKeys = new Set();
+    for (const record of result?.recoveries ?? []) {
+      if (!record || !["provider", "graph", "sync"].includes(record.kind)) continue;
+      const recoveryKey = configRemoteRecoveryKey(record);
+      if (!recoveryKey) continue;
+      serverKeys.add(recoveryKey);
+      const previous = state.configRemoteRecovery.get(recoveryKey) ?? {};
+      state.configRemoteRecovery.set(recoveryKey, {
+        ...previous,
+        ...record,
+        applied: Array.isArray(previous.applied) ? previous.applied : [],
+        uncertain: Array.isArray(previous.uncertain) ? previous.uncertain : [],
+        backups: Array.isArray(previous.backups) ? previous.backups : [],
+        locks: Array.isArray(previous.locks) ? previous.locks : [],
+        rollbackErrors: Array.isArray(previous.rollbackErrors) ? previous.rollbackErrors : [],
+        recordedAt: Number.isFinite(Number(record.recordedAt)) ? Number(record.recordedAt) : Date.parse(record.recordedAt) || Date.now(),
+        serverPersisted: true,
+      });
+    }
+    for (const [recoveryKey, recovery] of state.configRemoteRecovery) {
+      if (recovery?.serverPersisted === true && !serverKeys.has(recoveryKey)) state.configRemoteRecovery.delete(recoveryKey);
+    }
+    state.configRemoteRecoveryLoaded = true;
+    state.configRemoteRecoveryLoadError = null;
+    persistConfigRemoteRecoveries();
+    notifyConfigRemoteRecoveryChanged();
+  } catch (error) {
+    state.configRemoteRecoveryLoaded = false;
+    state.configRemoteRecoveryLoadError = error.message || "服务端恢复账本不可读";
+    notifyConfigRemoteRecoveryChanged();
+    console.warn("remote recovery ledger could not be loaded", error);
+  }
+}
+
+function configRemoteGraphEndpoint({ sourceFile = null, backupName = null, target = configRemoteProviderTargetSnapshot() } = {}) {
+  const base = target.projectId
+    ? `/api/remote-projects/${encodeURIComponent(target.projectId)}/graph`
+    : `/api/ssh/hosts/${encodeURIComponent(target.hostId)}/graph`;
+  if (backupName != null) {
+    return `${base}/backup?file=${encodeURIComponent(sourceFile ?? "")}&name=${encodeURIComponent(backupName)}`;
+  }
+  return sourceFile == null ? base : `${base}/source?file=${encodeURIComponent(sourceFile)}`;
+}
+
+// 面板内联结果区（安装/同步回报落这里，不哑弹）；波五：结果进 state，面板重渲后回填不被吞
+function configRemoteResult(html, targetKey = configRemoteTargetKey()) {
+  state.configHostResult = state.configHostId ? { targetKey, html } : null;
+  if (targetKey !== configRemoteTargetKey()) return;
+  renderConfigRemotePanel();
+}
+
+function renderConfigRemotePanel() {
+  const panel = byId("config-surface-remote");
+  if (!panel || !state.configHostId) return;
+  const host = configRemoteHost();
+  const project = configRemoteProject();
+  if (!host) {
+    panel.innerHTML = `<p class="subtle">该主机已不在 SSH 台账。</p>`;
+    return;
+  }
+  const targetKey = configRemoteTargetKey();
+  const resultHtml = state.configHostResult?.targetKey === targetKey ? state.configHostResult.html : "";
+  const recoveryHtml = configRemoteRecoveryMarkup(targetKey);
+  const eyebrow = project ? "Remote Project" : "Remote Host";
+  const title = project?.name ?? host.name ?? host.id;
+  const location = project
+    ? `${host.name ?? host.id} · ${project.path}`
+    : `${host.user ?? ""}@${host.host ?? ""}:${host.port ?? ""}`;
+  panel.innerHTML = `
+    <div class="config-remote-result" aria-live="polite">${recoveryHtml}${resultHtml}</div>
+    ${configRemoteSurfaceBody(host, { project, targetKey, eyebrow, title, location })}`;
+}
+
+function configRemoteRecoveryMarkup(targetKey) {
+  const loadFailure = state.configRemoteRecoveryLoadError
+    ? `<section class="config-recovery-banner" role="alert"><div><strong>恢复账本不可用，远端写入已保护性阻断</strong><span>${escapeHtml(state.configRemoteRecoveryLoadError)}</span></div><button class="button secondary" type="button" data-config-recovery-reload><svg class="icon lucide"><use href="#lucide-refresh-cw"></use></svg>重试读取</button></section>`
+    : "";
+  return loadFailure + configRemoteRecoveryEntriesForTarget(targetKey).map(([recoveryKey, recovery]) => {
+    const uncertain = Array.isArray(recovery.uncertain) ? recovery.uncertain : [];
+    const applied = Array.isArray(recovery.applied) ? recovery.applied : [];
+    const appliedCount = recovery.appliedCount ?? applied.length;
+    const uncertainCount = recovery.uncertainCount ?? uncertain.length;
+    const canReconcile = ["provider", "graph", "sync"].includes(recovery.kind) && Boolean(recovery.transactionId);
+    const busy = state.configRemoteBusy.has(`reconcile:${recoveryKey}`);
+    return `<section class="config-recovery-banner" role="alert" data-config-recovery-key="${escapeHtml(recoveryKey)}">
+      <div><strong>远端提交状态不确定，写入已阻断</strong><span>${escapeHtml(recovery.message ?? "远端命令超时或回滚未完成")}</span>${recovery.persistenceError ? `<span class="status-label is-error">${escapeHtml(recovery.persistenceError)}</span>` : ""}</div>
+      <dl><div><dt>类型</dt><dd>${escapeHtml(recovery.kind ?? "未知")}</dd></div><div><dt>事务</dt><dd class="mono">${escapeHtml(recovery.transactionId ?? "未返回")}</dd></div><div><dt>已提交</dt><dd>${appliedCount}</dd></div><div><dt>待核对</dt><dd>${uncertainCount}</dd></div></dl>
+      <button class="button secondary" type="button" data-config-recovery-reconcile="${escapeHtml(recoveryKey)}"${canReconcile && !busy ? "" : " disabled"} title="${canReconcile ? "按远端锁元数据和文件摘要核对事务" : "该旧事务缺少可自动核对的种类或事务标识"}"><svg class="icon lucide"><use href="#lucide-scan-search"></use></svg>${busy ? "正在核对" : canReconcile ? "核对远端状态" : "需要人工核对"}</button>
+    </section>`;
+  }).join("");
+}
+
+function configRemoteRecoveryEvidence(value, fallbackMessage = "", fallbackKind = null) {
+  const input = value?.payload ?? value ?? {};
+  const envelope = input?.error && typeof input.error === "object" ? input.error : {};
+  const nested = envelope?.recovery && typeof envelope.recovery === "object"
+    ? envelope.recovery
+    : input?.recovery && typeof input.recovery === "object"
+      ? input.recovery
+      : {};
+  const pick = (field) => nested[field] ?? envelope[field] ?? input[field] ?? value?.[field];
+  const required = pick("recoveryRequired") === true
+    || pick("status") === "recovery_required"
+    || Object.keys(nested).length > 0;
+  if (!required) return null;
+  const list = (field) => Array.isArray(pick(field)) ? pick(field) : [];
+  return {
+    kind: pick("kind") ?? fallbackKind,
+    transactionId: pick("transactionId") ?? null,
+    applied: list("applied"),
+    uncertain: list("uncertain"),
+    backups: list("backups"),
+    locks: list("locks"),
+    rollbackErrors: list("rollbackErrors"),
+    causeCode: pick("causeCode") ?? null,
+    serverPersisted: pick("recoveryRegistryPersisted") === true,
+    message: String(fallbackMessage || pick("message") || "远端提交状态需要核对"),
+  };
+}
+
+function configRemotePendingRecoveryEvidence(value, fallbackMessage = "") {
+  const input = value?.payload ?? value ?? {};
+  const envelope = input?.error && typeof input.error === "object" ? input.error : {};
+  const pending = Array.isArray(envelope.pending)
+    ? envelope.pending
+    : Array.isArray(input.pending)
+      ? input.pending
+      : Array.isArray(value?.pending)
+        ? value.pending
+        : [];
+  return pending.flatMap((item) => {
+    if (!item || !["provider", "graph", "sync"].includes(item.kind)) return [];
+    if (typeof item.transactionId !== "string" || !item.transactionId) return [];
+    const targetKey = typeof item.targetKey === "string" && /^(host|project):[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(item.targetKey)
+      ? item.targetKey
+      : null;
+    return [{
+      kind: item.kind,
+      transactionId: item.transactionId,
+      targetKey,
+      applied: [],
+      uncertain: [],
+      backups: [],
+      locks: [],
+      rollbackErrors: [],
+      appliedCount: Number.isFinite(Number(item.appliedCount)) ? Number(item.appliedCount) : 0,
+      uncertainCount: Number.isFinite(Number(item.uncertainCount)) ? Number(item.uncertainCount) : 0,
+      causeCode: item.causeCode ?? null,
+      serverPersisted: true,
+      message: String(fallbackMessage || envelope.message || input.message || "另一窗口已登记未核对的远端事务"),
+    }];
+  });
+}
+
+function rememberConfigRemoteRecovery(targetOrKey, value, fallbackMessage = "", fallbackKind = null) {
+  const evidence = configRemoteRecoveryEvidence(value, fallbackMessage, fallbackKind);
+  const pendingEvidence = configRemotePendingRecoveryEvidence(value, fallbackMessage);
+  const evidenceItems = evidence ? [evidence, ...pendingEvidence] : pendingEvidence;
+  if (!evidenceItems.length) return null;
+  const inputTarget = typeof targetOrKey === "string"
+    ? configRemoteTargetSnapshotForKey(targetOrKey)
+    : targetOrKey;
+  if (!inputTarget?.hostId || !inputTarget?.key) return null;
+  const remembered = [];
+  for (const item of evidenceItems) {
+    const hostScoped = item.kind === "sync";
+    const itemTargetKey = hostScoped ? `host:${inputTarget.hostId}` : item.targetKey ?? inputTarget.key;
+    const itemProjectId = !hostScoped && itemTargetKey.startsWith("project:")
+      ? itemTargetKey.slice("project:".length)
+      : !hostScoped ? inputTarget.projectId ?? null : null;
+    const recoveryKey = configRemoteRecoveryKey({ hostId: inputTarget.hostId, ...item });
+    if (!recoveryKey) continue;
+    const previous = state.configRemoteRecovery?.get(recoveryKey) ?? {};
+    const recovery = {
+      ...previous,
+      ...item,
+      targetKey: itemTargetKey,
+      hostId: inputTarget.hostId,
+      projectId: itemProjectId,
+      scope: hostScoped || !itemProjectId ? "host" : "project",
+      applied: item.applied.length ? item.applied : previous.applied ?? [],
+      uncertain: item.uncertain.length ? item.uncertain : previous.uncertain ?? [],
+      backups: item.backups.length ? item.backups : previous.backups ?? [],
+      locks: item.locks.length ? item.locks : previous.locks ?? [],
+      rollbackErrors: item.rollbackErrors.length ? item.rollbackErrors : previous.rollbackErrors ?? [],
+      appliedCount: item.appliedCount ?? item.applied.length ?? previous.appliedCount ?? 0,
+      uncertainCount: item.uncertainCount ?? item.uncertain.length ?? previous.uncertainCount ?? 0,
+      recordedAt: previous.recordedAt ?? Date.now(),
+    };
+    state.configRemoteRecovery?.set(recoveryKey, recovery);
+    remembered.push(recovery);
+  }
+  if (!remembered.length) return null;
+  if (!persistConfigRemoteRecoveries()) {
+    for (const recovery of remembered) recovery.persistenceError = "浏览器恢复缓存写入失败；当前会话继续阻断写入";
+    toast("恢复证据未能写入浏览器缓存；本次会话已保持阻断，请勿关闭应用", "error", 9000);
+  }
+  notifyConfigRemoteRecoveryChanged();
+  if (pendingEvidence.length && typeof loadConfigRemoteRecoveries === "function") {
+    void loadConfigRemoteRecoveries().finally(() => {
+      if (state.configHostId === inputTarget.hostId) renderConfigRemotePanel();
+    });
+  }
+  return remembered[0];
+}
+
+function configRemoteWriteBlocked(target, { notify = true } = {}) {
+  const ledgerUnavailable = state.configRemoteRecoveryLoaded !== true || Boolean(state.configRemoteRecoveryLoadError);
+  if (!ledgerUnavailable && !configRemoteRecoveryForTarget(target)) return false;
+  if (notify) toast(ledgerUnavailable ? "恢复账本尚未就绪或不可用，已保护性阻止远端写入" : "当前目标存在未和解的远端提交，已阻止再次写入", "error", 7000);
+  return true;
+}
+
+if (typeof window !== "undefined") {
+  window.__514ccConfigRemoteRecovery = Object.freeze({
+    isReady: () => state.configRemoteRecoveryLoaded === true && !state.configRemoteRecoveryLoadError,
+    isHostBlocked: (hostId) => configRemoteWriteBlocked({ key: `host:${hostId}`, hostId, projectId: null }, { notify: false }),
+    entriesForHost: (hostId) => configRemoteRecoveryEntriesForTarget({ key: `host:${hostId}`, hostId, projectId: null }).map(([key, value]) => ({ key, ...value })),
+    remember: (hostId, value, kind = "sync") => {
+      const recovery = rememberConfigRemoteRecovery({ key: `host:${hostId}`, hostId, projectId: null }, value, value?.message, kind);
+      if (recovery && state.configHostId === hostId) renderConfigRemotePanel();
+      return recovery;
+    },
+    reconcile: (recoveryKey) => reconcileConfigRemoteRecovery(recoveryKey),
+    reload: () => loadConfigRemoteRecoveries(),
+  });
+}
+
+/* ===== 远程三面图谱（v41 波五）：三个 surface body 全部来自 /api/ssh/hosts/:id/graph 实况 ===== */
+
+const CONFIG_REMOTE_CAP_GROUPS = Object.freeze([
+  { kind: "agent", label: "Agent", icon: "bot" },
+  { kind: "skill", label: "Skill", icon: "puzzle" },
+  { kind: "command", label: "Command", icon: "terminal" },
+  { kind: "prompt", label: "Prompt", icon: "file-text" },
+]);
+
+function remoteCliLabel(cli) {
+  return PROVIDER_APP_META.find((meta) => meta.app === cli)?.label ?? cli;
+}
+
+function formatConfigBytes(bytes) {
+  const n = Number(bytes) || 0;
+  if (n >= 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  if (n >= 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${n} B`;
+}
+
+function formatRemoteMetricBytes(bytes, { rate = false } = {}) {
+  const value = configRemoteMetricNumber(bytes);
+  if (value == null || value < 0) return "不可用";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let scaled = value;
+  let index = 0;
+  while (scaled >= 1024 && index < units.length - 1) {
+    scaled /= 1024;
+    index += 1;
+  }
+  const digits = scaled >= 100 || index === 0 ? 0 : scaled >= 10 ? 1 : 2;
+  return `${scaled.toFixed(digits)} ${units[index]}${rate ? "/s" : ""}`;
+}
+
+function configRemoteMetricNumber(value) {
+  if (value == null || value === "" || typeof value === "boolean") return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function formatRemoteUptime(seconds) {
+  const value = configRemoteMetricNumber(seconds);
+  if (value == null || value < 0) return "不可用";
+  const days = Math.floor(value / 86400);
+  const hours = Math.floor((value % 86400) / 3600);
+  const minutes = Math.floor((value % 3600) / 60);
+  return [days ? `${days}天` : "", hours ? `${hours}小时` : "", !days && minutes ? `${minutes}分钟` : ""].filter(Boolean).join(" ") || "不足 1 分钟";
+}
+
+function configRemoteMetricHistory(hostId) {
+  return state.configRemoteMetricHistory.get(hostId) ?? [];
+}
+
+function configRemoteSparkline(hostId, key, label) {
+  const values = configRemoteMetricHistory(hostId)
+    .map((sample) => configRemoteMetricNumber(sample[key]))
+    .filter((value) => value != null);
+  if (values.length < 2) return `<span class="remote-sparkline-empty">刷新后生成真实趋势</span>`;
+  const max = Math.max(100, ...values);
+  const width = 160;
+  const height = 34;
+  const points = values.map((value, index) => {
+    const x = values.length === 1 ? 0 : (index / (values.length - 1)) * width;
+    const y = height - Math.max(1, Math.min(height - 1, (value / max) * height));
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(" ");
+  return `<svg class="remote-sparkline" viewBox="0 0 ${width} ${height}" role="img" aria-label="${escapeHtml(label)}最近 ${values.length} 次真实探针趋势"><polyline points="${points}"></polyline></svg>`;
+}
+
+function configRemoteHealthLevel(metrics) {
+  const cpu = configRemoteMetricNumber(metrics?.cpu?.usagePercent);
+  const memory = configRemoteMetricNumber(metrics?.memory?.usagePercent);
+  const disk = configRemoteMetricNumber(metrics?.disk?.usagePercent);
+  const cores = configRemoteMetricNumber(metrics?.cpu?.cores);
+  const load = configRemoteMetricNumber(metrics?.load?.one);
+  const pressure = [cpu, memory, disk, load != null && cores != null && cores > 0 ? (load / cores) * 100 : null].filter((value) => value != null);
+  if (!pressure.length) return { level: "unknown", label: "数据不足", value: null };
+  const value = Math.max(...pressure);
+  if (value >= 90) return { level: "critical", label: "高负载", value };
+  if (value >= 75) return { level: "warning", label: "需关注", value };
+  return { level: "healthy", label: "健康", value };
+}
+
+function configRemotePercentCard(hostId, { label, icon, value, detail, historyKey, tone = "default" }) {
+  const numeric = configRemoteMetricNumber(value);
+  const available = numeric != null;
+  return `<article class="remote-health-card is-${tone}">
+    <div class="remote-health-card-head"><span><svg class="icon lucide"><use href="#lucide-${icon}"></use></svg>${escapeHtml(label)}</span><strong>${available ? `${numeric.toFixed(1)}%` : "不可用"}</strong></div>
+    <progress class="remote-health-meter" max="100" value="${available ? Math.max(0, Math.min(100, numeric)) : 0}" aria-hidden="true"></progress>
+    <div class="remote-health-card-foot"><span>${escapeHtml(detail)}</span>${historyKey ? configRemoteSparkline(hostId, historyKey, label) : ""}</div>
+  </article>`;
+}
+
+function configRemoteHealthDashboard(host, graph) {
+  const probe = state.configHostProbes.get(host.id);
+  if (!probe || probe.status === "loading") {
+    return `<section class="remote-health-dashboard is-loading" aria-label="远程主机状态"><p class="subtle">正在读取主机 CPU、内存、磁盘、负载与网络状态…</p></section>`;
+  }
+  if (probe.status === "error") {
+    return `<section class="remote-health-dashboard is-error" aria-label="远程主机状态"><div><strong>主机状态探测失败</strong><span>${escapeHtml(probe.error)}</span></div><button class="button secondary" type="button" data-config-host-probe="${escapeHtml(host.id)}">重试</button></section>`;
+  }
+  const data = probe.data ?? {};
+  const metrics = data.metrics ?? {};
+  const health = configRemoteHealthLevel(metrics);
+  const history = configRemoteMetricHistory(host.id);
+  const latest = history.at(-1);
+  const previous = history.at(-2);
+  const elapsed = latest && previous ? Math.max(0.001, (latest.at - previous.at) / 1000) : null;
+  const rxRate = elapsed && latest.rxBytes != null && previous.rxBytes != null && latest.rxBytes >= previous.rxBytes ? (latest.rxBytes - previous.rxBytes) / elapsed : null;
+  const txRate = elapsed && latest.txBytes != null && previous.txBytes != null && latest.txBytes >= previous.txBytes ? (latest.txBytes - previous.txBytes) / elapsed : null;
+  const memory = metrics.memory ?? {};
+  const disk = metrics.disk ?? {};
+  const installed = (data.clis ?? []).filter((cli) => cli.installed).length;
+  const ringValue = Number.isFinite(health.value) ? Math.max(0, Math.min(100, health.value)) : 0;
+  return `<section class="remote-health-dashboard" aria-labelledby="remote-health-title">
+    <div class="remote-health-heading">
+      <div><p class="eyebrow">HOST HEALTH</p><h3 id="remote-health-title"><svg class="icon lucide"><use href="#lucide-gauge"></use></svg>服务器状态</h3><p>${escapeHtml(data.hostname ?? host.name ?? host.id)} · ${escapeHtml(data.os ?? "系统未知")} · ${history.length} 次真实采样</p></div>
+      <span class="status-label ${health.level === "healthy" ? "is-ok" : health.level === "critical" ? "is-error" : health.level === "warning" ? "is-warning" : "is-neutral"}">${health.label}</span>
+    </div>
+    <div class="remote-health-overview">
+      <div class="remote-health-gauge is-${health.level}" role="img" aria-label="${health.label}${Number.isFinite(health.value) ? `，最高资源压力 ${health.value.toFixed(1)}%` : "，没有可用指标"}"><svg viewBox="0 0 120 120" aria-hidden="true"><circle class="remote-health-gauge-track" cx="60" cy="60" r="50" pathLength="100"></circle><circle class="remote-health-gauge-value" cx="60" cy="60" r="50" pathLength="100" stroke-dasharray="${ringValue.toFixed(1)} ${(100 - ringValue).toFixed(1)}" transform="rotate(-90 60 60)"></circle></svg><div><strong>${Number.isFinite(health.value) ? `${Math.round(health.value)}%` : "--"}</strong><span>最高压力</span></div></div>
+      <div class="remote-health-primary">
+        ${configRemotePercentCard(host.id, { label: "CPU", icon: "cpu", value: metrics.cpu?.usagePercent, detail: metrics.cpu?.cores ? `${metrics.cpu.cores} 核` : "核心数不可用", historyKey: "cpu" })}
+        ${configRemotePercentCard(host.id, { label: "内存", icon: "memory-stick", value: memory.usagePercent, detail: configRemoteMetricNumber(memory.usedBytes) != null ? `${formatRemoteMetricBytes(memory.usedBytes)} / ${formatRemoteMetricBytes(memory.totalBytes)}` : data.memory ?? "不可用", historyKey: "memory" })}
+        ${configRemotePercentCard(host.id, { label: "根磁盘", icon: "hard-drive", value: disk.usagePercent, detail: configRemoteMetricNumber(disk.usedBytes) != null ? `${formatRemoteMetricBytes(disk.usedBytes)} / ${formatRemoteMetricBytes(disk.totalBytes)}` : data.disk ?? "不可用", historyKey: "disk", tone: (configRemoteMetricNumber(disk.usagePercent) ?? 0) >= 90 ? "danger" : "default" })}
+      </div>
+    </div>
+    <div class="remote-health-secondary">
+      <div><span>系统负载</span><strong>${[metrics.load?.one, metrics.load?.five, metrics.load?.fifteen].some((value) => configRemoteMetricNumber(value) != null) ? [metrics.load?.one, metrics.load?.five, metrics.load?.fifteen].map((value) => configRemoteMetricNumber(value)?.toFixed(2) ?? "--").join(" / ") : "不可用"}</strong><small>1 / 5 / 15 分钟</small></div>
+      <div><span>在线时长</span><strong>${formatRemoteUptime(metrics.uptimeSeconds)}</strong><small>${metrics.processes == null ? "进程数不可用" : `${metrics.processes} 个进程`}</small></div>
+      <div><span>网络吞吐</span><strong>${rxRate == null ? "等待第二次采样" : `↓ ${formatRemoteMetricBytes(rxRate, { rate: true })}`}</strong><small>${txRate == null ? `累计 ↓ ${formatRemoteMetricBytes(metrics.network?.rxBytes)} · ↑ ${formatRemoteMetricBytes(metrics.network?.txBytes)}` : `↑ ${formatRemoteMetricBytes(txRate, { rate: true })}`}</small></div>
+      <div><span>运行配置</span><strong>${installed}/${data.clis?.length ?? 0} CLI</strong><small>${(graph.providers ?? []).filter((row) => row.exists).length} live 配置 · ${(graph.sources ?? []).filter((row) => row.exists).length} 真源</small></div>
+    </div>
+  </section>`;
+}
+
+function configRemoteActionMarkup(host, targetKey, { compact = false, project = configRemoteProject() } = {}) {
+  const buttonClass = compact ? "icon-button" : "button secondary";
+  const label = (text) => compact ? "" : ` ${text}`;
+  const recoveryBlocked = Boolean(configRemoteRecoveryForTarget(targetKey));
+  const syncLabel = project ? "同步到主机 Home" : "同步本机配置";
+  const syncTitle = project
+    ? `当前是项目「${project.name ?? project.id}」；此操作仍写入主机 $HOME，不写项目目录`
+    : "选择本机配置并同步到远程主机 $HOME";
+  return `<div class="config-remote-actions${compact ? " is-compact" : ""}">
+    <button type="button" class="${buttonClass}" data-config-target-refresh="${escapeHtml(targetKey)}" title="刷新远程配置与环境" aria-label="刷新远程配置与环境"><svg class="icon lucide"><use href="#lucide-refresh-cw"></use></svg>${label("刷新")}</button>
+    <button type="button" class="${buttonClass}" data-config-target-terminal="${escapeHtml(targetKey)}" title="打开 SSH 终端" aria-label="打开 SSH 终端"><svg class="icon lucide"><use href="#lucide-square-terminal"></use></svg>${label("SSH 终端")}</button>
+    <button type="button" class="button secondary" data-config-host-sync="${escapeHtml(host.id)}" title="${escapeHtml(recoveryBlocked ? "上一次远端提交状态不确定；核对前禁止同步" : syncTitle)}"${recoveryBlocked ? " disabled" : ""}><svg class="icon lucide"><use href="#lucide-cloud-upload"></use></svg> ${recoveryBlocked ? "等待事务核对" : syncLabel}</button>
+  </div>`;
+}
+
+function configRemoteStandardSurface(host, context, { eyebrow, title, body }) {
+  return `<div class="config-surface-heading config-remote-surface-heading">
+      <div>
+        <p class="eyebrow">${escapeHtml(eyebrow)}</p>
+        <h2><svg class="icon lucide"><use href="#lucide-${context.project ? "folder-git-2" : "globe"}"></use></svg> ${escapeHtml(title)}</h2>
+        <p class="subtle config-remote-location">${escapeHtml(context.title)} · ${escapeHtml(context.location)}</p>
+      </div>
+      ${configRemoteActionMarkup(host, context.targetKey, { project: context.project })}
+    </div>${body}`;
+}
+
+function configRemoteSurfaceBody(host, context) {
+  if (state.configSurface === "capabilities") {
+    return configRemoteStandardSurface(host, context, {
+      eyebrow: `${context.eyebrow} · Agent · Skill · MCP`,
+      title: "能力配置",
+      body: configRemoteCapsBody(host),
+    });
+  }
+  if (state.configSurface === "sources") {
+    return configRemoteStandardSurface(host, context, {
+      eyebrow: `${context.eyebrow} · Runtime & Sources`,
+      title: "运行席位与真源",
+      body: configRemoteSourcesBody(host),
+    });
+  }
+  return configRemoteProvidersBody(host, context);
+}
+
+/** graph 三态壳：loading / error 如实呈现，ok 才进 render(data)。 */
+function configRemoteGraphBody(host, render) {
+  const entry = state.configHostGraph.get(configRemoteTargetKey());
+  if (!entry || entry.status === "loading") {
+    return `<p class="subtle">正在读取远程图谱（目录清单 + live 配置浅提取，最长 30s）…</p>`;
+  }
+  if (entry.status === "error") {
+    return `<div class="waveg-review"><strong>远程图谱读取失败</strong><p class="subtle">${escapeHtml(entry.error)}</p></div>`;
+  }
+  return render(entry.data ?? {});
+}
+
+function configRemoteProviderSourceId(graph, row) {
+  if (row.sourceId) return row.sourceId;
+  return (graph.sources ?? []).find((file) => file.cli === row.cli
+    && (file.scope ?? "host") === (row.scope ?? "host")
+    && (file.projectRelative ?? file.remote) === row.file)?.id ?? null;
+}
+
+function configRemoteProviderApp(graph) {
+  const targetKey = configRemoteTargetKey();
+  const selected = state.configRemoteProviderApps.get(targetKey);
+  if (PROVIDER_APPS.includes(selected)) return selected;
+  const firstLive = (graph.providers ?? []).find((row) => row.exists && PROVIDER_APPS.includes(row.cli))?.cli;
+  return firstLive ?? "claude";
+}
+
+function setConfigRemoteProviderApp(app) {
+  if (!PROVIDER_APPS.includes(app)) return;
+  state.configRemoteProviderApps.set(configRemoteTargetKey(), app);
+  renderConfigRemotePanel();
+}
+
+function configRemoteProviderAppBar(graph) {
+  return providerAppTabsMarkup({
+    active: configRemoteProviderApp(graph),
+    dataAttr: "data-config-remote-provider-app",
+    focusable: true,
+    extraTitle: (meta, count) => {
+      const liveCount = (graph.providers ?? []).filter((row) => row.cli === meta.app && row.exists).length;
+      return `${count} 个中央档案 · ${liveCount} 个远端 live 配置`;
+    },
+  });
+}
+
+function normalizeRemoteProviderUrl(value) {
+  return String(value ?? "").trim().replace(/\/+$/, "").toLowerCase();
+}
+
+function configRemoteProviderMatchState(graph, app, provider) {
+  const rows = (graph.providers ?? []).filter((row) => row.cli === app && row.exists);
+  const confirmed = rows.some((row) => [row.providerId, row.profileId]
+    .some((value) => String(value ?? "") === String(provider.id ?? "")));
+  if (confirmed) return "confirmed";
+  const expected = normalizeRemoteProviderUrl(provider.baseUrl);
+  if (!expected) return "none";
+  return rows.some((row) => normalizeRemoteProviderUrl(row.baseUrl) === expected) ? "endpoint" : "none";
+}
+
+function configRemoteProviderProfileRow(graph, item, meta, app) {
+  const matchState = configRemoteProviderMatchState(graph, app, item);
+  const confirmed = matchState === "confirmed";
+  const endpointMatched = matchState === "endpoint";
+  const health = healthBadgeOf(item.id);
+  const latency = item.baseUrl ? state.providerLatency[item.baseUrl] : null;
+  const busyKey = `${configRemoteTargetKey()}:provider:${app}:${item.id}`;
+  const busy = state.configRemoteBusy.has(busyKey);
+  const unsupported = app === "claude-desktop";
+  const recoveryBlocked = Boolean(configRemoteRecoveryForTarget());
+  return `<article class="provider-row${confirmed ? " is-current" : ""}${endpointMatched ? " is-endpoint-match" : ""} config-remote-provider-row" data-config-remote-provider-row="${escapeHtml(item.id)}">
+    ${providerRowIdentityMarkup({
+      item,
+      meta,
+      health,
+      latency,
+      handle: '<span class="provider-drag-handle" title="中央供应商档案" aria-hidden="true"><svg class="icon lucide"><use href="#lucide-database"></use></svg></span>',
+      badges: confirmed
+        ? '<span class="provider-badge is-live">档案已确认</span>'
+        : endpointMatched ? '<span class="provider-badge is-warning">端点相同 · 档案待确认</span>' : "",
+    })}
+    <div class="provider-row-actions">
+      <button class="${confirmed ? "provider-state-pill" : "button secondary provider-card-action"}" type="button" data-config-remote-provider-apply="${escapeHtml(`${app}::${item.id}`)}"${busy || unsupported || recoveryBlocked ? " disabled" : ""} title="${recoveryBlocked ? "上一次远端提交状态不确定；核对前禁止再次写入" : unsupported ? "无图形远端不支持 Claude Desktop" : confirmed ? "重新投影到当前远端" : endpointMatched ? "端点相同但远端未提供稳定档案标识；重新应用此档案" : "应用到远端"}">${confirmed ? '<span class="provider-state-pill-check" aria-hidden="true">✓</span>已确认' : busy ? "发布中…" : endpointMatched ? "重新应用并确认" : "应用到远端"}</button>
+      <button class="icon-button provider-card-action" type="button" data-config-remote-provider-check="${escapeHtml(item.id)}" title="本机连通性检查" aria-label="检查 ${escapeHtml(item.name)}"><svg class="icon lucide"><use href="#lucide-activity"></use></svg></button>
+      ${item.baseUrl ? `<button class="icon-button provider-card-action" type="button" data-config-remote-provider-speed="${escapeHtml(item.id)}" title="本机到端点测速" aria-label="测速 ${escapeHtml(item.name)}"><svg class="icon lucide"><use href="#lucide-gauge"></use></svg></button>` : ""}
+      <button class="icon-button provider-card-action" type="button" data-config-remote-provider-edit="${escapeHtml(item.id)}" title="编辑中央档案" aria-label="编辑 ${escapeHtml(item.name)}"><svg class="icon lucide"><use href="#lucide-settings"></use></svg></button>
+      <button class="icon-button provider-card-action" type="button" data-config-remote-provider-delete="${escapeHtml(item.id)}" title="删除中央档案" aria-label="删除 ${escapeHtml(item.name)}"><svg class="icon lucide"><use href="#lucide-trash-2"></use></svg></button>
+    </div>
+  </article>`;
+}
+
+function configRemoteLiveSummary(graph, app, meta) {
+  const liveRows = (graph.providers ?? []).filter((row) => row.cli === app && row.exists);
+  if (!liveRows.length) return `<p class="provider-live-line">远端 live：未检测到 ${escapeHtml(meta.label)} 配置</p>`;
+  return liveRows.map((row) => {
+    const sourceId = configRemoteProviderSourceId(graph, row);
+    const scope = row.scope === "project" ? "项目覆盖" : "主机";
+    const endpoint = row.baseUrl || "官方默认端点";
+    return `<div class="config-remote-live-line"><span><span class="provider-badge is-live">live</span><strong>${escapeHtml(scope)}</strong><span>${escapeHtml(endpoint)}${row.model ? ` · ${escapeHtml(row.model)}` : ""}</span></span><button class="icon-button" type="button" data-config-remote-provider-source="${escapeHtml(sourceId ?? "")}" title="查看脱敏真源" aria-label="查看脱敏真源"${sourceId ? "" : " disabled"}><svg class="icon lucide"><use href="#lucide-file-text"></use></svg></button></div>`;
+  }).join("");
+}
+
+function configRemoteProviderTargetSnapshot() {
+  const host = configRemoteHost();
+  const project = configRemoteProject();
+  return {
+    key: configRemoteTargetKey(),
+    hostId: state.configHostId,
+    projectId: state.configProjectId,
+    label: project ? `项目 ${project.name ?? project.id}` : `主机 ${host?.name ?? host?.id ?? state.configHostId}`,
+  };
+}
+
+function configRemoteProviderEndpoint(target, action, { app = "", providerId = "" } = {}) {
+  const base = target.projectId
+    ? `/api/remote-projects/${encodeURIComponent(target.projectId)}`
+    : `/api/ssh/hosts/${encodeURIComponent(target.hostId)}`;
+  if (action === "plan") return `${base}/provider-plan?app=${encodeURIComponent(app)}&providerId=${encodeURIComponent(providerId)}`;
+  return `${base}/provider-apply`;
+}
+
+async function applyConfigRemoteProvider(app, providerId, { skipConfirm = false, target = configRemoteProviderTargetSnapshot(), plan = null } = {}) {
+  const provider = providerById(providerId);
+  const meta = PROVIDER_APP_META.find((entry) => entry.app === app);
+  if (!provider || !meta || !target.hostId) return null;
+  if (configRemoteWriteBlocked(target, { notify: !skipConfirm })) return null;
+  if (app === "claude-desktop") {
+    toast("Claude Desktop 需要图形桌面，不能发布到当前无图形远端", "warning", 6000);
+    return null;
+  }
+  const busyKey = `${target.key}:provider:${app}:${providerId}`;
+  if (state.configRemoteBusy.has(busyKey)) return null;
+  state.configRemoteBusy.add(busyKey);
+  if (target.key === configRemoteTargetKey()) renderConfigRemotePanel();
+  try {
+    const publishPlan = plan ?? await request(configRemoteProviderEndpoint(target, "plan", { app, providerId }));
+    if (!skipConfirm) {
+      const changed = (publishPlan.files ?? []).filter((file) => file.changed);
+      const proceed = await confirmAction({
+        eyebrow: target.projectId ? "发布到远程项目" : "发布到远程主机",
+        title: `将「${provider.name}」应用到 ${meta.label}？`,
+        rows: [
+          ["目标", target.label],
+          ["文件", (publishPlan.files ?? []).map((file) => file.remote).join("、") || "无写入目标"],
+          ["变更", `${changed.length} 个文件待发布，${(publishPlan.files ?? []).length - changed.length} 个无需改动`],
+          ["事务", "远端原文件合并、0600 临时文件、备份、原子替换；多文件失败自动回滚"],
+        ],
+        warning: (publishPlan.files ?? []).some((file) => file.containsCredentialMaterial)
+          ? "发布内容包含凭据材料。明文仅在服务端内存与 SSH/SFTP 通道中流动，不返回浏览器。"
+          : "远端 live 配置将按中央档案投影，未知字段会从远端原文件保留。",
+        confirmLabel: changed.length ? "应用到远端" : "重新校验",
+      });
+      if (!proceed) return null;
+    }
+    if (configRemoteWriteBlocked(target, { notify: !skipConfirm })) return null;
+    const result = await request(configRemoteProviderEndpoint(target, "apply"), {
+      method: "POST",
+      body: { app, providerId, planRevision: publishPlan.planRevision },
+    });
+    const report = [
+      ...(result.applied ?? []).map((file) => `✓ ${file.remote}（${file.bytes}B，备份 ${file.backup ?? "无"}）`),
+      ...(result.unchanged ?? []).map((remote) => `= ${remote}（无需改动）`),
+    ];
+    configRemoteResult(`<div class="waveg-review"><strong>${escapeHtml(meta.label)} 已应用「${escapeHtml(provider.name)}」</strong><div class="waveg-log">${escapeHtml(report.join("\n") || "无文件变更")}</div></div>`, target.key);
+    if (target.key === configRemoteTargetKey()) await loadConfigHostGraph(target.hostId, { force: true });
+    return result;
+  } catch (error) {
+    const recovery = rememberConfigRemoteRecovery(target, error, error.message, "provider");
+    configRemoteResult(`<div class="waveg-review${recovery ? " is-error" : ""}"><strong>${recovery ? "远端提交状态不确定，后续写入已阻断" : "远端发布失败"}</strong><p class="subtle">${escapeHtml(error.message)}</p>${recovery?.transactionId ? `<p class="mono">事务 ${escapeHtml(recovery.transactionId)}</p>` : ""}</div>`, target.key);
+    if (!skipConfirm) toast(`远端发布失败：${error.message}`, "error", 7000);
+    throw error;
+  } finally {
+    state.configRemoteBusy.delete(busyKey);
+    if (target.key === configRemoteTargetKey()) renderConfigRemotePanel();
+  }
+}
+
+async function applyConfigRemoteTeam(teamId) {
+  const team = state.teams.find((entry) => entry.id === teamId);
+  const target = configRemoteProviderTargetSnapshot();
+  if (!team || !target.hostId) return;
+  if (configRemoteWriteBlocked(target)) return;
+  const bindings = Object.entries(team.providers ?? {}).filter(([app, id]) => PROVIDER_APPS.includes(app) && providerById(id));
+  if (!bindings.length) {
+    toast("该团队没有有效供应商绑定", "warning");
+    return;
+  }
+  const busyKey = `${target.key}:team:${team.id}`;
+  if (state.configRemoteBusy.has(busyKey)) return;
+  state.configRemoteBusy.add(busyKey);
+  if (target.key === configRemoteTargetKey()) renderConfigRemotePanel();
+  const planned = [];
+  try {
+    for (const [app, providerId] of bindings) {
+      if (app === "claude-desktop") {
+        planned.push({ app, providerId, error: "无图形远端不支持 Claude Desktop" });
+        continue;
+      }
+      try {
+        const plan = await request(configRemoteProviderEndpoint(target, "plan", { app, providerId }));
+        planned.push({ app, providerId, plan });
+      } catch (error) {
+        planned.push({ app, providerId, error: error.message });
+      }
+    }
+    const proceed = await confirmAction({
+      eyebrow: "远端团队方案",
+      title: `将团队「${team.name}」应用到 ${target.label}？`,
+      rows: [
+        ["目标", target.label],
+        ...planned.map((entry) => [
+          PROVIDER_APP_META.find((meta) => meta.app === entry.app)?.label ?? entry.app,
+          entry.error ? `不可发布：${entry.error}` : `${providerById(entry.providerId)?.name ?? entry.providerId} · ${entry.plan.files?.filter((file) => file.changed).length ?? 0} 个文件变更`,
+        ]),
+      ],
+      warning: "每个应用各自原子发布并回滚；跨应用不做全局回滚，部分失败会逐项回报。",
+      confirmLabel: "应用团队方案",
+    });
+    if (!proceed) return;
+    const results = [];
+    for (const entry of planned) {
+      if (configRemoteWriteBlocked(target, { notify: false })) {
+        results.push({ app: entry.app, ok: false, error: "上一项提交状态不确定，已阻止后续发布" });
+        continue;
+      }
+      if (entry.error) {
+        results.push({ app: entry.app, ok: false, error: entry.error });
+        continue;
+      }
+      try {
+        const result = await applyConfigRemoteProvider(entry.app, entry.providerId, { skipConfirm: true, target, plan: entry.plan });
+        results.push(result
+          ? { app: entry.app, ok: true }
+          : { app: entry.app, ok: false, error: "提交前出现未和解事务，已阻止发布" });
+      } catch (error) {
+        results.push({ app: entry.app, ok: false, error: error.message });
+      }
+    }
+    const lines = results.map((entry) => `${entry.ok ? "✓" : "✗"} ${PROVIDER_APP_META.find((meta) => meta.app === entry.app)?.label ?? entry.app}${entry.error ? `：${entry.error}` : ""}`);
+    configRemoteResult(`<div class="waveg-review"><strong>团队「${escapeHtml(team.name)}」远端方案已执行</strong><div class="waveg-log">${escapeHtml(lines.join("\n"))}</div></div>`, target.key);
+    if (target.key === configRemoteTargetKey()) await loadConfigHostGraph(target.hostId, { force: true });
+  } finally {
+    state.configRemoteBusy.delete(busyKey);
+    if (target.key === configRemoteTargetKey()) renderConfigRemotePanel();
+  }
+}
+
+const CONFIG_REMOTE_WORKBENCH_TABS = Object.freeze([
+  { id: "env", label: "环境", icon: "wrench" },
+  { id: "proxy", label: "代理", icon: "route" },
+  { id: "resources", label: "资源", icon: "boxes" },
+  { id: "sync", label: "同步", icon: "refresh-cw" },
+  { id: "accounts", label: "账户", icon: "key-round" },
+]);
+
+const CONFIG_REMOTE_RESOURCE_TABS = Object.freeze([
+  { id: "prompts", label: "Prompt" },
+  { id: "mcps", label: "MCP" },
+  { id: "skills", label: "Skill" },
+  { id: "profiles", label: "Profile" },
+  { id: "workspace", label: "Workspace" },
+  { id: "backups", label: "Backup" },
+]);
+
+function configRemoteWorkbenchTab() {
+  const selected = state.configRemoteWorkbenchTabs.get(configRemoteTargetKey());
+  return CONFIG_REMOTE_WORKBENCH_TABS.some((tab) => tab.id === selected) ? selected : "env";
+}
+
+function setConfigRemoteWorkbenchTab(tab) {
+  if (!CONFIG_REMOTE_WORKBENCH_TABS.some((entry) => entry.id === tab)) return;
+  state.configRemoteWorkbenchTabs.set(configRemoteTargetKey(), tab);
+  renderConfigRemotePanel();
+}
+
+function configRemoteResourceTab() {
+  const selected = state.configRemoteResourceTabs.get(configRemoteTargetKey());
+  return CONFIG_REMOTE_RESOURCE_TABS.some((tab) => tab.id === selected) ? selected : "prompts";
+}
+
+function setConfigRemoteResourceTab(tab) {
+  if (!CONFIG_REMOTE_RESOURCE_TABS.some((entry) => entry.id === tab)) return;
+  state.configRemoteResourceTabs.set(configRemoteTargetKey(), tab);
+  renderConfigRemotePanel();
+}
+
+function configRemoteEnvironmentPanel(host, graph) {
+  const probe = state.configHostProbes.get(host.id);
+  const probeData = probe?.status === "ok" ? probe.data ?? {} : {};
+  const clis = probeData.clis ?? [];
+  const liveCount = (graph.providers ?? []).filter((row) => row.exists).length;
+  const sourceCount = (graph.sources ?? []).filter((row) => row.exists).length;
+  return `<div class="ccs-panel-body">
+    <div class="ccs-metrics config-remote-metrics">
+      <div><span>目标</span><strong>${escapeHtml(host.name ?? host.id)}</strong></div>
+      <div><span>地址</span><strong class="mono">${escapeHtml(`${host.host ?? "?"}:${host.port ?? 22}`)}</strong></div>
+      <div><span>live 配置</span><strong>${liveCount}/${graph.providers?.length ?? 0}</strong></div>
+      <div><span>CLI</span><strong>${clis.filter((cli) => cli.installed).length}/${clis.length}</strong></div>
+      <div><span>真源</span><strong>${sourceCount}</strong></div>
+    </div>
+    <section class="ccs-tool config-remote-runtime-environment">
+      <div class="ccs-tool-heading"><h3>远程环境</h3><span>${escapeHtml(probeData.os ?? "等待探测")}</span></div>
+      ${configRemoteEnvBody(host)}
+    </section>
+  </div>`;
+}
+
+function configRemoteProxyPanel(host) {
+  const targetKey = configRemoteTargetKey();
+  const probe = state.configRemoteProxyProbes.get(targetKey);
+  if (!probe) {
+    return `<div class="ccs-panel-body"><section class="ccs-tool"><div class="ccs-tool-heading"><h3>远端代理诊断</h3><button class="button secondary" type="button" data-config-remote-proxy-diagnose="${escapeHtml(host.id)}"><svg class="icon lucide"><use href="#lucide-activity"></use></svg>运行诊断</button></div><p class="subtle">尚未读取代理环境、常见监听端口和固定 API 端点出站状态。</p></section></div>`;
+  }
+  if (probe.status === "loading") return `<div class="ccs-panel-body"><p class="subtle">正在远端执行代理与出站诊断（最长 35s）…</p></div>`;
+  if (probe.status === "error") return `<div class="ccs-panel-body"><div class="waveg-review"><strong>代理诊断失败</strong><p class="subtle">${escapeHtml(probe.error)}</p><button class="button secondary" type="button" data-config-remote-proxy-diagnose="${escapeHtml(host.id)}">重试</button></div></div>`;
+  const data = probe.data ?? {};
+  const envRows = (data.environment ?? []).map((entry) => `<tr><td><code>${escapeHtml(entry.name)}</code></td><td class="mono">${escapeHtml(entry.value)}</td></tr>`).join("");
+  const outbound = (data.outbound ?? []).map((entry) => `<tr><td>${escapeHtml(entry.url)}</td><td><span class="status-label ${entry.ok ? "is-ok" : "is-error"}">${entry.status || `exit ${entry.exitCode}`}</span></td><td>${entry.timeMs == null ? "—" : `${entry.timeMs}ms`}</td></tr>`).join("");
+  return `<div class="ccs-panel-body config-remote-proxy-panel">
+    <section class="ccs-tool"><div class="ccs-tool-heading"><h3>代理环境</h3><button class="icon-button" type="button" data-config-remote-proxy-diagnose="${escapeHtml(host.id)}" title="重新诊断" aria-label="重新诊断"><svg class="icon lucide"><use href="#lucide-refresh-cw"></use></svg></button></div>${envRows ? `<div class="table-wrap"><table class="config-remote-table"><thead><tr><th>变量</th><th>值</th></tr></thead><tbody>${envRows}</tbody></table></div>` : '<p class="subtle">未设置代理环境变量。</p>'}</section>
+    <section class="ccs-tool"><div class="ccs-tool-heading"><h3>监听端口</h3><span>${data.listeners?.length ?? 0}</span></div>${data.listeners?.length ? `<pre class="waveg-log">${escapeHtml(data.listeners.join("\n"))}</pre>` : '<p class="subtle">常见代理端口未发现监听。</p>'}</section>
+    <section class="ccs-tool"><div class="ccs-tool-heading"><h3>出站</h3><span>${data.curlAvailable === false ? "curl 未安装" : `${data.outbound?.filter((entry) => entry.ok).length ?? 0}/${data.outbound?.length ?? 0}`}</span></div>${outbound ? `<div class="table-wrap"><table class="config-remote-table"><thead><tr><th>端点</th><th>HTTP</th><th>耗时</th></tr></thead><tbody>${outbound}</tbody></table></div>` : '<p class="subtle">无出站结果。</p>'}</section>
+    <p class="subtle">当前远端未部署 514cc 常驻代理内核，此处仅诊断，不提供启停控制。</p>
+  </div>`;
+}
+
+function configRemoteResourceRows(graph, tab) {
+  if (tab === "prompts") return (graph.capabilities ?? []).filter((item) => ["prompt", "command"].includes(item.kind)).map((item) => ({ name: item.name, type: item.kind, scope: item.scope ?? "host", detail: remoteCliLabel(item.cli) }));
+  if (tab === "mcps") return (graph.mcp ?? []).map((item) => ({ name: item.name, type: "MCP", scope: item.scope ?? "host", detail: `${remoteCliLabel(item.cli)} · ${item.source}` }));
+  if (tab === "skills") return (graph.capabilities ?? []).filter((item) => item.kind === "skill").map((item) => ({ name: item.name, type: "Skill", scope: item.scope ?? "host", detail: remoteCliLabel(item.cli) }));
+  if (tab === "profiles") return (graph.providers ?? []).filter((item) => item.exists).map((item) => ({ name: item.label, type: "Profile", scope: item.scope ?? "host", detail: item.file, sourceId: configRemoteProviderSourceId(graph, item) }));
+  if (tab === "workspace") return (graph.sources ?? []).map((item) => ({ name: item.label, type: item.exists ? "Source" : "Missing", scope: item.scope ?? "host", detail: item.projectRelative ?? item.remote, sourceId: item.id, disabled: !item.exists }));
+  return (graph.backups ?? []).map((item) => ({ name: item.name, type: "Backup", scope: item.scope ?? "host", detail: `${item.remote}${item.size != null ? ` · ${formatConfigBytes(item.size)}` : ""}` }));
+}
+
+function configRemoteResourcesPanel(graph) {
+  const active = configRemoteResourceTab();
+  const rows = configRemoteResourceRows(graph, active);
+  return `<div class="ccs-panel-body config-remote-resources-panel">
+    <div class="config-remote-resource-tabs" role="tablist" aria-label="远端资源分类">${CONFIG_REMOTE_RESOURCE_TABS.map((tab) => `<button type="button" role="tab" class="button secondary${tab.id === active ? " is-active" : ""}" aria-selected="${tab.id === active}" tabindex="${tab.id === active ? "0" : "-1"}" data-config-remote-resource-tab="${tab.id}">${tab.label}</button>`).join("")}</div>
+    <div class="config-remote-resource-list">${rows.length ? rows.map((item) => `<div class="config-remote-resource-row"><span class="config-remote-resource-icon"><svg class="icon lucide"><use href="#lucide-${active === "mcps" ? "webhook" : active === "skills" ? "puzzle" : active === "backups" ? "archive" : "file-text"}"></use></svg></span><div><strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(item.type)} · ${item.scope === "project" ? "项目" : "主机"} · ${escapeHtml(item.detail)}</span></div><div class="config-remote-resource-actions">${item.sourceId ? `<button class="icon-button" type="button" data-config-remote-provider-source="${escapeHtml(item.sourceId)}" title="打开真源" aria-label="打开真源"${item.disabled ? " disabled" : ""}><svg class="icon lucide"><use href="#lucide-scan-search"></use></svg></button>` : ""}<button class="icon-button" type="button" data-config-target-terminal="${escapeHtml(configRemoteTargetKey())}" title="在 SSH 终端管理" aria-label="在 SSH 终端管理"><svg class="icon lucide"><use href="#lucide-square-terminal"></use></svg></button></div></div>`).join("") : `<div class="provider-global-empty"><svg class="icon lucide"><use href="#lucide-archive"></use></svg><div><strong>当前分类为空</strong><span>${active === "backups" ? "尚未在图谱中检测到 514forge 发布备份" : "远端已知目录中没有对应条目"}</span></div><button class="button secondary" type="button" data-config-target-terminal="${escapeHtml(configRemoteTargetKey())}">SSH 终端</button></div>`}</div>
+  </div>`;
+}
+
+function loadConfigRemoteSyncPlan(hostId, { force = false } = {}) {
+  if (!hostId || (!force && state.configRemoteSyncPlans.has(hostId))) return;
+  state.configRemoteSyncPlans.set(hostId, { status: "loading" });
+  request(`/api/ssh/hosts/${encodeURIComponent(hostId)}/env-sync/plan`).then((result) => {
+    state.configRemoteSyncPlans.set(hostId, { status: "ok", data: result });
+  }).catch((error) => {
+    state.configRemoteSyncPlans.set(hostId, { status: "error", error: error.message });
+  }).finally(() => {
+    if (state.configHostId === hostId && configRemoteWorkbenchTab() === "sync") renderConfigRemotePanel();
+  });
+}
+
+function configRemoteSyncPanel(host) {
+  const plan = state.configRemoteSyncPlans.get(host.id);
+  if (!plan) {
+    loadConfigRemoteSyncPlan(host.id);
+    return `<div class="ccs-panel-body"><p class="subtle">正在读取本机可同步配置清单…</p></div>`;
+  }
+  if (plan.status === "loading") return `<div class="ccs-panel-body"><p class="subtle">正在读取本机可同步配置清单…</p></div>`;
+  if (plan.status === "error") return `<div class="ccs-panel-body"><div class="waveg-review"><strong>同步计划读取失败</strong><p class="subtle">${escapeHtml(plan.error)}</p><button class="button secondary" type="button" data-config-remote-sync-refresh="${escapeHtml(host.id)}">重试</button></div></div>`;
+  const files = plan.data?.files ?? [];
+  const blocked = configRemoteWriteBlocked({ key: `host:${host.id}`, hostId: host.id, projectId: null }, { notify: false });
+  return `<div class="ccs-panel-body"><section class="ccs-tool"><div class="ccs-tool-heading"><h3>本机配置同步</h3><div><button class="icon-button" type="button" data-config-remote-sync-refresh="${escapeHtml(host.id)}" title="刷新计划" aria-label="刷新计划"><svg class="icon lucide"><use href="#lucide-refresh-cw"></use></svg></button><button class="button secondary" type="button" data-config-host-sync="${escapeHtml(host.id)}"${blocked ? ' disabled title="存在未核对远端事务，暂不可同步"' : ""}><svg class="icon lucide"><use href="#lucide-cloud-upload"></use></svg>${blocked ? "等待事务核对" : "选择并同步"}</button></div></div><div class="config-remote-resource-list">${files.map((file) => `<div class="config-remote-resource-row"><span class="config-remote-resource-icon"><svg class="icon lucide"><use href="#lucide-file-input"></use></svg></span><div><strong>${escapeHtml(file.label)}</strong><span>${escapeHtml(file.local)} → ~/${escapeHtml(file.remote)} · ${file.exists ? formatConfigBytes(file.size) : "本机不存在"}</span></div><span class="status-label ${!file.exists ? "is-neutral" : file.containsSecrets ? "is-warning" : "is-ok"}">${!file.exists ? "缺失" : file.containsSecrets ? "含秘密" : "可同步"}</span></div>`).join("")}</div></section></div>`;
+}
+
+function configRemoteAccountsPanel(host, graph) {
+  const probe = state.configHostProbes.get(host.id);
+  const clis = probe?.status === "ok" ? probe.data?.clis ?? [] : [];
+  const cliId = (app) => app === "grokbuild" ? "grok" : app;
+  const rows = PROVIDER_APP_META.map((meta) => {
+    const cli = clis.find((entry) => entry.id === cliId(meta.app));
+    const configs = (graph.providers ?? []).filter((entry) => entry.cli === meta.app && entry.exists);
+    const unsupported = meta.app === "claude-desktop";
+    return `<div class="config-remote-account-row"><span class="config-remote-resource-icon"><svg class="icon lucide"><use href="#lucide-${meta.icon}"></use></svg></span><div><strong>${escapeHtml(meta.label)}</strong><span>${unsupported ? "无图形远端不适用" : `${cli?.installed ? `CLI ${escapeHtml(cli.version ?? "已安装")}` : "CLI 未安装"} · ${configs.length ? `${configs.length} 个配置已检测` : "未检测到配置"}`}</span></div><span class="status-label ${unsupported ? "is-neutral" : cli?.installed && configs.length ? "is-ok" : "is-warning"}">${unsupported ? "不适用" : cli?.installed && configs.length ? "配置存在" : "待配置"}</span>${unsupported ? "" : `<button class="icon-button" type="button" data-config-target-terminal="${escapeHtml(configRemoteTargetKey())}" title="在 SSH 终端登录或检查账户" aria-label="在 SSH 终端检查 ${escapeHtml(meta.label)} 账户"><svg class="icon lucide"><use href="#lucide-square-terminal"></use></svg></button>`}</div>`;
+  }).join("");
+  return `<div class="ccs-panel-body"><div class="config-remote-account-list">${rows}</div><p class="subtle">“配置存在”不等于已登录；登录与设备码授权在对应 SSH 终端中完成。</p></div>`;
+}
+
+function configRemoteRuntimeWorkbench(host, graph) {
+  const probe = state.configHostProbes.get(host.id);
+  const statusClass = probe?.status === "error" ? "is-error" : probe?.status === "ok" ? "is-ok" : "is-neutral";
+  const statusLabel = probe?.status === "error" ? "探测失败" : probe?.status === "ok" ? "已连接" : "探测中";
+  const active = configRemoteWorkbenchTab();
+  const body = active === "proxy"
+    ? configRemoteProxyPanel(host)
+    : active === "resources"
+      ? configRemoteResourcesPanel(graph)
+      : active === "sync"
+        ? configRemoteSyncPanel(host)
+        : active === "accounts"
+          ? configRemoteAccountsPanel(host, graph)
+          : configRemoteEnvironmentPanel(host, graph);
+  return `<section class="ccswitch-workbench config-remote-workbench" aria-label="远端运行与配置工作台">
+    <div class="ccs-heading">
+      <div><p class="eyebrow">REMOTE RUNTIME</p><h2>运行与配置工作台</h2></div>
+      <div class="ccs-heading-actions"><span class="status-label ${statusClass}">${statusLabel}</span><button class="icon-button" type="button" data-config-target-refresh="${escapeHtml(configRemoteTargetKey())}" title="刷新远程运行环境" aria-label="刷新远程运行环境"><svg class="icon lucide"><use href="#lucide-refresh-cw"></use></svg></button></div>
+    </div>
+    <div class="ccs-tabs" role="tablist" aria-label="远端运行工作台视图">
+      ${CONFIG_REMOTE_WORKBENCH_TABS.map((tab) => `<button type="button" role="tab" class="ccs-tab${tab.id === active ? " is-active" : ""}" aria-selected="${tab.id === active}" tabindex="${tab.id === active ? "0" : "-1"}" data-config-remote-workbench-tab="${tab.id}"><svg class="icon lucide"><use href="#lucide-${tab.icon}"></use></svg><span>${tab.label}</span></button>`).join("")}
+    </div>
+    ${body}
+  </section>`;
+}
+
+/** surface ①：供应商与应用——与本机同构的应用标签、live 配置行和运行工作台。 */
+function configRemoteProvidersBody(host, context) {
+  return configRemoteGraphBody(host, (graph) => {
+    const activeApp = configRemoteProviderApp(graph);
+    const activeMeta = PROVIDER_APP_META.find((entry) => entry.app === activeApp) ?? PROVIDER_APP_META[0];
+    const liveRows = (graph.providers ?? []).filter((row) => row.cli === activeApp && row.exists);
+    const profiles = (state.providersData?.providers ?? []).filter((item) => item.apps?.[activeApp]);
+    const rows = profiles.map((item) => configRemoteProviderProfileRow(graph, item, activeMeta, activeApp)).join("");
+    const boundTeams = state.teams.filter((team) => providerSchemeBindings(team).length > 0);
+    const teamBusy = boundTeams.some((team) => state.configRemoteBusy.has(`${context.targetKey}:team:${team.id}`));
+  const recoveryBlocked = Boolean(configRemoteRecoveryForTarget(context.targetKey));
+    return `${configRemoteHealthDashboard(host, graph)}<section class="provider-deck config-remote-provider-deck" aria-labelledby="config-remote-provider-title">
+        <div class="provider-deck-heading">
+          <div>
+            <h2 id="config-remote-provider-title">供应商方案</h2>
+            <p>${escapeHtml(context.title)} · ${escapeHtml(context.location)} · 中央档案与本机共用，发布目标切换到当前远端。</p>
+          </div>
+          <div class="provider-deck-actions">
+            <span class="status-label is-ok config-remote-target-status"><svg class="icon lucide"><use href="#lucide-${context.project ? "folder-git-2" : "globe"}"></use></svg>${context.project ? "项目" : "主机"}</span>
+            <button class="button secondary" type="button" data-config-remote-provider-add="${escapeHtml(activeApp)}"><svg class="icon lucide"><use href="#lucide-plus"></use></svg> 新增供应商</button>
+            ${configRemoteActionMarkup(host, context.targetKey, { compact: true, project: context.project })}
+          </div>
+        </div>
+        <div class="provider-app-bar" role="tablist" aria-label="按应用切换远端供应商列表">${configRemoteProviderAppBar(graph)}</div>
+        <div class="provider-columns config-remote-provider-columns">
+          <div class="provider-app-strip">
+            ${configRemoteLiveSummary(graph, activeApp, activeMeta)}
+            <div class="provider-row-list">${rows || `<p class="subtle provider-deck-placeholder">中央档案尚未关联 ${escapeHtml(activeMeta.label)}。 <button class="provider-link-button" type="button" data-config-remote-provider-add="${escapeHtml(activeApp)}">新增/关联</button></p>`}</div>
+          </div>
+          <div class="provider-team-apply config-remote-team-apply"><label>团队方案<select data-config-remote-team>${boundTeams.length ? boundTeams.map((team) => `<option value="${escapeHtml(team.id)}">${escapeHtml(team.name)}（${providerSchemeBindings(team).length} 绑）</option>`).join("") : '<option value="">无绑定团队</option>'}</select></label><button class="button secondary" type="button" data-config-remote-team-apply${!boundTeams.length || teamBusy || recoveryBlocked ? " disabled" : ""} title="${recoveryBlocked ? "上一次远端提交状态不确定；核对前禁止批量发布" : "应用团队供应商绑定"}"><svg class="icon lucide"><use href="#lucide-users"></use></svg>${teamBusy ? "应用中…" : recoveryBlocked ? "等待事务核对" : "应用到当前远端"}</button></div>
+        </div>
+      </section>
+      ${configRemoteRuntimeWorkbench(host, graph)}`;
+  });
+}
+
+/** surface ②：Agent·Skill·MCP——按已知目录浅扫描的能力清单 + live 配置里的 MCP 键名。 */
+function configRemoteCapabilityName(value) {
+  return String(value ?? "").replace(/\.(?:md|toml|json|ya?ml)$/i, "");
+}
+
+function configRemoteCapsBody(host) {
+  return configRemoteGraphBody(host, (graph) => {
+    const caps = graph.capabilities ?? [];
+    const probe = state.configHostProbes.get(host.id);
+    const clis = probe?.status === "ok" ? probe.data?.clis ?? [] : [];
+    const agents = caps.filter((cap) => cap.kind === "agent");
+    const skills = caps.filter((cap) => cap.kind === "skill");
+    const declaredClis = [...new Set([...clis.filter((cli) => cli.installed).map((cli) => cli.id), ...skills.map((skill) => skill.cli)])];
+    const agentCards = agents.length ? agents.map((agent) => {
+      const cli = agent.cli === "grokbuild" ? "grok" : agent.cli;
+      const logo = cliIconMarkup(cli, "cli-logo") || '<svg class="icon lucide"><use href="#lucide-bot"></use></svg>';
+      return `<article class="cap-agent-chip config-remote-agent-chip"><span class="config-remote-agent-logo">${logo}</span><strong>${escapeHtml(configRemoteCapabilityName(agent.name))}</strong><span>${escapeHtml(remoteCliLabel(agent.cli))} · ${agent.scope === "project" ? "项目" : "主机"}</span><code>${escapeHtml(agent.name)}</code></article>`;
+    }).join("") : '<span class="subtle">已扫描的远端目录中没有 Agent 声明。</span>';
+    const skillHead = declaredClis.map((cli) => `<th scope="col">${escapeHtml(remoteCliLabel(cli === "grok" ? "grokbuild" : cli))}</th>`).join("");
+    const skillRows = skills.length ? skills.map((skill) => `<tr><td class="mono cap-skill-source"><span>${escapeHtml(configRemoteCapabilityName(skill.name))}</span><small>${skill.scope === "project" ? "项目" : "主机"}</small></td>${declaredClis.map((cli) => `<td class="cap-cell"><input type="checkbox" ${skill.cli === cli || (skill.cli === "grokbuild" && cli === "grok") ? "checked " : ""}disabled aria-label="${escapeHtml(remoteCliLabel(cli))} ${escapeHtml(skill.name)} 检测状态" /></td>`).join("")}</tr>`).join("") : `<tr><td colspan="${Math.max(1, declaredClis.length + 1)}" class="subtle">未检测到 Skill 目录条目</td></tr>`;
+    const mcp = graph.mcp ?? [];
+    const mcpRows = mcp.length ? mcp.map((entry) => `<tr><td class="mono">${escapeHtml(entry.name)}</td><td>配置声明</td><td>${escapeHtml(remoteCliLabel(entry.cli))}</td><td>${entry.scope === "project" ? "项目" : "主机"}</td><td class="mono cap-path" title="${escapeHtml(entry.source)}">${escapeHtml(entry.source)}</td><td><button class="icon-button" type="button" data-config-target-terminal="${escapeHtml(configRemoteTargetKey())}" title="在 SSH 终端管理" aria-label="在 SSH 终端管理 ${escapeHtml(entry.name)}"><svg class="icon lucide"><use href="#lucide-square-terminal"></use></svg></button></td></tr>`).join("") : '<tr><td colspan="6" class="subtle">未检测到 MCP 配置声明</td></tr>';
+    return `<section class="content-section config-remote-cap-section" aria-labelledby="config-remote-agents-title"><div class="section-heading"><div><h2 id="config-remote-agents-title">Agent 花名册</h2><p>远端已知 Agent 目录中的命名 Agent 及其 CLI 承载</p></div><span class="status-label is-neutral">${agents.length} Agent</span></div><div class="chip-grid config-remote-agent-grid">${agentCards}</div></section>
+      <section class="content-section config-remote-cap-section" aria-labelledby="config-remote-skills-title"><div class="section-heading"><div><h2 id="config-remote-skills-title">Skill 检测矩阵</h2><p>${skills.length} 个 Skill · ${declaredClis.length} 个已接入 CLI · 勾选仅表示在该 CLI 的已知目录中检测到，不是启停操作</p></div></div><div class="table-scroll"><table class="data-table cap-matrix config-remote-skill-matrix"><thead><tr><th scope="col">Skill</th>${skillHead}</tr></thead><tbody>${skillRows}</tbody></table></div></section>
+      <section class="content-section config-remote-cap-section" aria-labelledby="config-remote-mcp-title"><div class="section-heading"><div><h2 id="config-remote-mcp-title">MCP 服务器</h2><p>${mcp.length} 个配置声明 · 只展示名称、来源和范围，不将 env 或参数带入浏览器</p></div></div><div class="table-scroll"><table class="data-table config-remote-mcp-table"><thead><tr><th>名称</th><th>传输</th><th>入口</th><th>范围</th><th>来源文件</th><th>操作</th></tr></thead><tbody>${mcpRows}</tbody></table></div></section>`;
+  });
+}
+
+/** surface ③：运行席位与真源——CLI 矩阵（probe 实况 + 安装钮）+ 真源文件列表（点击展开脱敏内容）。 */
+function configRemoteRuntimeMode() {
+  const selected = state.configRemoteRuntimeModes.get(configRemoteTargetKey());
+  return selected === "sources" ? "sources" : "seats";
+}
+
+function setConfigRemoteRuntimeMode(mode) {
+  if (!["seats", "sources"].includes(mode)) return;
+  state.configRemoteRuntimeModes.set(configRemoteTargetKey(), mode);
+  renderConfigRemotePanel();
+}
+
+function handleConfigRemoteTabKey(event) {
+  if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
+  const current = event.target.closest('[role="tab"]');
+  const tablist = current?.closest('[role="tablist"]');
+  if (!current || !tablist || !tablist.closest("#config-surface-remote")) return;
+  const tabs = [...tablist.querySelectorAll(':scope > [role="tab"]')].filter((tab) => !tab.disabled);
+  const index = tabs.indexOf(current);
+  if (index < 0 || tabs.length < 2) return;
+  const direction = event.key === "ArrowRight" || event.key === "ArrowDown" ? 1 : -1;
+  const nextIndex = event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : (index + direction + tabs.length) % tabs.length;
+  const next = tabs[nextIndex];
+  const selector = next.dataset.configRemoteProviderApp
+    ? `[data-config-remote-provider-app="${CSS.escape(next.dataset.configRemoteProviderApp)}"]`
+    : next.dataset.configRemoteWorkbenchTab
+      ? `[data-config-remote-workbench-tab="${CSS.escape(next.dataset.configRemoteWorkbenchTab)}"]`
+      : next.dataset.configRemoteResourceTab
+        ? `[data-config-remote-resource-tab="${CSS.escape(next.dataset.configRemoteResourceTab)}"]`
+        : `[data-config-remote-runtime-mode="${CSS.escape(next.dataset.configRemoteRuntimeMode ?? "")}"]`;
+  event.preventDefault();
+  next.click();
+  requestAnimationFrame(() => document.querySelector(`#config-surface-remote ${selector}`)?.focus());
+}
+
+function configRemoteCliGraphId(cliId) {
+  return cliId === "grok" ? "grokbuild" : cliId;
+}
+
+function configRemoteSelectedCli(host, graph) {
+  const targetKey = configRemoteTargetKey();
+  const clis = state.configHostProbes.get(host.id)?.data?.clis ?? [];
+  const selected = state.configRemoteSelectedClis.get(targetKey);
+  if (clis.some((cli) => cli.id === selected)) return selected;
+  const graphClis = new Set([...(graph.providers ?? []).map((row) => row.cli), ...(graph.sources ?? []).map((row) => row.cli)]);
+  return clis.find((cli) => cli.installed && graphClis.has(configRemoteCliGraphId(cli.id)))?.id
+    ?? clis.find((cli) => cli.installed)?.id
+    ?? clis[0]?.id
+    ?? null;
+}
+
+function setConfigRemoteSelectedCli(cliId) {
+  if (!cliId) return;
+  state.configRemoteSelectedClis.set(configRemoteTargetKey(), cliId);
+  renderConfigRemotePanel();
+}
+
+/**
+ * 差异视图：远端真源只在「返回内容 === 远端原文」时可编辑（remote-graph.mjs readSource 的
+ * redacted 判定），所以这里的基线是真原文，不是脱敏投影——否则 diff 会把 [REDACTED] 当成事实。
+ */
+function configRemoteDiffMarkup(before, after, { emptyLabel = "无变更", label = "差异预览" } = {}) {
+  const diff = createLocalDiff(before ?? "", after ?? "");
+  if (diff === "无变更") return `<p class="subtle config-remote-diff-empty">${escapeHtml(emptyLabel)}</p>`;
+  return `<pre class="diff-output config-remote-diff" aria-label="${escapeHtml(label)}">${diffMarkup(diff)}</pre>`;
+}
+
+function configRemoteBackupRows(graph, fileId) {
+  return (graph.backups ?? [])
+    .filter((entry) => entry.sourceId === fileId)
+    .slice()
+    .sort((left, right) => String(right.mtime ?? "").localeCompare(String(left.mtime ?? "")));
+}
+
+function formatConfigBackupTime(value) {
+  return value ? String(value).replace("T", " ").slice(0, 16) : "时间未知";
+}
+
+/**
+ * 备份时间线：发布备份（writeSource 的 `.514forge-backup-<txid>`）是远端唯一的回滚材料。
+ * 对比读服务端脱敏投影；恢复只提交备份名与当前 digest——原文在服务端从备份直接进 writeSource
+ * 事务，既不过浏览器，也不新增写通道（CAS/锁/原子发布/恢复台账全部继承）。
+ */
+function configRemoteBackupTimeline(graph, file, targetKey, { editable = false, hidden = false, currentContent = "" } = {}) {
+  const rows = configRemoteBackupRows(graph, file.id);
+  const heading = (extra) => `<section class="config-remote-backup-timeline" aria-label="${escapeHtml(file.label)} 发布备份">
+    <header><h4>发布备份</h4><span class="subtle">${rows.length} 份</span></header>${extra}</section>`;
+  if (hidden) return heading(`<p class="subtle">凭据载体的备份内容不出远端主机，此处不提供对比或恢复。</p>`);
+  if (!rows.length) return heading(`<p class="subtle">该真源还没有 514forge 发布备份；每次保存或恢复都会留下一份。</p>`);
+  const compareName = state.configRemoteBackupCompare.get(`${targetKey}:${file.id}`) ?? null;
+  const items = rows.map((entry) => {
+    const active = compareName === entry.name;
+    const cache = active ? state.configRemoteBackupCache.get(`${targetKey}:${file.id}:${entry.name}`) : null;
+    const busy = state.configRemoteBusy.has(`${targetKey}:restore:${entry.name}`);
+    // 服务端才是恢复的最终判据；对比过之后 restorable=false 就提前禁用，并如实说明原因。
+    const unrestorable = cache?.status === "ok" && cache.data?.restorable === false;
+    const restoreTitle = !editable
+      ? "该真源在远端为只读，恢复会被服务端拒绝"
+      : unrestorable
+        ? cache.data?.truncated ? "备份超过 1MB 读取上限，恢复会截断内容" : "备份含凭据材料，不能经编辑器恢复"
+        : "用此备份覆盖当前远端内容";
+    let body = "";
+    if (active) {
+      if (!cache || cache.status === "loading") {
+        body = `<p class="subtle">正在读取备份（SFTP 围栏 + 1MB cap + 脱敏）…</p>`;
+      } else if (cache.status === "error") {
+        body = `<p class="subtle">备份读取失败：${escapeHtml(cache.error)}</p>`;
+      } else {
+        const data = cache.data ?? {};
+        body = `<p class="subtle config-remote-backup-note">下面是「恢复这份备份」会产生的变更：<code>-</code> 会失去，<code>+</code> 会回来。</p>`
+          + configRemoteDiffMarkup(currentContent, data.content ?? "", {
+            emptyLabel: "此备份与当前远端内容一致，恢复不会改变任何内容。",
+            label: `${file.label} 恢复差异`,
+          })
+          + (data.redacted ? `<p class="subtle">对比视图中有片段被脱敏替换；恢复写回的是服务端读到的原文，不是这里显示的文本。</p>` : "")
+          + (data.truncated ? `<p class="subtle">备份超过 1MB，仅对比前段，且不允许恢复（会截断）。</p>` : "");
+      }
+    }
+    return `<div class="config-remote-backup-row${active ? " is-open" : ""}">
+      <div class="config-remote-backup-head">
+        <span class="config-remote-backup-dot" aria-hidden="true"></span>
+        <div class="config-remote-backup-meta"><strong>${escapeHtml(formatConfigBackupTime(entry.mtime))}</strong><code title="${escapeHtml(entry.remote ?? entry.name)}">${escapeHtml(entry.name)}</code><span class="subtle">${escapeHtml(formatConfigBytes(entry.size))}</span></div>
+        <div class="config-remote-backup-actions">
+          <button class="button secondary" type="button" data-config-remote-backup-compare="${escapeHtml(entry.name)}" data-config-remote-backup-source="${escapeHtml(file.id)}" aria-pressed="${active}"><svg class="icon lucide"><use href="#lucide-scan-search"></use></svg>${active ? "收起" : "对比"}</button>
+          <button class="button secondary" type="button" data-config-remote-backup-restore="${escapeHtml(entry.name)}" data-config-remote-backup-source="${escapeHtml(file.id)}" title="${escapeHtml(restoreTitle)}"${!editable || busy || unrestorable ? " disabled" : ""}><svg class="icon lucide"><use href="#lucide-history"></use></svg>${busy ? "恢复中…" : "恢复"}</button>
+        </div>
+      </div>
+      ${active ? `<div class="config-remote-backup-body">${body}</div>` : ""}
+    </div>`;
+  }).join("");
+  return heading(`<div class="config-remote-backup-list">${items}</div>
+    <p class="subtle">恢复复用保存的同一条事务链：先按 digest 比对远端现状，再为当前内容留下新备份后原子替换——所以恢复本身仍可回滚。</p>`);
+}
+
+function configRemoteSourceList(graph) {
+    const openSel = state.configHostSourceOpen;
+    const targetKey = configRemoteTargetKey();
+    const rows = (graph.sources ?? []).map((file) => {
+      const isOpen = openSel?.targetKey === targetKey && openSel?.fileId === file.id;
+      let detail = "";
+      if (isOpen) {
+        const cache = state.configHostSourceCache.get(`${targetKey}:${file.id}`);
+        if (!cache || cache.status === "loading") {
+          detail = `<p class="subtle">正在读取真源（SFTP 围栏 + 1MB cap + 脱敏）…</p>`;
+        } else if (cache.status === "error") {
+          detail = `<p class="subtle">读取失败：${escapeHtml(cache.error)}</p>`;
+        } else {
+          const data = cache.data ?? {};
+          const cacheKey = `${targetKey}:${file.id}`;
+          const draft = state.configHostSourceDrafts.get(cacheKey);
+          const sourceBusy = state.configRemoteBusy.has(`${targetKey}:source:${file.id}`);
+          const diffOpen = state.configRemoteSourceDiffs.has(`${targetKey}:${file.id}`);
+          if (data.editable) {
+            const content = draft?.content ?? data.content ?? "";
+            detail = `<div class="config-remote-source-editor-shell">
+              <textarea class="config-remote-source-editor" data-config-remote-source-editor="${escapeHtml(file.id)}" spellcheck="false" aria-label="编辑 ${escapeHtml(file.label)}">${escapeHtml(content)}</textarea>
+              <div class="config-remote-source-editor-actions"><span class="subtle">${sourceBusy ? "正在保存…" : data.exists ? `SHA-256 ${escapeHtml(String(data.digest).slice(0, 12))}…` : "新建文件"}${draft?.dirty ? " · 未保存" : ""}</span><button class="button secondary" type="button" data-config-remote-source-diff="${escapeHtml(file.id)}" aria-pressed="${diffOpen}"><svg class="icon lucide"><use href="#lucide-list"></use></svg>${diffOpen ? "收起变更" : "预览变更"}</button><button class="button secondary" type="button" data-config-remote-source-reload="${escapeHtml(file.id)}"${sourceBusy ? " disabled" : ""}>重新载入</button><button class="button primary" type="button" data-config-remote-source-save="${escapeHtml(file.id)}"${draft?.dirty && !sourceBusy ? "" : " disabled"}><svg class="icon lucide"><use href="#lucide-save"></use></svg>${data.exists ? "保存" : "创建"}</button></div>
+              ${diffOpen ? `<div class="config-remote-source-diff-shell"><header><h4>保存前差异</h4><span class="subtle">基线＝打开时读到的远端原文</span></header>${configRemoteDiffMarkup(data.content ?? "", content, { emptyLabel: "草稿与远端当前内容一致。", label: `${file.label} 保存前差异` })}</div>` : ""}
+            </div>`;
+          } else {
+            detail = data.contentHidden
+              ? `<p class="subtle">该文件是凭据载体，内容不会进入浏览器。</p>`
+              : `<pre class="waveg-log">${escapeHtml(data.content ?? "")}</pre>`
+                + (data.sensitive ? `<p class="subtle">检测到凭据材料，保持脱敏只读。</p>` : "")
+              + (data.truncated ? `<p class="subtle">内容超过 1MB，仅显示前段（已脱敏）。</p>` : "")
+              + (data.redacted && !data.sensitive && !data.contentHidden
+                ? `<p class="subtle">内容中有片段被脱敏替换；为避免保存时把 <code>[REDACTED]</code> 写回远端真源，此文件保持只读。</p>`
+                : "");
+          }
+          if (data.exists) {
+            detail += configRemoteBackupTimeline(graph, file, targetKey, {
+              editable: data.editable === true,
+              hidden: data.contentHidden === true,
+              currentContent: data.content ?? "",
+            });
+          }
+        }
+      }
+      const meta = file.exists
+        ? `${formatConfigBytes(file.size)}${file.mtime ? ` · ${escapeHtml(file.mtime.replace("T", " ").slice(0, 16))}` : ""}`
+        : file.editable ? "不存在 · 可创建" : "不存在";
+      return `<div class="config-source-row${file.exists ? "" : " is-missing"}${isOpen ? " is-open" : ""}">
+        <button type="button" class="config-source-open" data-config-graph-file="${escapeHtml(file.id)}" ${file.exists || file.editable ? "" : "disabled"}>
+          <svg class="icon lucide"><use href="#lucide-file-text"></use></svg>
+          <span class="config-source-label">${escapeHtml(file.label)}${file.scope === "project" ? ` <span class="config-scope-badge">项目</span>` : ""}</span>
+          <code title="${escapeHtml(file.remote)}">${escapeHtml(file.projectRelative ?? file.remote)}</code>
+          <span class="subtle">${meta}</span>
+        </button>
+        ${isOpen ? `<div class="config-source-content">${detail}</div>` : ""}
+      </div>`;
+    }).join("");
+    return `<div class="config-source-list">${rows}</div>
+      <p class="subtle">真源内容经 SFTP 读取：主机 $HOME 与项目登记目录双重围栏 + 1MB 截断 + 秘密脱敏；客户端不能提交任意路径，不存在文件不可点开。</p>`;
+}
+
+function configRemoteSeatWorkspace(host, graph) {
+  const probe = state.configHostProbes.get(host.id);
+  if (!probe || probe.status === "loading") return '<p class="subtle config-remote-seat-loading">正在读取远端 CLI 席位…</p>';
+  if (probe.status === "error") return `<div class="waveg-review"><strong>运行席位探测失败</strong><p class="subtle">${escapeHtml(probe.error)}</p></div>`;
+  const clis = probe.data?.clis ?? [];
+  const selectedId = configRemoteSelectedCli(host, graph);
+  const selected = clis.find((cli) => cli.id === selectedId) ?? clis[0];
+  if (!selected) return '<p class="subtle config-remote-seat-loading">探针没有返回 CLI 清单。</p>';
+  const graphCli = configRemoteCliGraphId(selected.id);
+  const providers = (graph.providers ?? []).filter((row) => row.cli === graphCli && row.exists);
+  const sources = (graph.sources ?? []).filter((row) => row.cli === graphCli);
+  const capabilities = (graph.capabilities ?? []).filter((row) => row.cli === graphCli || row.cli === selected.id);
+  const mcps = (graph.mcp ?? []).filter((row) => row.cli === graphCli || row.cli === selected.id);
+  const logo = cliIconMarkup(selected.id, "cli-logo") || '<svg class="icon lucide"><use href="#lucide-square-terminal"></use></svg>';
+  const sourceRows = sources.map((source) => `<div class="config-remote-seat-source${source.exists ? "" : " is-missing"}"><div><strong>${escapeHtml(source.label)}</strong><code>${escapeHtml(source.projectRelative ?? source.remote)}</code></div><span class="status-label ${source.exists ? source.scope === "project" ? "is-ok" : "is-neutral" : "is-warning"}">${source.exists ? source.scope === "project" ? "项目" : "主机" : "缺失"}</span>${source.exists || source.editable ? `<button class="icon-button" type="button" data-config-remote-provider-source="${escapeHtml(source.id)}" title="打开配置真源" aria-label="打开 ${escapeHtml(source.label)}"><svg class="icon lucide"><use href="#lucide-scan-search"></use></svg></button>` : ""}</div>`).join("");
+  const providerRows = providers.map((provider) => `<div class="config-remote-seat-provider"><span class="provider-badge is-live">live</span><div><strong>${escapeHtml(provider.baseUrl || "官方默认端点")}</strong><span>${escapeHtml(provider.model || provider.provider || "未声明模型")}</span></div></div>`).join("");
+  return `<div class="runtime-seat-definition config-remote-seat-definition" aria-label="远端运行席位术语"><div><strong>运行席位</strong><span>当前远端 CLI 的命令、版本、Provider 与配置来源快照</span></div><div><strong>Adapter</strong><span>经 SSH 受控执行的 CLI 命令；此页不改变运行协议</span></div><div><strong>Provider</strong><span>从远端 live 配置脱敏提取；凭据不会进入浏览器</span></div></div>
+    <div class="runtime-seat-layout config-remote-seat-layout">
+      <aside class="runtime-seat-index" aria-labelledby="config-remote-seat-list-title"><header class="runtime-seat-index-header"><div><span class="eyebrow">Remote CLI Seats</span><h3 id="config-remote-seat-list-title">席位目录 <span>${clis.length}</span></h3></div></header><div class="runtime-seat-filters config-remote-seat-summary" role="status"><span>${clis.filter((cli) => cli.installed).length} 已安装</span><span>${clis.length - clis.filter((cli) => cli.installed).length} 未安装</span></div><div class="runtime-seat-list config-remote-seat-list" role="listbox" aria-label="远端 CLI 席位列表">${clis.map((cli) => { const icon = cliIconMarkup(cli.id, "runtime-seat-logo") || '<svg class="icon lucide"><use href="#lucide-square-terminal"></use></svg>'; return `<button type="button" class="runtime-seat-item${cli.id === selected.id ? " is-active" : ""}" role="option" aria-selected="${cli.id === selected.id}" data-config-remote-cli="${escapeHtml(cli.id)}" data-brand="${escapeHtml(cli.id)}"><span class="runtime-seat-item-icon">${icon}</span><span class="runtime-seat-item-copy"><strong>${escapeHtml(cli.label)}</strong><span>${escapeHtml(cli.installed ? cli.version ?? "已安装" : cli.command)}</span></span><span class="runtime-seat-item-state${cli.installed ? " is-ready" : ""}" title="${cli.installed ? "已安装" : "未安装"}"></span></button>`; }).join("")}</div></aside>
+      <section class="runtime-seat-editor config-remote-seat-editor" aria-labelledby="config-remote-seat-title"><header class="runtime-seat-editor-header"><div><span class="eyebrow">Executable Profile</span><h3 id="config-remote-seat-title">${escapeHtml(selected.label)} 远端席位</h3></div><span class="status-label ${selected.installed ? "is-ok" : "is-warning"}">${selected.installed ? "已检测" : "未安装"}</span></header>
+        <div class="runtime-seat-editor-body"><div class="config-remote-seat-identity"><span class="config-remote-seat-logo">${logo}</span><div><strong>${escapeHtml(selected.label)}</strong><span>${escapeHtml(selected.command)} · ${escapeHtml(selected.rawVersion ?? selected.version ?? "未安装")}</span></div>${selected.installed ? `<button class="button secondary" type="button" data-config-target-terminal="${escapeHtml(configRemoteTargetKey())}"><svg class="icon lucide"><use href="#lucide-square-terminal"></use></svg>SSH 终端</button>` : `<button class="button primary" type="button" data-config-install-cli="${escapeHtml(host.id)}:${escapeHtml(selected.id)}"${configRemoteRecoveryForTarget() ? ' disabled title="上一次远端提交状态不确定；核对前禁止远端安装"' : ""}><svg class="icon lucide"><use href="#lucide-download"></use></svg>安装</button>`}</div>
+          <section class="config-remote-seat-section"><p class="eyebrow">Execution Protocol</p><h4>Adapter 与 Provider</h4><div class="config-remote-seat-facts"><div><span>执行后端</span><strong>SSH · ${escapeHtml(selected.command)}</strong></div><div><span>传输</span><strong>受控远程 CLI</strong></div><div><span>Provider 配置</span><strong>${providers.length} 个 live</strong></div><div><span>能力接入</span><strong>${capabilities.length} 项 · ${mcps.length} MCP</strong></div></div>${providerRows || '<p class="subtle">该 CLI 暂未检测到 live Provider 配置。</p>'}</section>
+          <section class="config-remote-seat-section"><p class="eyebrow">Configuration Sources</p><h4>配置来源</h4><div class="config-remote-seat-sources">${sourceRows || '<p class="subtle">该 CLI 没有登记的配置真源。</p>'}</div></section>
+          <p class="runtime-seat-note">这是远端只读席位快照。安装、Provider 发布和真源保存继续分别经过既有确认与摘要锁。</p></div>
+      </section>
+    </div>`;
+}
+
+function configRemoteSourcesBody(host) {
+  return configRemoteGraphBody(host, (graph) => {
+    const mode = configRemoteRuntimeMode();
+    return `${configRemoteHealthDashboard(host, graph)}<div class="runtime-workspace-tabs config-remote-runtime-tabs" role="tablist" aria-label="远端运行配置视图"><button class="${mode === "seats" ? "is-active" : ""}" type="button" role="tab" aria-selected="${mode === "seats"}" tabindex="${mode === "seats" ? "0" : "-1"}" data-config-remote-runtime-mode="seats"><svg class="icon lucide"><use href="#lucide-cpu"></use></svg>运行席位</button><button class="${mode === "sources" ? "is-active" : ""}" type="button" role="tab" aria-selected="${mode === "sources"}" tabindex="${mode === "sources" ? "0" : "-1"}" data-config-remote-runtime-mode="sources"><svg class="icon lucide"><use href="#lucide-file-json"></use></svg>高级真源</button></div>${mode === "seats" ? configRemoteSeatWorkspace(host, graph) : `<section class="config-remote-source-workspace" aria-label="远端高级真源">${configRemoteSourceList(graph)}</section>`}`;
+  });
+}
+
+/** CLI 矩阵（probe 实况）：sources 面与远程环境卡共用。 */
+function configRemoteEnvBody(host) {
+  const probe = state.configHostProbes.get(host.id);
+  if (!probe || probe.status === "loading") {
+    return `<p class="subtle">正在探测远程环境（OS / Shell / CLI 矩阵）…</p>`;
+  }
+  if (probe.status === "error") {
+    return `<p class="subtle">探测失败：${escapeHtml(probe.error)}</p>`;
+  }
+  const data = probe.data ?? {};
+  const recoveryBlocked = configRemoteWriteBlocked({ key: `host:${host.id}`, hostId: host.id, projectId: null }, { notify: false });
+  return `
+    <div class="sshconn-env-grid">
+      <span>OS</span><b>${escapeHtml(data.os ?? "?")}</b>
+      <span>Shell</span><b>${escapeHtml(data.shell ?? "?")}</b>
+      <span>Home</span><b>${escapeHtml(data.home ?? "?")}</b>
+      <span>磁盘</span><b>${escapeHtml(data.disk ?? "?")}</b>
+      <span>内存</span><b>${escapeHtml(data.memory ?? "?")}</b>
+    </div>
+    <div class="sshconn-clis">
+      ${(data.clis ?? []).map((cli) => `
+        <div class="sshconn-cli${cli.installed ? "" : " is-missing"}">
+          <span class="sshconn-cli-name">${escapeHtml(cli.label)}</span>
+          <code>${escapeHtml(cli.command)}</code>
+          ${cli.installed
+            ? `<span class="sshconn-cli-ver" title="${escapeHtml(cli.rawVersion ?? "")}">${escapeHtml(cli.version ?? "已安装")}</span>`
+            : `<span class="subtle">未安装</span>
+               <button type="button" class="button mini" data-config-install-cli="${escapeHtml(host.id)}:${escapeHtml(cli.id)}"${recoveryBlocked ? ' disabled title="存在未核对远端事务，暂不可安装"' : ""}>安装</button>`}
+        </div>`).join("")}
+    </div>`;
+}
+
+/** 远程图谱拉取：主机/项目都按 targetKey 隔离缓存，项目端点由服务端台账解析 path。 */
+async function loadConfigHostGraph(hostId, { force = false } = {}) {
+  const target = configRemoteProviderTargetSnapshot();
+  const targetKey = target.key;
+  if (!force && state.configHostGraph.has(targetKey)) return;
+  const loading = { status: "loading" };
+  state.configHostGraph.set(targetKey, loading);
+  renderConfigTopology();
+  if (state.configHostId === hostId && configRemoteTargetKey() === targetKey) renderConfigRemotePanel();
+  try {
+    const result = await request(configRemoteGraphEndpoint({ target }));
+    if (state.configHostGraph.get(targetKey) !== loading) return;
+    state.configHostGraph.set(targetKey, { status: "ok", data: result ?? null });
+    if (force) {
+      // 图谱读回仅证明 UI 已刷新，不等于未知事务已和解；保留阻断直到服务端 reconcile 明确确认。
+      for (const [, recovery] of configRemoteRecoveryEntriesForTarget(target)) recovery.readbackAt = Date.now();
+    }
+  } catch (error) {
+    if (state.configHostGraph.get(targetKey) !== loading) return;
+    state.configHostGraph.set(targetKey, { status: "error", error: error.message });
+  }
+  renderConfigTopology();
+  if (state.configHostId === hostId && configRemoteTargetKey() === targetKey) renderConfigRemotePanel();
+}
+
+/** 真源文件点击展开/收起；内容按 targetKey:fileId 缓存，再点同一行收起。 */
+async function toggleConfigGraphFile(fileId) {
+  const target = configRemoteProviderTargetSnapshot();
+  const targetKey = target.key;
+  const open = state.configHostSourceOpen;
+  if (open?.targetKey === targetKey && open?.fileId === fileId) {
+    state.configHostSourceOpen = null;
+    renderConfigRemotePanel();
+    return;
+  }
+  state.configHostSourceOpen = { targetKey, fileId };
+  const key = `${targetKey}:${fileId}`;
+  if (!state.configHostSourceCache.has(key)) {
+    const loading = { status: "loading" };
+    state.configHostSourceCache.set(key, loading);
+    renderConfigRemotePanel();
+    try {
+      const result = await request(configRemoteGraphEndpoint({ sourceFile: fileId, target }));
+      if (state.configHostSourceCache.get(key) !== loading) return;
+      state.configHostSourceCache.set(key, { status: "ok", data: result ?? null });
+      state.configHostSourceDrafts.set(key, { content: result?.content ?? "", digest: result?.digest ?? null, dirty: false });
+    } catch (error) {
+      if (state.configHostSourceCache.get(key) !== loading) return;
+      state.configHostSourceCache.set(key, { status: "error", error: error.message });
+    }
+  }
+  renderConfigRemotePanel();
+}
+
+async function reloadConfigRemoteSource(fileId) {
+  const target = configRemoteProviderTargetSnapshot();
+  const targetKey = target.key;
+  const key = `${targetKey}:${fileId}`;
+  if (state.configRemoteBusy.has(`${targetKey}:source:${fileId}`)) return;
+  const draft = state.configHostSourceDrafts.get(key);
+  if (draft?.dirty) {
+    const proceed = await confirmAction({
+      eyebrow: "重新载入远端真源",
+      title: "放弃未保存修改？",
+      rows: [["文件", fileId]],
+      warning: "当前编辑器中的未保存内容会被远端最新版本替换。",
+      confirmLabel: "放弃并载入",
+      danger: true,
+    });
+    if (!proceed) return;
+  }
+  const loading = { status: "loading" };
+  state.configHostSourceCache.set(key, loading);
+  state.configHostSourceDrafts.delete(key);
+  if (targetKey === configRemoteTargetKey()) renderConfigRemotePanel();
+  try {
+    const result = await request(configRemoteGraphEndpoint({ sourceFile: fileId, target }));
+    if (state.configHostSourceCache.get(key) !== loading) return;
+    state.configHostSourceCache.set(key, { status: "ok", data: result ?? null });
+    state.configHostSourceDrafts.set(key, { content: result?.content ?? "", digest: result?.digest ?? null, dirty: false });
+  } catch (error) {
+    if (state.configHostSourceCache.get(key) !== loading) return;
+    state.configHostSourceCache.set(key, { status: "error", error: error.message });
+  }
+  if (targetKey === configRemoteTargetKey()) renderConfigRemotePanel();
+}
+
+async function saveConfigRemoteSource(fileId) {
+  const target = configRemoteProviderTargetSnapshot();
+  const key = `${target.key}:${fileId}`;
+  const cache = state.configHostSourceCache.get(key);
+  const data = cache?.status === "ok" ? cache.data : null;
+  const draft = state.configHostSourceDrafts.get(key);
+  if (!data?.editable || !draft?.dirty) return;
+  if (configRemoteWriteBlocked(target)) return;
+  const proceed = await confirmAction({
+    eyebrow: data.exists ? "保存远端真源" : "创建远端真源",
+    title: `${data.exists ? "保存" : "创建"}「${data.label ?? fileId}」？`,
+    rows: [
+      ["远端路径", data.remote],
+      ["并发保护", data.exists ? `SHA-256 ${String(draft.digest).slice(0, 12)}…` : "目标必须仍不存在"],
+      ["发布", "同目录备份、0600 临时文件、digest 复核、原子替换"],
+    ],
+    warning: "若远端文件已被其他进程修改，保存会以 409 拒绝，不覆盖外部改动。",
+    confirmLabel: data.exists ? "保存" : "创建",
+  });
+  if (!proceed) return;
+  const submittedDraft = state.configHostSourceDrafts.get(key);
+  const submittedCache = state.configHostSourceCache.get(key);
+  const submittedData = submittedCache?.status === "ok" ? submittedCache.data : null;
+  if (!submittedData?.editable || !submittedDraft?.dirty) return;
+  if (configRemoteWriteBlocked(target)) return;
+  const busyKey = `${target.key}:source:${fileId}`;
+  if (state.configRemoteBusy.has(busyKey)) return;
+  state.configRemoteBusy.add(busyKey);
+  renderConfigRemotePanel();
+  const endpoint = target.projectId
+    ? `/api/remote-projects/${encodeURIComponent(target.projectId)}/graph/source`
+    : `/api/ssh/hosts/${encodeURIComponent(target.hostId)}/graph/source`;
+  try {
+    const result = await request(endpoint, { method: "POST", body: { file: fileId, content: submittedDraft.content, digest: submittedDraft.digest } });
+    configRemoteResult(`<div class="waveg-review"><strong>远端真源已${result.created ? "创建" : "保存"}</strong><div class="waveg-log">${escapeHtml(`${result.remote}\n${result.bytes}B${result.backup ? `\n备份 ${result.backup}` : ""}`)}</div></div>`, target.key);
+    const latestDraft = state.configHostSourceDrafts.get(key);
+    const nextData = {
+      ...submittedData,
+      ...result,
+      exists: true,
+      content: submittedDraft.content,
+      digest: result.digest,
+      editable: true,
+    };
+    state.configHostSourceCache.set(key, { status: "ok", data: nextData });
+    state.configHostSourceDrafts.set(key, latestDraft === submittedDraft
+      ? { content: submittedDraft.content, digest: result.digest, dirty: false }
+      : { content: latestDraft?.content ?? submittedDraft.content, digest: result.digest, dirty: (latestDraft?.content ?? submittedDraft.content) !== submittedDraft.content });
+    if (target.key === configRemoteTargetKey()) {
+      await loadConfigHostGraph(target.hostId, { force: true });
+    }
+  } catch (error) {
+    rememberConfigRemoteRecovery(target, error, error.message, "graph");
+    configRemoteResult(`<div class="waveg-review"><strong>远端真源保存失败</strong><p class="subtle">${escapeHtml(error.message)}</p></div>`, target.key);
+    toast(`远端真源保存失败：${error.message}`, "error", 7000);
+  } finally {
+    state.configRemoteBusy.delete(busyKey);
+    if (target.key === configRemoteTargetKey()) renderConfigRemotePanel();
+  }
+}
+
+function toggleConfigRemoteSourceDiff(fileId) {
+  const key = `${configRemoteTargetKey()}:${fileId}`;
+  if (state.configRemoteSourceDiffs.has(key)) state.configRemoteSourceDiffs.delete(key);
+  else state.configRemoteSourceDiffs.add(key);
+  renderConfigRemotePanel();
+}
+
+/** 备份对比：读服务端脱敏投影；慢响应只写回自己的缓存键，切目标后不覆盖当前面板。 */
+async function toggleConfigRemoteBackupCompare(fileId, name) {
+  if (!fileId || !name) return;
+  const target = configRemoteProviderTargetSnapshot();
+  const targetKey = target.key;
+  const compareKey = `${targetKey}:${fileId}`;
+  if (state.configRemoteBackupCompare.get(compareKey) === name) {
+    state.configRemoteBackupCompare.delete(compareKey);
+    renderConfigRemotePanel();
+    return;
+  }
+  state.configRemoteBackupCompare.set(compareKey, name);
+  const cacheKey = `${compareKey}:${name}`;
+  if (!state.configRemoteBackupCache.has(cacheKey)) {
+    const loading = { status: "loading" };
+    state.configRemoteBackupCache.set(cacheKey, loading);
+    renderConfigRemotePanel();
+    try {
+      const result = await request(configRemoteGraphEndpoint({ sourceFile: fileId, backupName: name, target }));
+      if (state.configRemoteBackupCache.get(cacheKey) !== loading) return;
+      state.configRemoteBackupCache.set(cacheKey, { status: "ok", data: result ?? null });
+    } catch (error) {
+      if (state.configRemoteBackupCache.get(cacheKey) !== loading) return;
+      state.configRemoteBackupCache.set(cacheKey, { status: "error", error: error.message });
+    }
+  }
+  if (targetKey === configRemoteTargetKey()) renderConfigRemotePanel();
+}
+
+/**
+ * 备份恢复：只提交备份名 + 当前真源 digest（CAS），原文由服务端从备份直接送入 writeSource。
+ * 确认对话是异步窗口，期间远端 digest 可能已变——确认后必须重取并严格比对，不拿旧快照写盘。
+ */
+async function restoreConfigRemoteBackup(fileId, name) {
+  if (!fileId || !name) return;
+  const target = configRemoteProviderTargetSnapshot();
+  const targetKey = target.key;
+  const sourceKey = `${targetKey}:${fileId}`;
+  const cache = state.configHostSourceCache.get(sourceKey);
+  const data = cache?.status === "ok" ? cache.data : null;
+  if (!data?.editable || !data.exists) return;
+  if (configRemoteWriteBlocked(target)) return;
+  const busyKey = `${targetKey}:restore:${name}`;
+  if (state.configRemoteBusy.has(busyKey)) return;
+  const graph = state.configHostGraph.get(targetKey);
+  const entry = graph?.status === "ok"
+    ? configRemoteBackupRows(graph.data ?? {}, fileId).find((row) => row.name === name)
+    : null;
+  const draft = state.configHostSourceDrafts.get(sourceKey);
+  const proceed = await confirmAction({
+    eyebrow: "从备份恢复远端真源",
+    title: `用备份覆盖「${data.label ?? fileId}」？`,
+    rows: [
+      ["远端路径", data.remote],
+      ["备份文件", name],
+      ["备份时间", formatConfigBackupTime(entry?.mtime)],
+      ["恢复内容", `${entry?.size == null ? "大小未知" : formatConfigBytes(entry.size)} · 原文由服务端读取，不经浏览器`],
+      ["并发保护", `SHA-256 ${String(data.digest).slice(0, 12)}…`],
+      ["可回滚", "恢复同样会为当前内容留下新备份"],
+    ],
+    warning: draft?.dirty
+      ? "当前远端内容会被此备份整体替换，编辑器里的未保存草稿也会一并丢弃。远端若已被其他进程改动，恢复以 409 拒绝，不覆盖外部改动。"
+      : "当前远端内容会被此备份整体替换。远端若已被其他进程改动，恢复以 409 拒绝，不覆盖外部改动。",
+    confirmLabel: "恢复",
+    danger: true,
+  });
+  if (!proceed) return;
+  const confirmedCache = state.configHostSourceCache.get(sourceKey);
+  const confirmedData = confirmedCache?.status === "ok" ? confirmedCache.data : null;
+  if (!confirmedData?.editable || confirmedData.digest !== data.digest) {
+    toast("远端真源在确认期间已变化，恢复已取消——请重新对比后再决定。", "warning", 6000);
+    if (targetKey === configRemoteTargetKey()) renderConfigRemotePanel();
+    return;
+  }
+  if (configRemoteWriteBlocked(target)) return;
+  if (state.configRemoteBusy.has(busyKey)) return;
+  state.configRemoteBusy.add(busyKey);
+  renderConfigRemotePanel();
+  const endpoint = target.projectId
+    ? `/api/remote-projects/${encodeURIComponent(target.projectId)}/graph/backup/restore`
+    : `/api/ssh/hosts/${encodeURIComponent(target.hostId)}/graph/backup/restore`;
+  try {
+    const result = await request(endpoint, { method: "POST", body: { file: fileId, name, digest: confirmedData.digest } });
+    configRemoteResult(`<div class="waveg-review"><strong>远端真源已从备份恢复</strong><div class="waveg-log">${escapeHtml(`${result.remote}\n${result.bytes}B · 来自 ${result.restoredFrom ?? name}${result.backup ? `\n恢复前内容已备份为 ${result.backup}` : ""}`)}</div></div>`, targetKey);
+    state.configRemoteBackupCompare.delete(sourceKey);
+    state.configRemoteSourceDiffs.delete(sourceKey);
+    state.configHostSourceDrafts.delete(sourceKey);
+    if (targetKey === configRemoteTargetKey()) {
+      // 内容已整体替换：真源重读 + 图谱强刷（备份多一份），不拿旧缓存冒充现状
+      await Promise.allSettled([
+        reloadConfigRemoteSource(fileId),
+        loadConfigHostGraph(target.hostId, { force: true }),
+      ]);
+    }
+  } catch (error) {
+    rememberConfigRemoteRecovery(target, error, error.message, "graph");
+    configRemoteResult(`<div class="waveg-review"><strong>远端备份恢复失败</strong><p class="subtle">${escapeHtml(error.message)}</p></div>`, targetKey);
+    toast(`远端备份恢复失败：${error.message}`, "error", 7000);
+  } finally {
+    state.configRemoteBusy.delete(busyKey);
+    if (targetKey === configRemoteTargetKey()) renderConfigRemotePanel();
+  }
+}
+
+async function openConfigRemoteProviderSource(fileId) {
+  if (!fileId || !state.configHostId) return;
+  const targetKey = configRemoteTargetKey();
+  setConfigSurface("sources");
+  state.configRemoteRuntimeModes.set(targetKey, "sources");
+  if (state.configHostSourceOpen?.targetKey === targetKey && state.configHostSourceOpen?.fileId === fileId) {
+    renderConfigRemotePanel();
+    return;
+  }
+  await toggleConfigGraphFile(fileId);
+}
+
+async function refreshConfigRemoteTarget(hostId) {
+  if (!hostId) return;
+  await Promise.allSettled([
+    probeConfigHost(hostId),
+    loadConfigHostGraph(hostId, { force: true }),
+  ]);
+}
+
+async function reconcileConfigRemoteRecovery(recoveryKeyOrTarget) {
+  const direct = state.configRemoteRecovery?.get(recoveryKeyOrTarget);
+  const entry = direct
+    ? [recoveryKeyOrTarget, direct]
+    : configRemoteRecoveryEntryForTarget(recoveryKeyOrTarget);
+  const recoveryKey = entry?.[0];
+  const recovery = entry?.[1];
+  if (!recoveryKey || !recovery?.transactionId || !["provider", "graph", "sync"].includes(recovery.kind)) {
+    toast("缺少可核对的远端事务标识", "error", 6000);
+    return;
+  }
+  const target = {
+    key: recovery.targetKey,
+    hostId: recovery.hostId,
+    projectId: recovery.projectId ?? null,
+  };
+  const base = recovery.kind === "sync" || !target.projectId
+    ? `/api/ssh/hosts/${encodeURIComponent(target.hostId)}`
+    : `/api/remote-projects/${encodeURIComponent(target.projectId)}`;
+  const busyKey = `reconcile:${recoveryKey}`;
+  if (state.configRemoteBusy.has(busyKey)) return;
+  state.configRemoteBusy.add(busyKey);
+  if (target.hostId === configRemoteHost()?.id) renderConfigRemotePanel();
+  try {
+    const result = await request(`${base}/recovery/reconcile`, {
+      method: "POST",
+      body: { kind: recovery.kind, transactionId: recovery.transactionId },
+    });
+    if (state.configRemoteRecovery.get(recoveryKey) !== recovery) return;
+    if (result?.recoveryRequired === false && Array.isArray(result?.released)) {
+      state.configRemoteRecovery.delete(recoveryKey);
+      persistConfigRemoteRecoveries();
+      notifyConfigRemoteRecoveryChanged();
+      configRemoteResult(`<div class="waveg-review"><strong>远端事务已核对，写入阻断解除</strong><p class="subtle">${escapeHtml(result.message ?? recovery.transactionId)}</p></div>`, target.key);
+      await refreshConfigRemoteTarget(target.hostId);
+      toast("远端事务已核对", "success");
+    } else {
+      state.configRemoteRecovery.set(recoveryKey, { ...recovery, reconcile: result, message: result?.message ?? recovery.message });
+      persistConfigRemoteRecoveries();
+      toast("远端事务仍未确定，继续保持写入阻断", "warning", 7000);
+    }
+  } catch (error) {
+    if (state.configRemoteRecovery.get(recoveryKey) !== recovery) return;
+    const next = configRemoteRecoveryEvidence(error, error.message, recovery.kind);
+    state.configRemoteRecovery.set(recoveryKey, {
+      ...recovery,
+      ...(next ?? {}),
+      targetKey: recovery.targetKey,
+      hostId: recovery.hostId,
+      projectId: recovery.projectId,
+      scope: recovery.scope,
+      reconcileError: error.message,
+    });
+    persistConfigRemoteRecoveries();
+    toast(`远端事务核对失败：${error.message}`, "error", 7000);
+  } finally {
+    state.configRemoteBusy.delete(busyKey);
+    if (target.hostId === configRemoteHost()?.id) renderConfigRemotePanel();
+  }
+}
+
+async function diagnoseConfigRemoteProxy(hostId) {
+  if (!hostId) return;
+  const targetKey = configRemoteTargetKey();
+  const loading = { status: "loading" };
+  state.configRemoteProxyProbes.set(targetKey, loading);
+  renderConfigRemotePanel();
+  try {
+    const result = await request(`/api/ssh/hosts/${encodeURIComponent(hostId)}/proxy-diagnose`, { method: "POST", body: {} });
+    if (state.configRemoteProxyProbes.get(targetKey) !== loading) return;
+    state.configRemoteProxyProbes.set(targetKey, { status: "ok", data: result?.diagnosis ?? {} });
+  } catch (error) {
+    if (state.configRemoteProxyProbes.get(targetKey) !== loading) return;
+    state.configRemoteProxyProbes.set(targetKey, { status: "error", error: error.message });
+  }
+  if (targetKey === configRemoteTargetKey()) renderConfigRemotePanel();
+}
+
+async function probeConfigHost(id) {
+  const loading = { status: "loading" };
+  state.configHostProbes.set(id, loading);
+  if (typeof renderConfigHostBar === "function") renderConfigHostBar();
+  renderConfigTopology();
+  if (state.configHostId === id) renderConfigRemotePanel();
+  try {
+    const result = await request(`/api/ssh/hosts/${id}/probe`, { method: "POST", body: JSON.stringify({}) });
+    if (state.configHostProbes.get(id) !== loading) return;
+    const data = result?.probe ?? null;
+    state.configHostProbes.set(id, { status: "ok", data });
+    const metrics = data?.metrics ?? {};
+    const sample = {
+      at: Date.now(),
+      cpu: configRemoteMetricNumber(metrics.cpu?.usagePercent),
+      memory: configRemoteMetricNumber(metrics.memory?.usagePercent),
+      disk: configRemoteMetricNumber(metrics.disk?.usagePercent),
+      rxBytes: configRemoteMetricNumber(metrics.network?.rxBytes),
+      txBytes: configRemoteMetricNumber(metrics.network?.txBytes),
+    };
+    if ([sample.cpu, sample.memory, sample.disk, sample.rxBytes, sample.txBytes].some((value) => value != null)) {
+      const history = state.configRemoteMetricHistory.get(id) ?? [];
+      state.configRemoteMetricHistory.set(id, [...history, sample].slice(-24));
+    }
+  } catch (error) {
+    if (state.configHostProbes.get(id) !== loading) return;
+    state.configHostProbes.set(id, { status: "error", error: error.message });
+  }
+  if (typeof renderConfigHostBar === "function") renderConfigHostBar();
+  renderConfigTopology();
+  if (state.configHostId === id) renderConfigRemotePanel();
+}
+
+/** 远程安装 CLI：确认框明示命令通道，结果内联如实回显，成功后重探测刷新矩阵。 */
+async function installConfigCli(hostId, toolId) {
+  const target = configRemoteTargetSnapshotForKey();
+  if (configRemoteWriteBlocked(target)) return;
+  const host = (state.configHosts ?? []).find((entry) => entry.id === hostId);
+  const probe = state.configHostProbes.get(hostId);
+  const cli = probe?.data?.clis?.find((entry) => entry.id === toolId);
+  const platform = /darwin/i.test(probe?.data?.os ?? "") ? "darwin" : "linux";
+  const verdict = await confirmAction({
+    eyebrow: "远程安装",
+    title: `在 ${host?.name ?? hostId} 安装 ${cli?.label ?? toolId}？`,
+    rows: [
+      ["主机", `${host?.user ?? ""}@${host?.host ?? ""}:${host?.port ?? ""}`],
+      ["CLI", `${cli?.label ?? toolId}（${cli?.command ?? toolId}）`],
+      ["通道", "官方安装命令（npm i -g / 官方脚本），输出如实回显，失败不伪造成功"],
+    ],
+    confirmLabel: "执行安装",
+  });
+  if (!verdict) return; // confirmAction 无 checkbox 时 resolve 布尔
+  if (configRemoteWriteBlocked(target)) return;
+  configRemoteResult(`<p class="subtle">正在安装 ${escapeHtml(cli?.label ?? toolId)}（最长 120s）…</p>`, target.key);
+  try {
+    const result = await request(`/api/ssh/hosts/${hostId}/install-cli`, { method: "POST", body: JSON.stringify({ toolId, platform }) });
+    if (result.ok) await probeConfigHost(hostId); // 先重探测——重渲面板会清结果区，回报必须在重渲之后落
+    configRemoteResult(`
+      <div class="waveg-review">
+        <strong>${result.ok ? "安装完成" : `安装失败（退出码 ${result.code ?? "?"}）`}：${escapeHtml(result.display ?? "")}</strong>
+        <div class="waveg-log">${escapeHtml(result.stdout || "")}${result.stderr ? `\n[stderr]\n${escapeHtml(result.stderr)}` : ""}</div>
+        </div>`, target.key);
+  } catch (error) {
+    configRemoteResult(`<div class="waveg-review"><strong>安装失败</strong><p class="subtle">${escapeHtml(error.message)}</p></div>`, target.key);
+  }
+}
+
+/** 在该主机 home 目录开 SSH 终端（复用 pty ssh 面，与项目右键终端同链路）。 */
+async function openConfigTargetTerminal(hostId) {
+  const host = configRemoteHost() ?? (state.configHosts ?? []).find((entry) => entry.id === hostId);
+  const project = configRemoteProject();
+  const path = project?.path ?? state.configHostProbes.get(hostId)?.data?.home ?? "/";
+  try {
+    const result = await request("/api/pty", {
+      method: "POST",
+      body: JSON.stringify({ ssh: { hostId, path }, title: `${project?.name ?? host?.name ?? hostId} · ${path}` }),
+    });
+    window.dispatchEvent(new CustomEvent("forge:pty-session-created", { detail: { session: result?.session } }));
+    setView("terminal");
+    toast(`已打开「${project?.name ?? host?.name ?? hostId}」的远程终端`, "success");
+  } catch (error) {
+    toast(`打开远程终端失败:${error.message}`, "error");
+  }
+}
+
+/** 一键同步本机配置：plan 列清单（含 secret 红字警示）→ 显式勾选确认 → 逐文件推送回报。 */
+async function openConfigSyncDialog(host) {
+  const openedTarget = configRemoteProviderTargetSnapshot();
+  if (!openedTarget.hostId || openedTarget.hostId !== host.id || configRemoteWriteBlocked(openedTarget)) return;
+  const project = configRemoteProject();
+  const targetLabel = project
+    ? `${host.name ?? host.id} 的主机 Home（当前项目：${project.name ?? project.id}）`
+    : host.name ?? host.id;
+  const dialog = document.createElement("dialog");
+  dialog.className = "action-dialog sshconn-dialog";
+  dialog.innerHTML = `<div class="dialog-heading"><div><span class="eyebrow">同步到主机 Home</span><h2>同步到 ${escapeHtml(targetLabel)}</h2></div></div><div class="dialog-body"><p class="subtle">正在读取本机配置清单…</p></div>`;
+  document.body.appendChild(dialog);
+  dialog.addEventListener("close", () => dialog.remove(), { once: true }); // 一次性 dialog，关即销毁
+  dialog.showModal();
+  let plan;
+  try {
+    plan = await request(`/api/ssh/hosts/${host.id}/env-sync/plan`);
+  } catch (error) {
+    dialog.querySelector(".dialog-body").innerHTML = `<p class="subtle">读取失败：${escapeHtml(error.message)}</p><div class="dialog-actions"><button type="button" class="button secondary" data-act="cancel">关闭</button></div>`;
+    dialog.querySelector('[data-act="cancel"]')?.addEventListener("click", () => dialog.close());
+    return;
+  }
+  const files = plan?.files ?? [];
+  dialog.innerHTML = `
+    <div class="dialog-heading">
+      <div><span class="eyebrow">同步到主机 Home</span><h2>同步到 ${escapeHtml(targetLabel)}</h2></div>
+      <button type="button" class="icon-button" data-act="cancel" aria-label="关闭对话框" title="关闭"><svg class="icon lucide"><use href="#lucide-x"></use></svg></button>
+    </div>
+    <div class="dialog-body">
+      <p class="subtle">推送本机运行时实况文件到远端 <code>$HOME</code> 同名路径（整文件覆盖远端同名文件）。${project ? `当前项目目录 <code>${escapeHtml(project.path)}</code> 不会被写入。` : ""}凭据文件（auth.json / .env）永不在清单内。</p>
+      <div class="sshconn-sync-list">
+        ${files.map((file) => `
+          <label class="sshconn-sync-row${file.exists ? "" : " is-missing"}">
+            <input type="checkbox" data-sync-file="${escapeHtml(file.id)}" ${file.exists && !file.containsSecrets ? "checked" : ""} ${file.exists ? "" : "disabled"} />
+            <span class="sshconn-sync-main">
+              <span>${escapeHtml(file.label)}${file.containsSecrets ? ` <span class="sshconn-badge is-warn">检测到疑似秘密</span>` : ""}</span>
+              <span class="subtle">${escapeHtml(file.local)} → ~/${escapeHtml(file.remote)}${file.exists ? ` · ${file.size}B` : " · 本机不存在"}</span>
+            </span>
+          </label>`).join("")}
+      </div>
+      <p class="subtle" data-sync-msg></p>
+    </div>
+    <div class="dialog-actions">
+      <button type="button" class="button secondary" data-act="cancel">取消</button>
+      <button type="button" class="button primary" data-act="push"><svg class="icon lucide"><use href="#lucide-cloud-upload"></use></svg> 推送所选</button>
+    </div>`;
+  dialog.querySelectorAll('[data-act="cancel"]').forEach((button) => button.addEventListener("click", () => dialog.close()));
+  dialog.querySelector('[data-act="push"]')?.addEventListener("click", async () => {
+    const pushButton = dialog.querySelector('[data-act="push"]');
+    if (pushButton?.disabled) return;
+    const selectedIds = [...dialog.querySelectorAll("[data-sync-file]:checked")].map((box) => box.dataset.syncFile);
+    const msg = dialog.querySelector("[data-sync-msg]");
+    if (!selectedIds.length) {
+      if (msg) msg.textContent = "未选择任何文件。";
+      return;
+    }
+    const secretPicks = selectedIds.filter((id) => files.find((file) => file.id === id)?.containsSecrets);
+    if (secretPicks.length) {
+      const verdict = await confirmAction({
+        eyebrow: "二次确认",
+        title: "所选文件含疑似秘密",
+        rows: [["文件", secretPicks.map((id) => files.find((file) => file.id === id)?.label ?? id).join("、")]],
+        warning: "含疑似秘密字面量，将经 SSH 出本机写入远端。确认继续？",
+        confirmLabel: "仍要推送",
+        danger: true,
+      });
+      if (!verdict) return; // confirmAction 无 checkbox 时 resolve 布尔
+    }
+    if (configRemoteWriteBlocked(openedTarget)) {
+      if (msg) msg.textContent = "该主机出现未和解事务，本次同步已阻止。";
+      return;
+    }
+    if (pushButton) pushButton.disabled = true;
+    if (msg) msg.textContent = "正在推送…";
+    try {
+      const selections = selectedIds.map((id) => {
+        const file = files.find((entry) => entry.id === id);
+        return { id, digest: file?.digest, allowSecrets: secretPicks.includes(id) };
+      });
+      const result = await request(`/api/ssh/hosts/${openedTarget.hostId}/env-sync`, { method: "POST", body: { files: selections } });
+      const entries = result?.results ?? [];
+      const recovery = rememberConfigRemoteRecovery(openedTarget, result, result?.message, "sync");
+      const complete = !recovery && result?.complete === true && entries.every((entry) => entry.ok);
+      const title = recovery
+        ? "同步状态不确定，远端写入已阻断，请核对事务"
+        : complete
+          ? `同步完成（远端 HOME=${result?.home ?? "?"}）`
+          : result?.status === "rolled_back"
+            ? "同步未完成，远端改动已回滚"
+            : "同步部分失败";
+      dialog.close();
+      configRemoteResult(`
+        <div class="waveg-review${recovery ? " is-error" : ""}">
+          <strong>${escapeHtml(title)}</strong>
+          <div class="waveg-log">${escapeHtml(entries.map((entry) => `${entry.ok ? "✓" : "✗"} ${entry.label} → ${entry.remote}${entry.ok ? `（${entry.bytes}B）` : `：${entry.error}`}`).join("\n"))}</div>
+        </div>`, openedTarget.key);
+      if (!complete) toast(title, "error", 7000);
+    } catch (error) {
+      const recovery = rememberConfigRemoteRecovery(openedTarget, error, error.message, "sync");
+      if (error?.payload?.code === "REMOTE_RECOVERY_BLOCKED" || error?.payload?.pending || error?.payload?.error?.pending) {
+        await loadConfigRemoteRecoveries();
+      }
+      if (recovery) {
+        dialog.close();
+        configRemoteResult(`<div class="waveg-review is-error"><strong>同步状态不确定，远端写入已阻断</strong><p class="subtle">${escapeHtml(error.message)}</p></div>`, openedTarget.key);
+      } else if (msg) {
+        msg.textContent = `推送失败：${error.message}`;
+      }
+    } finally {
+      if (pushButton?.isConnected) pushButton.disabled = false;
+    }
+  });
 }
 
 async function loadObservability() {
@@ -1072,7 +3500,473 @@ function renderSessions() {
     .join("");
 }
 
+// 配置图谱的能力面：skills 矩阵 + 花名册 + MCP 声明扫描
+let capabilitiesLoadPromise = null;
+let capabilitiesQueuedFreshPromise = null;
+let capabilitiesFreshRequested = false;
+let capabilitiesLoadEpoch = 0;
+
+function invalidateCapabilitiesCatalog() {
+  state.capabilitiesData = null;
+  state.capabilitiesError = null;
+  if (capabilitiesLoadPromise || capabilitiesQueuedFreshPromise) {
+    return loadCapabilities({ fresh: true });
+  }
+  return Promise.resolve(successfulLoadResult(null, { invalidated: true }));
+}
+
+function startCapabilitiesLoad() {
+  const epoch = ++capabilitiesLoadEpoch;
+  state.capabilitiesLoading = true;
+  let requestPromise;
+  requestPromise = (async () => {
+    try {
+      const payload = await request(API.capabilities);
+      if (epoch !== capabilitiesLoadEpoch) return successfulLoadResult(payload, { stale: true });
+      state.capabilitiesData = payload;
+      state.capabilitiesError = null;
+      return successfulLoadResult(state.capabilitiesData);
+    } catch (error) {
+      if (epoch !== capabilitiesLoadEpoch) return successfulLoadResult(null, { stale: true });
+      state.capabilitiesData = null;
+      state.capabilitiesError = error.message;
+      return failedLoadResult(error);
+    } finally {
+      if (epoch === capabilitiesLoadEpoch) {
+        state.capabilitiesLoading = false;
+        renderCapabilities();
+        renderConfigTopology();
+        // 团队设置已并入团队页；目录晚到时保留表单当前勾选，不回滚用户草稿。
+        if (elements["team-settings-panel"]) {
+          const editing = state.teams.find((team) => team.id === state.editingTeamId) ?? null;
+          renderTeamChips(
+            checkedChipValues("team-skills-chips", editing?.skills ?? []),
+            checkedChipValues("team-mcp-chips", editing?.mcp ?? []),
+            Boolean(editing?.builtin),
+          );
+        }
+      }
+    }
+  })().finally(() => {
+    if (capabilitiesLoadPromise === requestPromise) capabilitiesLoadPromise = null;
+  });
+  capabilitiesLoadPromise = requestPromise;
+  return requestPromise;
+}
+
+function loadCapabilities({ fresh = false } = {}) {
+  if (capabilitiesQueuedFreshPromise) {
+    if (fresh) {
+      capabilitiesFreshRequested = true;
+      if (capabilitiesLoadPromise) capabilitiesLoadEpoch += 1;
+    }
+    return capabilitiesQueuedFreshPromise;
+  }
+  if (!capabilitiesLoadPromise) {
+    capabilitiesFreshRequested = false;
+    return startCapabilitiesLoad();
+  }
+  if (!fresh) return capabilitiesLoadPromise;
+
+  capabilitiesFreshRequested = true;
+  capabilitiesLoadEpoch += 1;
+  const activeLoad = capabilitiesLoadPromise;
+  let queuedPromise;
+  queuedPromise = (async () => {
+    try {
+      let result = await activeLoad;
+      while (capabilitiesFreshRequested) {
+        capabilitiesFreshRequested = false;
+        result = await startCapabilitiesLoad();
+      }
+      return result;
+    } finally {
+      if (capabilitiesQueuedFreshPromise === queuedPromise) capabilitiesQueuedFreshPromise = null;
+    }
+  })();
+  capabilitiesQueuedFreshPromise = queuedPromise;
+  return capabilitiesQueuedFreshPromise;
+}
+
+function capabilitySourceButton(sourceId, label) {
+  if (!sourceId) return "";
+  return `<button class="icon-button cap-source-button" type="button" data-capability-source-id="${escapeHtml(sourceId)}" title="在真源编辑器中打开" aria-label="打开 ${escapeHtml(label)} 的相关真源"><svg class="icon lucide"><use href="#lucide-file-text"></use></svg></button>`;
+}
+
+async function openCapabilitySource(sourceId) {
+  if (!state.sources.length) {
+    try {
+      await loadSources();
+    } catch (error) {
+      toast(`真源索引读取失败：${error.message}`, "error", 6000);
+      return;
+    }
+  }
+  const source = state.sources.find((item) => item.id === sourceId) ?? null;
+  if (!source) {
+    toast(`未登记相关真源：${sourceId}`, "warning", 5000);
+    return;
+  }
+  await selectSource(source.id);
+  if (state.selectedSourceId !== source.id) return;
+  setView("config", { configSurface: "sources", focus: false });
+  runtimeSeatManager?.setMode("sources", { focus: false });
+  const heading = elements["editor-title"];
+  if (heading) {
+    heading.setAttribute("tabindex", "-1");
+    requestAnimationFrame(() => {
+      heading.scrollIntoView({ block: "start", behavior: "smooth" });
+      heading.focus({ preventScroll: true });
+    });
+  }
+}
+
+function renderCapabilities() {
+  const data = state.capabilitiesData;
+  if (!elements["cap-skills-body"]) return;
+  if (!data) {
+    const message = state.capabilitiesError ? `读取失败：${state.capabilitiesError}` : "正在扫描…";
+    elements["cap-agents-grid"].innerHTML = "";
+    elements["cap-skills-body"].innerHTML = `<tr><td colspan="6" class="subtle">${escapeHtml(message)}</td></tr>`;
+    elements["cap-mcp-body"].innerHTML = `<tr><td colspan="5" class="subtle">${escapeHtml(message)}</td></tr>`;
+    elements["cap-mcp-map"].innerHTML = "";
+    return;
+  }
+  const { skills, mcp } = data;
+  elements["cap-agents-grid"].innerHTML = (skills.agents ?? []).length
+    ? skills.agents
+        .map(
+          (agent) => `<div class="cap-agent-chip" title="${escapeHtml(agent.skill ?? "未挂 skill")}">
+            <strong>${escapeHtml(agent.name ?? agent.code)}</strong>
+            <span>${escapeHtml(agent.title ?? "")}</span>
+            <code>${escapeHtml(agent.code)}</code>
+          </div>`,
+        )
+        .join("")
+    : '<span class="subtle">module.yaml 花名册不可用</span>';
+  const registered = skills.items.filter((skill) => skill.registered).length;
+  const members = skills.memberIds ?? [];
+  const capabilityStatus = skills.configurationStatus ?? {};
+  const mcpStatus = mcp.configurationStatus ?? {};
+  const capabilityDegraded = capabilityStatus.failClosed === true;
+  elements["cap-skills-summary"].textContent = capabilityDegraded
+    ? `能力配置已降级：${capabilityStatus.message || capabilityStatus.code || "配置不可读"}。全部 Skill 声明已停用，修复配置前禁止派发。`
+    : `${skills.items.length} 个 skill（${registered} 已注册）· ${members.length} 个成员 · 勾选=向成员编排提示词声明（非工具沙箱）` +
+      (skills.registryStatus === "ok" ? "" : " · 注册表不可用（仅文件系统扫描）");
+  // 启停矩阵：行=skill，列=成员；checkbox 勾选=启用（负名单 disabledSkills 之外）
+  const states = skills.agentSkillStates ?? {};
+  const skillEnabled = (memberId, code) => !(states[memberId]?.disabledSkills ?? []).includes(code);
+  const memberWritable = (memberId) => !capabilityDegraded && states[memberId]?.failClosed !== true;
+  // 筛选只影响展示与批量作用域；统计始终按全集算，避免筛选后"覆盖率"读数失真
+  const filter = String(state.capabilityFilter ?? "").trim().toLowerCase();
+  const visible = filter
+    ? skills.items.filter((skill) => `${skill.code} ${skill.description ?? ""} ${skill.path ?? ""}`.toLowerCase().includes(filter))
+    : skills.items;
+  const totalCells = skills.items.length * members.length;
+  const declaredCells = skills.items.reduce(
+    (sum, skill) => sum + members.filter((id) => skillEnabled(id, skill.code)).length,
+    0,
+  );
+  if (elements["cap-skills-coverage"]) {
+    elements["cap-skills-coverage"].textContent = totalCells
+      ? `已声明 ${declaredCells}/${totalCells}`
+      : "无可声明项";
+    elements["cap-skills-coverage"].className = `status-label is-${totalCells && declaredCells === totalCells ? "ok" : "neutral"}`;
+  }
+  if (elements["cap-skills-scope"]) {
+    elements["cap-skills-scope"].textContent = filter
+      ? `筛选命中 ${visible.length}/${skills.items.length} 个 Skill · 批量只作用于命中项`
+      : "批量作用于全部 Skill × 全部成员";
+  }
+  elements["cap-skills-head"].innerHTML = `<tr><th scope="col">Skill</th>${members.map((id) => {
+    const label = agentLabel(id);
+    const columnDeclared = visible.filter((skill) => skillEnabled(id, skill.code)).length;
+    const allOn = visible.length > 0 && columnDeclared === visible.length;
+    return `<th scope="col" tabindex="-1" title="${escapeHtml(id)}" aria-label="${escapeHtml(label)} Skill 配置列" data-member-column="${escapeHtml(id)}" class="${id === state.configMemberFocusId ? "is-member-focus" : ""}">
+      <span class="cap-col-label">${escapeHtml(label)}</span>
+      <button type="button" class="cap-bulk-button" data-cap-column-toggle="${escapeHtml(id)}"${memberWritable(id) && visible.length ? "" : " disabled"} title="${allOn ? "取消该成员对当前列出 Skill 的全部声明" : "为该成员声明当前列出的全部 Skill"}" aria-label="${escapeHtml(label)} 整列${allOn ? "取消" : "声明"}">${columnDeclared}/${visible.length}</button>
+    </th>`;
+  }).join("")}</tr>`;
+  elements["cap-skills-body"].innerHTML = visible.length
+    ? visible
+        .map(
+          (skill) => {
+            const rowDeclared = members.filter((id) => skillEnabled(id, skill.code)).length;
+            const rowAllOn = members.length > 0 && rowDeclared === members.length;
+            return `<tr>
+            <td class="mono cap-skill-source" title="${escapeHtml(skill.description || skill.path)}"><span>${escapeHtml(skill.code)}${skill.registered ? "" : ' <span class="subtle">（未注册）</span>'}</span>${capabilitySourceButton(skill.sourceId, skill.code)}<button type="button" class="cap-bulk-button" data-cap-row-toggle="${escapeHtml(skill.code)}"${capabilityDegraded ? " disabled" : ""} title="${rowAllOn ? "对所有成员取消该 Skill 声明" : "对所有成员声明该 Skill"}" aria-label="${escapeHtml(skill.code)} 整行${rowAllOn ? "取消" : "声明"}">${rowDeclared}/${members.length}</button></td>
+            ${members
+              .map((id) => {
+                const enabled = skillEnabled(id, skill.code);
+                const disabled = !memberWritable(id);
+                const title = disabled
+                  ? "能力配置损坏或不可读，已按 fail-closed 停用"
+                  : "控制编排提示词中的 Skill 声明；真实调用仍受运行时权限约束";
+                return `<td class="cap-cell${id === state.configMemberFocusId ? " is-member-focus" : ""}" data-member-column="${escapeHtml(id)}"><input type="checkbox" data-skill-toggle="${escapeHtml(id)}::${escapeHtml(skill.code)}"${enabled ? " checked" : ""}${disabled ? " disabled" : ""} title="${escapeHtml(title)}" aria-label="${escapeHtml(agentLabel(id))} 声明 ${escapeHtml(skill.code)}" /></td>`;
+              })
+              .join("")}
+          </tr>`;
+          },
+        )
+        .join("")
+    : `<tr><td colspan="${members.length + 1}" class="subtle">${filter ? `没有匹配「${escapeHtml(filter)}」的 Skill` : "未扫描到 skill 目录"}</td></tr>`;
+  const ghosts = skills.ghostRegistrations ?? [];
+  elements["cap-skills-ghosts"].hidden = !ghosts.length;
+  elements["cap-skills-ghosts"].textContent = ghosts.length
+    ? `幽灵注册（注册表有而磁盘无）：${ghosts.map((ghost) => ghost.code).join("、")}——建议清理 module.yaml`
+    : "";
+  elements["cap-mcp-summary"].textContent = mcpStatus.failClosed
+    ? `MCP 启停已冻结 [${mcpStatus.code || "MCP_QUARANTINE_UNAVAILABLE"}]：${mcpStatus.message || "隔离配置不可用"}${mcpStatus.causeCode ? `（${mcpStatus.causeCode}）` : ""}`
+    : `${mcp.servers.length} 个声明 · ${mcp.sources.length} 个来源文件`;
+  elements["cap-mcp-body"].innerHTML = mcp.servers.length
+    ? mcp.servers
+        .map(
+          (server) => `<tr${server.disabled ? ' class="is-disabled-row"' : ""}>
+            <td class="mono">${escapeHtml(server.name)}${server.disabled ? ' <span class="hidden-badge">已禁用</span>' : ""}</td>
+            <td>${escapeHtml(server.transport)}</td>
+            <td class="mono">${escapeHtml(server.command ?? server.urlHost ?? "—")}</td>
+            <td>${escapeHtml(server.scope)}</td>
+            <td class="mono cap-path" title="${escapeHtml(server.source)}"><span>${escapeHtml(server.source.split(/[\\/]/).pop())}</span>${capabilitySourceButton(server.sourceId, server.name)}</td>
+            <td>${mcpActionMarkup(server, mcp)}</td>
+          </tr>`,
+        )
+        .join("")
+    : `<tr><td colspan="6" class="subtle">未扫描到 MCP 声明</td></tr>`;
+  elements["cap-mcp-map"].innerHTML = (mcp.capabilityMap ?? []).length
+    ? `<p class="subtle">514cc 能力映射（module.yaml 策展层）：</p>` +
+      mcp.capabilityMap
+        .map((entry) => `<span class="cap-map-entry">${escapeHtml(entry.capability)} → ${escapeHtml(Array.isArray(entry.servers) ? entry.servers.join("、") : String(entry.servers))}</span>`)
+        .join("")
+    : "";
+}
+
+function focusMemberCapabilityColumn(memberId) {
+  if (!memberId) return false;
+  const heading = elements["cap-skills-head"]?.querySelector(`[data-member-column="${CSS.escape(memberId)}"]`);
+  if (!heading) return false;
+  requestAnimationFrame(() => {
+    if (state.configMemberFocusId !== memberId || state.view !== "config" || state.configSurface !== "capabilities") return;
+    const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches === true;
+    heading.scrollIntoView({ block: "nearest", inline: "center", behavior: reduceMotion ? "auto" : "smooth" });
+    heading.focus({ preventScroll: true });
+  });
+  return true;
+}
+
+function focusConfigSurfaceHeading(surface) {
+  const heading = byId(`config-surface-${surface}`)?.querySelector("h2");
+  if (!heading) return;
+  heading.setAttribute("tabindex", "-1");
+  requestAnimationFrame(() => {
+    if (state.view === "config" && state.configSurface === surface) heading.focus({ preventScroll: true });
+  });
+}
+
+async function openMemberConfigTarget({ surface, memberId, runtimeProfileId, create = false } = {}) {
+  const targetEpoch = ++memberConfigTargetEpoch;
+  if (surface === "capabilities") {
+    state.configMemberFocusId = memberId || null;
+    state.configRuntimeFocusId = runtimeProfileId || null;
+    setView("config", {
+      configSurface: "capabilities",
+      focus: false,
+      preserveMemberTarget: true,
+    });
+    const cachedMembers = state.capabilitiesData?.skills?.memberIds ?? [];
+    let loadResult = successfulLoadResult(state.capabilitiesData, { cached: true });
+    if (!memberId || !cachedMembers.includes(memberId)) {
+      loadResult = await loadCapabilities({ fresh: true });
+    }
+    if (targetEpoch !== memberConfigTargetEpoch) return;
+    renderCapabilities();
+    if (loadResultFailed(loadResult)) {
+      focusConfigSurfaceHeading("capabilities");
+      toast(`Skill / MCP 读取失败：${loadResult.error?.message || "未知错误"}`, "error", 6000);
+      return;
+    }
+    if (!focusMemberCapabilityColumn(memberId)) {
+      focusConfigSurfaceHeading("capabilities");
+      toast("该成员尚未进入 Skill 配置目录", "warning");
+    }
+    return;
+  }
+
+  if (!runtimeProfileId && !create) {
+    toast("当前成员尚未绑定运行席位", "warning");
+    return;
+  }
+  state.configMemberFocusId = memberId || null;
+  state.configRuntimeFocusId = runtimeProfileId || null;
+  setView("config", {
+    configSurface: "sources",
+    focus: false,
+    preserveMemberTarget: true,
+  });
+  try {
+    if (!runtimeSeatManager) throw new Error("运行席位管理器尚未初始化");
+    runtimeSeatManager.setMode("seats", { focus: false });
+    if (create) await runtimeSeatManager.create();
+    else {
+      await runtimeSeatManager.load();
+      const found = await runtimeSeatManager.focus(runtimeProfileId);
+      if (!found) toast(`运行席位目录中未找到 ${runtimeProfileId}`, "warning");
+    }
+    if (targetEpoch !== memberConfigTargetEpoch) return;
+  } catch (error) {
+    if (targetEpoch !== memberConfigTargetEpoch) return;
+    focusConfigSurfaceHeading("sources");
+    toast(`运行席位读取失败：${error.message}`, "error");
+  }
+}
+
+// MCP 行操作：claude.json 全局 server 可隔离启停（禁用=移隔离区可恢复）；其他来源如实只读
+function mcpActionMarkup(server, mcp) {
+  const writable = server.scope === "全局" && server.source.endsWith(".claude.json");
+  if (!writable) return '<span class="subtle">只读</span>';
+  const action = server.disabled ? "enable" : "disable";
+  const label = server.disabled ? "恢复" : "禁用";
+  const degraded = mcp.configurationStatus?.failClosed === true;
+  const title = degraded ? `MCP 启停已冻结：${mcp.configurationStatus.message || mcp.configurationStatus.code || "隔离配置不可用"}` : "";
+  return `<button class="text-button" type="button" data-mcp-toggle="${escapeHtml(server.name)}::${action}" data-mcp-source="${escapeHtml(server.source)}" data-mcp-mtime="${Number(mcp.claudeJsonMtimeMs) || ""}"${degraded ? ` disabled aria-describedby="cap-mcp-summary" title="${escapeHtml(title)}"` : ""}>${label}</button>`;
+}
+
+async function toggleMcp(button) {
+  const mcpStatus = state.capabilitiesData?.mcp?.configurationStatus ?? {};
+  if (mcpStatus.failClosed) {
+    button.disabled = true;
+    toast(`MCP 启停已冻结：${mcpStatus.message || mcpStatus.code || "隔离配置不可用"}`, "error", 6000);
+    return;
+  }
+  const [name, action] = String(button.dataset.mcpToggle).split("::");
+  if (action === "disable") {
+    const verdict = await confirmAction({
+      eyebrow: "MCP 启停",
+      title: `禁用「${name}」？`,
+      rows: [
+        ["方式", "移入控制面隔离区（可从本页一键恢复，不是删除）"],
+        ["影响", "禁用后 Claude Code 新会话不再加载该 server"],
+      ],
+      warning: "若 Claude Code 正在运行，它可能并发回写 .claude.json 覆盖本次修改——建议关闭 Claude Code 后操作。",
+      confirmLabel: "禁用",
+    });
+    if (!verdict) return;
+  }
+  button.disabled = true;
+  try {
+    await request("/api/capabilities/mcp/toggle", {
+      method: "POST",
+      body: { name, source: button.dataset.mcpSource, action, knownMtimeMs: button.dataset.mcpMtime || undefined },
+    });
+    toast(action === "disable" ? `已禁用 ${name}（隔离区可恢复）` : `已恢复 ${name}`, "success");
+  } catch (error) {
+    toast(`操作失败：${error.message}`, "error", 6000);
+  }
+  button.disabled = false;
+  void loadCapabilities();
+}
+
+/** 当前筛选命中的 skill（与矩阵渲染同一口径，保证"看到什么就批量什么"）。 */
+function visibleSkillItems() {
+  const items = state.capabilitiesData?.skills?.items ?? [];
+  const filter = String(state.capabilityFilter ?? "").trim().toLowerCase();
+  if (!filter) return items;
+  return items.filter((skill) => `${skill.code} ${skill.description ?? ""} ${skill.path ?? ""}`.toLowerCase().includes(filter));
+}
+
+/** 只收集"当前状态与目标不同"的格子——已是目标状态的不重复提交，批量条数即真实变更数。 */
+function skillMatrixTargets({ memberId = null, skillCode = null, enabled }) {
+  const skills = state.capabilitiesData?.skills;
+  if (!skills || skills.configurationStatus?.failClosed === true) return [];
+  const states = skills.agentSkillStates ?? {};
+  const members = (memberId ? [memberId] : skills.memberIds ?? [])
+    .filter((id) => states[id]?.failClosed !== true);
+  const items = skillCode
+    ? (skills.items ?? []).filter((skill) => skill.code === skillCode)
+    : visibleSkillItems();
+  const targets = [];
+  for (const skill of items) {
+    for (const id of members) {
+      const current = !(states[id]?.disabledSkills ?? []).includes(skill.code);
+      if (current !== enabled) targets.push({ agentId: id, skill: skill.code });
+    }
+  }
+  return targets;
+}
+
+/**
+ * 矩阵批量声明：复用单条 PUT 原子接口（不新增批量写面），受控并发 + 逐条失败回报。
+ * 一次可能改动上百条声明，因此按影响面二次确认；部分失败如实分开报，不伪装整批成功。
+ */
+async function applySkillMatrixBulk(targets, enabled, scopeLabel) {
+  if (!targets.length) {
+    toast("这些格子已经是目标状态，无需变更", "info", 2400);
+    return;
+  }
+  const proceed = await confirmAction({
+    eyebrow: "批量 Skill 声明",
+    title: `${enabled ? "声明" : "取消"} ${targets.length} 条 Skill？`,
+    rows: [
+      ["作用范围", scopeLabel],
+      ["实际变更", `${targets.length} 条（已是目标状态的不重复提交）`],
+      ["生效面", "编排提示词中的 Skill 声明；不改变运行时权限与工具沙箱"],
+    ],
+    warning: enabled ? "" : "取消后这些成员的编排提示词将不再声明对应 Skill。",
+    confirmLabel: enabled ? "全部声明" : "全部取消",
+    danger: !enabled,
+  });
+  if (!proceed) return;
+  const failures = [];
+  const queue = [...targets];
+  const states = state.capabilitiesData?.skills?.agentSkillStates ?? {};
+  await Promise.all(Array.from({ length: Math.min(4, queue.length) }, async () => {
+    while (queue.length) {
+      const target = queue.shift();
+      try {
+        await request("/api/capabilities/agent-skill", { method: "PUT", body: { agentId: target.agentId, skill: target.skill, enabled } });
+        const entry = states[target.agentId];
+        if (entry) {
+          const list = new Set(entry.disabledSkills ?? []);
+          if (enabled) list.delete(target.skill);
+          else list.add(target.skill);
+          entry.disabledSkills = [...list];
+        }
+      } catch (error) {
+        failures.push(`${agentLabel(target.agentId)} / ${target.skill}：${error.message}`);
+      }
+    }
+  }));
+  renderCapabilities();
+  if (failures.length) {
+    toast(`${targets.length - failures.length} 条已应用，${failures.length} 条失败`, "error", 8000);
+    appendDiagnostic(`Skill 批量声明部分失败：\n${failures.slice(0, 8).join("\n")}${failures.length > 8 ? `\n…另有 ${failures.length - 8} 条` : ""}`, "error");
+  } else {
+    toast(`${targets.length} 条 Skill 声明已${enabled ? "应用" : "取消"}`, "success", 3000);
+  }
+}
+
+async function toggleAgentSkill(checkbox) {
+  const [agentId, skill] = String(checkbox.dataset.skillToggle).split("::");
+  const enabled = checkbox.checked;
+  checkbox.disabled = true;
+  try {
+    await request("/api/capabilities/agent-skill", { method: "PUT", body: { agentId, skill, enabled } });
+    const states = state.capabilitiesData?.skills?.agentSkillStates;
+    if (states?.[agentId]) {
+      const list = new Set(states[agentId].disabledSkills ?? []);
+      if (enabled) list.delete(skill);
+      else list.add(skill);
+      states[agentId].disabledSkills = [...list];
+    }
+    toast(`${agentLabel(agentId)} ${enabled ? "启用" : "禁用"} ${skill}`, "success", 2000);
+  } catch (error) {
+    checkbox.checked = !enabled; // 失败回滚勾选态
+    toast(`保存失败：${error.message}`, "error", 5000);
+  }
+  checkbox.disabled = false;
+}
+
 function renderOverview() {
+  if (state.view !== "overview") return;
   const okCount = state.components.filter((item) => normalizeStatus(item.status) === "ok").length;
   const errorCount = state.components.filter((item) => normalizeStatus(item.status) === "error").length;
   const activeRuns = state.runs.filter((run) => ACTIVE_RUN_STATES.has(run.status));
@@ -1099,16 +3993,17 @@ function renderOverview() {
     ? state.components
         .map((item) => {
           const status = normalizeStatus(item.status);
+          const label = statusText(item.rawStatus ?? item.status); // 原始态专属文案（待命/未安装/未配置）
           return `
             <div class="health-row">
               <div class="health-main">
                 <span class="status-dot is-${status}" aria-hidden="true"></span>
                 <div>
                   <strong>${escapeHtml(item.name)}</strong>
-                  <span>${escapeHtml(item.detail || statusText(status))}</span>
+                  <span>${escapeHtml(item.detail || label)}</span>
                 </div>
               </div>
-              <span class="health-latency">${item.latency == null ? statusText(status) : formatDuration(item.latency)}</span>
+              <span class="health-latency">${escapeHtml(label)}${item.latency == null ? "" : ` · ${formatDuration(item.latency)}`}</span>
             </div>`;
         })
         .join("")
@@ -1138,8 +4033,395 @@ function renderOverview() {
   elements["event-sequence"].textContent = `seq ${state.events[0]?.seq ?? "--"}`;
 }
 
-function emptyMarkup(title, detail = "") {
-  return `<div class="empty-state"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(detail)}</span></div>`;
+function emptyMarkup(title, detail = "", streamKey = "") {
+  const keyAttribute = streamKey ? ` data-stream-key="${escapeHtml(streamKey)}"` : "";
+  return `<div class="empty-state"${keyAttribute}><strong>${escapeHtml(title)}</strong><span>${escapeHtml(detail)}</span></div>`;
+}
+
+// agent 徽标选择器：项目内新建会话后，只允许选择真实 CLI 成员。
+function agentPickerMarkup() {
+  const team = teamById(state.selectedTeamId || defaultTeamId()) ?? state.teams.find((item) => item.builtin);
+  const members = team?.members?.length
+    ? team.members
+    : ["claude-fable", "codex-technical", "grok-search", "grok-build", "kimi-frontend", "gemini-research", "pi-resident"];
+  const coordinator = team?.coordinator ?? members[0];
+  const cards = members
+    .map((id) => {
+      const cli = agentCli(id);
+      const logo = cli ? cliIconMarkup(cli, "cli-logo") : `<span class="agent-pick-fallback">${escapeHtml(AGENT_SHORT[id] ?? "??")}</span>`;
+      return `<button class="agent-pick-card is-agent-${agentSlug(id)}" type="button" data-pick-agent="${escapeHtml(id)}" title="直接发送给 ${escapeHtml(agentLabel(id))}">
+        <span class="agent-pick-logo" aria-hidden="true">${logo}</span>
+        <strong>${escapeHtml(agentLabel(id))}</strong>
+        <span>${id === coordinator ? "团队主脑 · 直接发送" : "直达成员 CLI"}</span>
+      </button>`;
+    })
+    .join("");
+  return `
+    <div class="empty-state welcome-state" data-stream-key="empty:agent-picker">
+      <h2 class="welcome-hero is-picker">发送给谁？</h2>
+      <span class="welcome-sub">选择成员即直达其 CLI，并使用该成员专属的模型、Effort、权限与命令</span>
+      <div class="agent-pick-grid">${cards}</div>
+    </div>`;
+}
+// 欢迎空态快捷任务模板（codeg Quick Actions 对标 + 514 多 CLI 团队强化）
+// 只填不提交，LO 改完再发；模板措辞含体系纪律：证据优先、四节评审、隔离构建先计划
+const QUICK_TASK_TEMPLATES = [
+  {
+    icon: "scan-search",
+    title: "深度评审",
+    detail: "烛独立审视 · file:line 证据",
+    category: "review",
+    startAgent: "codex-technical",
+    prompt: "请对当前项目做一次深度代码评审：找出致命问题与架构风险，逐条给出 file:line 证据，按「致命问题 / 建议改进 / 可保留 / 总评」四节输出。",
+  },
+  {
+    icon: "telescope",
+    title: "调研问路",
+    detail: "织拉情报 · 结论必附来源",
+    category: "research",
+    startAgent: "grok-search",
+    prompt: "帮我调研以下主题的最新实践与可行方案，事实先于观点、结论必须附来源：\n\n<在这里填写主题>",
+  },
+  {
+    icon: "hammer",
+    title: "隔离构建",
+    detail: "工作树写码 · 先计划后动手",
+    category: "build",
+    startAgent: null,
+    prompt: "请在隔离工作树中实现以下功能：先输出实现计划与验收标准，经我确认后再动手写码；禁止声称未验证的完成。\n\n<在这里填写功能>",
+  },
+  {
+    icon: "users",
+    title: "团队会诊",
+    detail: "多 CLI 社会编排 · 各司其职",
+    category: "collab",
+    startAgent: null,
+    prompt: "请以团队协作方式处理以下目标：由当前团队主脑规划拆解，根据已选成员的职责与真实能力派工，最终由主脑收敛并给出可验证结论。\n\n目标：\n",
+  },
+];
+
+// 成员角色一句话（欢迎星图 / 命令面板共用；与治理身份绑定，不是 provider 广告词）
+// 真源：modules/agent-roles.js —— 此处兼容旧引用
+const AGENT_ROLE_BLURB = MODULE_AGENT_ROLE_BLURB;
+
+function currentTeamMembers() {
+  const team = teamById(state.selectedTeamId || defaultTeamId()) ?? state.teams.find((item) => item.builtin);
+  const members = team?.members?.length
+    ? team.members
+    : ["claude-fable", "codex-technical", "grok-search", "grok-build", "kimi-frontend", "pi-resident"];
+  return {
+    team,
+    members,
+    coordinator: team?.coordinator ?? members[0],
+    name: team?.name || "514cc",
+  };
+}
+
+// codeg WelcomeTip：目录抽到 modules/welcome-tips.js，这里只负责注入 lucide 图标
+function welcomeTipMarkup() {
+  return buildWelcomeTipMarkup({ iconHtml: lucideIcon("sparkles", "icon lucide") });
+}
+
+function teamConstellationMarkup() {
+  const { members, coordinator, name } = currentTeamMembers();
+  const orbit = members.map((id, index) => {
+    const cli = agentCli(id);
+    const logo = cli ? cliIconMarkup(cli, "cli-logo") : `<span class="agent-pick-fallback">${escapeHtml(AGENT_SHORT[id] ?? "??")}</span>`;
+    const isLeader = id === coordinator;
+    // 环形布局：leader 居中视觉焦点，其余均分圆周（纯 CSS 变量驱动，无 JS 动画依赖）
+    const peers = Math.max(members.length - (members.includes(coordinator) ? 1 : 0), 1);
+    const peerIndex = members.filter((item) => item !== coordinator).indexOf(id);
+    const angle = isLeader ? 0 : (peerIndex >= 0 ? peerIndex : index) * (360 / peers) - 90;
+    return `<button class="constellation-chip is-agent-${agentSlug(id)}${isLeader ? " is-leader" : " is-orbit"}" type="button"
+      data-pick-agent="${escapeHtml(id)}"
+      data-orbit-angle="${angle}"
+      title="直接发送给 ${escapeHtml(agentLabel(id))}">
+      <span class="constellation-logo" aria-hidden="true">${logo}</span>
+      <span class="constellation-copy">
+        <strong>${escapeHtml(agentLabel(id))}${isLeader ? " · leader" : ""}</strong>
+        <span>${escapeHtml(AGENT_ROLE_BLURB[id] || cliLabel(cli) || "成员")}</span>
+      </span>
+      ${cli ? `<span class="constellation-cli-tag">${escapeHtml(cliLabel(cli))}</span>` : ""}
+    </button>`;
+  }).join("");
+  return `
+    <div class="team-constellation" role="group" aria-label="当前团队 ${escapeHtml(name)}">
+      <div class="constellation-head">
+        <span class="constellation-kicker">异构 CLI 团队</span>
+        <strong>${escapeHtml(name)}</strong>
+        <span class="constellation-meta">${members.length} 席 · 原生会话互不抹平 · 治理身份 ≠ Provider</span>
+      </div>
+      <div class="constellation-stage" data-member-count="${members.length}">
+        <div class="constellation-orbit-ring" aria-hidden="true"></div>
+        <div class="constellation-grid">${orbit}</div>
+      </div>
+      <div class="constellation-legend" aria-hidden="true">
+        <span><i class="lg-dot is-leader"></i>Leader 收敛</span>
+        <span><i class="lg-dot is-route"></i>可寻址路由</span>
+        <span><i class="lg-dot is-lease"></i>审批=租约</span>
+      </div>
+      <p class="constellation-hint">点击成员即切换直接发送目标；<kbd>@</kbd> 仅点名协作成员 · <kbd>/</kbd> 切换当前 CLI 控件</p>
+    </div>`;
+}
+
+function welcomeTemplatesMarkup() {
+  const category = state.welcomeCategory || "all";
+  const categories = [
+    { id: "all", label: "全部" },
+    { id: "collab", label: "协作" },
+    { id: "review", label: "评审" },
+    { id: "research", label: "调研" },
+    { id: "build", label: "构建" },
+  ];
+  const tabs = categories.map((item) => `
+    <button class="welcome-cat${category === item.id ? " is-active" : ""}" type="button" data-welcome-cat="${escapeHtml(item.id)}">
+      ${escapeHtml(item.label)}
+    </button>`).join("");
+  const cards = QUICK_TASK_TEMPLATES
+    .filter((tpl) => category === "all" || tpl.category === category)
+    .map(
+      (tpl) => `
+      <button class="template-card is-cat-${escapeHtml(tpl.category)}" type="button"
+        data-quick-template="${escapeHtml(tpl.prompt)}"
+        data-quick-start-agent="${escapeHtml(tpl.startAgent || "")}">
+        <span class="template-icon" aria-hidden="true">${lucideIcon(tpl.icon, "icon lucide")}</span>
+        <strong>${escapeHtml(tpl.title)}</strong>
+        <span>${escapeHtml(tpl.detail)}</span>
+        ${tpl.startAgent ? `<em class="template-start">${escapeHtml(agentLabel(tpl.startAgent))}</em>` : ""}
+      </button>`,
+    ).join("");
+  // codeg 式 hero + tip + 分类 Quick Actions + 514 多 CLI 团队星图（本系统差异化）
+  return `
+    <div class="empty-state welcome-state" data-stream-key="empty:welcome">
+      <h2 class="welcome-hero">LO，今天想<span class="hero-accent">做</span>点什么？</h2>
+      <span class="welcome-sub">一个控制面，多套<strong>真实 CLI 进程</strong>各保边界——规划、评审、情报、前端同房间协作；路由、审批与证据可回放。</span>
+      ${welcomeTipMarkup()}
+      ${teamConstellationMarkup()}
+      <div class="welcome-section-label">快速开始</div>
+      <div class="welcome-cats" role="tablist" aria-label="任务模板分类">${tabs}</div>
+      <div class="welcome-templates">${cards || `<div class="empty-state compact-empty"><span>该分类暂无模板</span></div>`}</div>
+    </div>`;
+}
+
+// ── 命令面板扩展项（v4.0 Forge）：注入 command-palette.js 的 extraItems ──
+// 视图导航由面板模块从 VIEW_TITLES 自动同步；这里只补面板本身没有的协作/权限/模板动作。
+const FORGE_PALETTE_EXTRA_ITEMS = () => [
+  {
+    id: "task:new",
+    group: "协作",
+    label: "新建任务",
+    detail: "清空选中会话，进入新任务输入",
+    icon: "plus",
+    keywords: "new task 新建 任务",
+    run: () => {
+      state.selectedRunId = null;
+      state.selectionClearedByUser = true;
+      state.activeTabKey = null;
+      persistTabs();
+      renderTabs();
+      state.agentPickerOpen = false;
+      renderSelectedRun();
+      elements["task-input"]?.focus({ preventScroll: true });
+    },
+  },
+  {
+    id: "team:manage",
+    group: "协作",
+    label: "团队工作区",
+    detail: "查看运行态并配置团队",
+    icon: "users",
+    keywords: "team 团队 管理 members",
+    run: () => {
+      const team = teamById(state.selectedTeamId) || state.teams.find((item) => item.builtin) || state.teams[0];
+      if (team) void openTeamWorkspace(team);
+      else toast("团队尚未加载", "error");
+    },
+  },
+  {
+    id: "auto:save",
+    group: "协作",
+    label: "存为自动化",
+    detail: "把当前 composer 快照存为可定时任务",
+    icon: "archive",
+    keywords: "automation 自动化 cron",
+    run: () => byId("save-automation-button")?.click(),
+  },
+  {
+    id: "auto:manage",
+    group: "协作",
+    label: "管理自动化",
+    detail: "编辑计划、权限、历史与取消运行",
+    icon: "timer",
+    keywords: "automation manage 自动化 管理 历史",
+    run: () => openAutomationManager(),
+  },
+  {
+    id: "mode:review",
+    group: "权限",
+    label: "切换 Review 深审",
+    detail: "只读深审模式，禁止写盘",
+    icon: "eye",
+    keywords: "review permission 权限 深审",
+    run: () => {
+      if (elements["task-permission"]) elements["task-permission"].value = "review";
+      syncPermissionPill();
+      toast("权限：Review · 深审", "info", 1800);
+    },
+  },
+  ...QUICK_TASK_TEMPLATES.map((tpl) => ({
+    id: `tpl:${tpl.category}:${tpl.title}`,
+    group: "模板",
+    label: tpl.title,
+    detail: tpl.detail,
+    icon: "lightbulb",
+    keywords: `${tpl.title} ${tpl.detail} template ${tpl.category}`,
+    run: () => applyQuickTemplate(tpl.prompt, tpl.startAgent),
+  })),
+];
+
+function applyQuickTemplate(prompt, startAgent) {
+  state.requestedAgentIds = [];
+  renderRequestedAgentChips();
+  let appliedStartAgent = null;
+  if (elements["task-input"]) {
+    elements["task-input"].value = prompt;
+    elements["task-input"].dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  if (startAgent && activeComposerTarget().members.includes(startAgent)) {
+    selectComposerTarget(startAgent, { focusInput: false });
+    appliedStartAgent = startAgent;
+  }
+  setView("workbench");
+  elements["task-input"]?.focus({ preventScroll: true });
+  toast(appliedStartAgent ? `模板已填入 · 直接发送给 ${agentLabel(appliedStartAgent)}` : "模板已填入任务内容，可修改后发送", "info", 2400);
+}
+
+// ── @ 成员提及：结构化协作点名，与直接收件人目标标签严格分离 ──
+function hideMentionMenu() {
+  const menu = byId("mention-menu");
+  if (menu) {
+    menu.hidden = true;
+    menu.innerHTML = "";
+  }
+  state.mentionActive = false;
+  state.mentionIndex = -1;
+  state.mentionCandidates = [];
+}
+
+function mentionQueryAtCursor(textarea) {
+  if (!textarea) return null;
+  const value = textarea.value;
+  const caret = textarea.selectionStart ?? value.length;
+  const before = value.slice(0, caret);
+  const match = before.match(/(^|[\s\n])@([\w\u4e00-\u9fff-]*)$/);
+  if (!match) return null;
+  return { start: caret - match[2].length - 1, end: caret, query: match[2].toLowerCase() };
+}
+
+function renderMentionMenu() {
+  const menu = byId("mention-menu");
+  const textarea = elements["task-input"];
+  if (!menu || !textarea) return;
+  const hit = mentionQueryAtCursor(textarea);
+  if (!hit) {
+    hideMentionMenu();
+    return;
+  }
+  const { members, coordinator } = currentTeamMembers();
+  const candidates = members
+    .map((id) => ({
+      id,
+      label: agentLabel(id),
+      role: AGENT_ROLE_BLURB[id] || "",
+      isLeader: id === coordinator,
+    }))
+    .filter((item) => {
+      if (!hit.query) return true;
+      return `${item.label} ${item.id} ${item.role}`.toLowerCase().includes(hit.query);
+    });
+  if (!candidates.length) {
+    hideMentionMenu();
+    return;
+  }
+  state.mentionActive = true;
+  state.mentionCandidates = candidates;
+  state.mentionIndex = 0;
+  state.mentionRange = hit;
+  menu.hidden = false;
+  menu.innerHTML = candidates.map((item, index) => {
+    const cli = agentCli(item.id);
+    const logo = cli ? cliIconMarkup(cli, "cli-logo") : "";
+    return `<button class="mention-item${index === 0 ? " is-active" : ""} is-agent-${agentSlug(item.id)}" type="button" data-mention-id="${escapeHtml(item.id)}">
+      <span class="mention-logo" aria-hidden="true">${logo}</span>
+      <span class="mention-copy">
+        <strong>${escapeHtml(item.label)}${item.isLeader ? " · leader" : ""}</strong>
+        <span>${escapeHtml(item.role)}</span>
+      </span>
+    </button>`;
+  }).join("");
+}
+
+function applyMention(agentId) {
+  const textarea = elements["task-input"];
+  const range = state.mentionRange;
+  if (!textarea || !range || !agentId) return;
+  const continuing = Boolean(selectedRun() && !TERMINAL_RUN_STATES.has(selectedRun().status));
+  if (!continuing
+    && !state.requestedAgentIds.includes(agentId)
+    && state.requestedAgentIds.length >= MAX_REQUESTED_AGENTS) {
+    hideMentionMenu();
+    toast(`一次最多点名 ${MAX_REQUESTED_AGENTS} 个 Agent`, "warning", 2400);
+    textarea.focus({ preventScroll: true });
+    return;
+  }
+  const label = agentLabel(agentId);
+  const before = textarea.value.slice(0, range.start);
+  const after = textarea.value.slice(range.end);
+  const insert = `@${label} `;
+  textarea.value = `${before}${insert}${after}`;
+  const caret = before.length + insert.length;
+  textarea.setSelectionRange(caret, caret);
+  textarea.dispatchEvent(new Event("input", { bubbles: true }));
+
+  // @ 是新任务的结构化协作点名，不得覆盖“活动目标标签 = 直接收件人”。
+  if (!continuing) {
+    state.requestedAgentIds = addRequestedAgentId(state.requestedAgentIds, agentId);
+    renderRequestedAgentChips();
+  }
+  hideMentionMenu();
+  textarea.focus({ preventScroll: true });
+  toast(`已点名 ${label}`, "success", 1800);
+}
+
+function renderRequestedAgentChips() {
+  const container = byId("composer-collaborators");
+  if (!container) return;
+  const ids = [...state.requestedAgentIds];
+  container.hidden = ids.length === 0;
+  container.innerHTML = ids.length
+    ? `<span class="composer-collaborator-label">${lucideIcon("users", "icon lucide")} 额外协作者</span>${ids.map((id) => {
+        const cli = agentCli(id);
+        return `<span class="composer-collaborator-chip is-agent-${agentSlug(id)}">
+          <span aria-hidden="true">${cli ? cliIconMarkup(cli, "cli-logo") : lucideIcon("terminal", "icon lucide")}</span>
+          <span>${escapeHtml(agentLabel(id))}</span>
+          <button type="button" data-requested-agent-remove="${escapeHtml(id)}" title="移除额外协作者" aria-label="移除额外协作者 ${escapeHtml(agentLabel(id))}">${lucideIcon("x", "icon lucide")}</button>
+        </span>`;
+      }).join("")}`
+    : "";
+}
+
+function removeRequestedAgent(agentId, { focusInput = true } = {}) {
+  const id = String(agentId || "");
+  if (!id || !state.requestedAgentIds.includes(id)) return;
+  state.requestedAgentIds = state.requestedAgentIds.filter((candidate) => candidate !== id);
+  const input = elements["task-input"];
+  if (input) {
+    input.value = removeRequestedAgentMention(input.value, agentLabel(id));
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+  } else {
+    renderRequestedAgentChips();
+  }
+  if (focusInput) input?.focus({ preventScroll: true });
 }
 
 // 配置源格式徽标：slice(0,4) 会截出 MARK/PYTH 这种残词，改用可读缩写表
@@ -1171,7 +4453,7 @@ function runRowMarkup(run, clickable = false) {
         <strong>${escapeHtml(run.title || "未命名任务")}</strong>
         <span>${escapeHtml(run.risk === "unknown" ? "风险未标注" : `${run.risk} risk`)} · ${escapeHtml(formatDate(run.updatedAt ?? run.createdAt))}</span>
       </div>
-      <span class="run-status is-${escapeHtml(statusClass)}">${escapeHtml(runStatusText(run.status))}</span>
+      <span class="run-status is-${escapeHtml(statusClass)}">${escapeHtml(runStatusText(run.status, run))}</span>
     </div>`;
 }
 
@@ -1179,33 +4461,137 @@ function pinMarkup() {
   return `<svg class="pin-mark" viewBox="0 0 24 24" aria-label="已置顶"><path d="${MENU_ICONS.pin}" /></svg>`;
 }
 
+// 会话行状态点色调：左栏一眼扫出哪些活着/等你/挂了（精致化波次——状态从文字变信号）
+function runStatusTone(run) {
+  if (["failed"].includes(run.status)) return "red";
+  if (run.status === "recovery_required") return "red";
+  if (run.status === "waiting_approval") return "amber";
+  if (run.pendingAsk && !TERMINAL_RUN_STATES.has(run.status)) return "amber";
+  if (["running", "queued"].includes(run.status)) return "live";
+  if (run.status === "waiting_agent") return "live";
+  if (["succeeded", "completed", "complete"].includes(run.status)) return "green";
+  return "neutral"; // cancelled 等
+}
+
 function railRunMarkup(run) {
+  const waitingAnswer = Boolean(run.pendingAsk) && !TERMINAL_RUN_STATES.has(run.status); // ask 挂起：琥珀点（终态残留不亮）
   return `
-    <button class="rail-run-button${run.id === state.selectedRunId ? " is-selected" : ""}${run.unread ? " is-unread" : ""}" type="button" data-run-select="${escapeHtml(run.id)}">
-      <strong>${run.unread ? `<span class="unread-dot" aria-label="未读"></span>` : ""}${run.pinned ? pinMarkup() : ""}${escapeHtml(run.title)}</strong>
-      <span>${escapeHtml(runStatusText(run.status))}${run.teamName ? ` · ${escapeHtml(run.teamName)}` : ""} · ${escapeHtml(formatDate(run.updatedAt ?? run.createdAt))}</span>
-    </button>`;
+    <div class="rail-run-row">
+      <button class="rail-run-button${run.id === state.selectedRunId ? " is-selected" : ""}${run.unread ? " is-unread" : ""}${waitingAnswer ? " is-waiting-answer" : ""}" type="button" data-run-select="${escapeHtml(run.id)}">
+        <span class="rail-status-dot is-${runStatusTone(run)}" aria-hidden="true"></span>
+        <strong>${run.unread ? `<span class="unread-dot" aria-label="未读"></span>` : ""}${waitingAnswer ? `<span class="ask-dot" aria-label="等你回答"></span>` : ""}${run.pinned ? pinMarkup() : ""}${escapeHtml(run.title)}</strong>
+        <span title="${escapeHtml(formatDate(run.updatedAt ?? run.createdAt))}">${escapeHtml(runStatusText(run.status, run))}${run.teamName ? ` · ${escapeHtml(run.teamName)}` : ""} · ${escapeHtml(formatRelative(run.updatedAt ?? run.createdAt))}</span>
+      </button>
+      ${menuTriggerMarkup("run", run.id, `打开「${run.title}」任务菜单`)}
+    </div>`;
 }
 
 function renderRuns() {
-  // 左栏分区（互斥）：会话=普通任务；正在工作=活跃 run；置顶=手动置顶的非活跃 run；归档不显示
-  const visible = state.runs.filter((run) => !run.archived);
+  // 已清除 run 的页签如实关闭（clearFinished/重启后 run 不存在）
+  const existingRunIds = new Set(state.runs.map((run) => run.id));
+  if (state.tabs.some((tab) => !existingRunIds.has(tab.runId))) {
+    const removedRunIds = [...new Set(state.tabs.filter((tab) => !existingRunIds.has(tab.runId)).map((tab) => tab.runId))];
+    state.tabs = state.tabs.filter((tab) => existingRunIds.has(tab.runId));
+    if (state.activeTabKey && !state.tabs.some((tab) => tab.key === state.activeTabKey)) {
+      state.activeTabKey = state.tabs.at(-1)?.key ?? null;
+      state.selectedRunId = activeTab()?.runId ?? null;
+    }
+    persistTabs();
+    renderTabs();
+    renderMemberStrip();
+    for (const runId of removedRunIds) releaseRunHistoryIfUnreferenced(runId);
+  }
+  if (state.view !== "workbench") return;
+  // 左栏分区（互斥）：会话=普通任务；正在工作=活跃 run；置顶/已归档=renderRailMetaSections（run + 原生会话混合）
+  // LO 2026-08-04：侧栏按选中团队隔离——其他团队的任务不进会话/正在工作区
+  const visible = state.runs.filter((run) => !run.archived && runInRailTeam(run));
   const working = visible.filter((run) => ACTIVE_RUN_STATES.has(run.status));
   const workingIds = new Set(working.map((run) => run.id));
-  const pinned = visible.filter((run) => run.pinned && !workingIds.has(run.id));
-  const pinnedIds = new Set(pinned.map((run) => run.id));
-  const regular = visible.filter((run) => !workingIds.has(run.id) && !pinnedIds.has(run.id));
+  const regular = visible.filter((run) => !workingIds.has(run.id) && !run.pinned);
   elements["run-count"].textContent = String(regular.length);
-  elements["workbench-run-list"].innerHTML = regular.length
+  commitMarkup(elements["workbench-run-list"], regular.length
     ? regular.map(railRunMarkup).join("")
-    : `<div class="empty-state"><span>暂无任务</span></div>`;
+    : `<div class="empty-state"><span>暂无任务</span></div>`);
   elements["rail-working"].hidden = !working.length;
   elements["working-count"].textContent = String(working.length);
-  elements["working-run-list"].innerHTML = working.map(railRunMarkup).join("");
-  elements["rail-pinned"].hidden = !pinned.length;
-  elements["pinned-count"].textContent = String(pinned.length);
-  elements["pinned-run-list"].innerHTML = pinned.map(railRunMarkup).join("");
+  commitMarkup(elements["working-run-list"], working.map(railRunMarkup).join(""));
+  renderRailMetaSections();
+  renderProjects(); // run.sessions 变了，树内协作会话聚合（runSessionLinkIndex）也要跟着翻页；commitMarkup 幂等不抢焦点
   renderSelectedRun();
+}
+
+// ===== 置顶区 + 已归档区：Console run 与原生历史会话混合渲染（Codex 式单一置顶区） =====
+function renderRailMetaSections() {
+  if (state.view !== "workbench") return;
+  // LO 2026-08-04：置顶/已归档同样按选中团队隔离，不在侧栏混显其他团队
+  const railId = railTeamId();
+  const pinnedRuns = state.runs.filter((run) => !run.archived && run.pinned && !ACTIVE_RUN_STATES.has(run.status) && runInRailTeam(run));
+  const allProjects = [...state.pendingProjects, ...(state.projectsData?.projects ?? []), ...remoteTreeNodes()]; // 乐观/远程项目也可置顶/归档进分区
+  const pinnedProjects = allProjects.filter((project) => {
+    const pref = projectPrefOf(project);
+    return pref.pinned && !pref.hidden && effectiveProjectTeamId(project) === railId;
+  });
+  const pinnedSessions = [];
+  const archivedSessions = [];
+  for (const project of allProjects) {
+    if (projectPrefOf(project).hidden) continue;
+    for (const session of project.sessions ?? []) {
+      if (effectiveSessionTeamId(project, session) !== railId) continue;
+      const pref = sessionPrefOf(session.cli ?? "claude", project.id, session.id);
+      if (pref.archived) archivedSessions.push({ project, session });
+      else if (pref.pinned) pinnedSessions.push({ project, session });
+    }
+  }
+  const pinnedTotal = pinnedRuns.length + pinnedProjects.length + pinnedSessions.length;
+  elements["rail-pinned"].hidden = !pinnedTotal;
+  elements["pinned-count"].textContent = String(pinnedTotal);
+  commitMarkup(elements["pinned-run-list"], [
+    ...pinnedRuns.map(railRunMarkup),
+    ...pinnedProjects.map((project, index) => pinnedProjectMarkup(project, index)),
+    ...pinnedSessions.map(({ project, session }) => sessionLinkMarkup(project, session)),
+  ].join(""));
+  const archivedRuns = state.runs.filter((run) => run.archived && runInRailTeam(run));
+  const archivedTotal = archivedRuns.length + archivedSessions.length;
+  elements["rail-archived"].hidden = !archivedTotal;
+  elements["archived-count"].textContent = String(archivedTotal);
+  elements["archived-toggle"].setAttribute("aria-expanded", String(state.archivedExpanded));
+  elements["archived-run-list"].hidden = !state.archivedExpanded;
+  commitMarkup(
+    elements["archived-run-list"],
+    state.archivedExpanded
+      ? [
+          ...archivedRuns.map(railRunMarkup),
+          ...archivedSessions.map(({ project, session }) => sessionLinkMarkup(project, session)),
+        ].join("")
+      : "",
+  );
+}
+
+// 置顶项目行：复用 project-toggle/project-sessions 样式，点击内联展开（展开态独立存 expandedPinnedProjects）
+function pinnedProjectMarkup(project, index) {
+  if (project.remoteProject) return remoteProjectNodeMarkup(project, index, { pinned: true });
+  const pref = projectPrefOf(project);
+  const expanded = state.expandedPinnedProjects.has(project.id);
+  const items = expanded ? sessionGroupsMarkup(project, visibleTreeSessions(project)) : "";
+  return `<div class="project-node pinned-project">
+    <div class="project-row">
+      <button class="project-toggle" type="button" data-pinned-project="${escapeHtml(project.id)}"
+        aria-expanded="${expanded}" aria-controls="pinned-project-sessions-${index}"
+        title="${escapeHtml(project.path ?? project.id)}">
+        <svg class="icon chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+        <span class="project-name">${escapeHtml(pref.name || project.label)}</span>
+        <span class="project-badge">${Number(project.sessionCount) || 0}</span>
+      </button>
+      <button class="row-action" type="button" data-project-newsession="${escapeHtml(project.id)}"
+        title="在此项目下新建会话" aria-label="在「${escapeHtml(pref.name || project.label)}」下新建会话"${project.path ? "" : " disabled"}>
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="${MENU_ICONS.rename}" /></svg>
+      </button>
+      ${menuTriggerMarkup("project", project.id, `打开「${pref.name || project.label}」项目菜单`)}
+    </div>
+    <ul class="project-sessions" id="pinned-project-sessions-${index}"${expanded ? "" : " hidden"}>
+      ${expanded ? (items || `<li class="project-empty">无历史对话</li>`) : ""}
+    </ul>
+  </div>`;
 }
 
 // ===== 体系内输入对话框（替代原生 prompt，语言与 action-dialog 一致）=====
@@ -1262,17 +4648,41 @@ const MENU_ICONS = {
   branch: "M7 5a2 2 0 1 0 0 .01M7 7v6m0 0a2.5 2.5 0 1 0 .01 0M17 5a2 2 0 1 0 .01 0M17 7c0 5-6 4-9 6",
   window: "M4 5h16v14H4zM4 9h16M8 5v4",
   remove: "M6 6l12 12M18 6L6 18",
+  more: "M6 12a2 2 0 1 0 .01 0zM12 12a2 2 0 1 0 .01 0zM18 12a2 2 0 1 0 .01 0z",
+  check: "M5 12l4 4L19 6",
+  // 供应商工具菜单（原页头 6 个无标签图标按钮改成带文字的溢出菜单项）
+  sort: "M8 4v16m0 0l-3-3m3 3l3-3M16 20V4m0 0l-3 3m3-3l3 3",
+  upload: "M12 16V4m0 0L8 8m4-4l4 4M4 18v2h16v-2",
+  download: "M12 4v12m0 0l-4-4m4 4l4-4M4 18v2h16v-2",
+  shield: "M12 3l7 3v6c0 4-3 6.5-7 8-4-1.5-7-4-7-8V6z",
+  settings: "M12 9.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zM4 12h2m12 0h2M12 4v2m0 12v2M6.5 6.5l1.5 1.5m8 8l1.5 1.5m0-11l-1.5 1.5m-8 8L6.5 17.5",
+  history: "M12 7v5l4 2M21 12a9 9 0 1 1-3-6.7M21 4v4h-4",
 };
 
 let contextMenuCleanup = null;
+let lastMenuPos = { x: 0, y: 0 }; // 二级菜单（如「从属团队」）在原位重开
 
-function hideContextMenu() {
-  contextMenuCleanup?.();
+function menuTriggerMarkup(kind, id, label) {
+  const attribute = kind === "run" ? "data-run-menu" : "data-project-menu";
+  // 「…」用填充圆点：stroke 零长段在 12px 下不足 1px 视觉隐形（LO 2026-08-11「图标还是没有显示」）；
+  // path 级 fill/stroke 属性压过 .icon 的继承值（fill:none / stroke:currentColor）
+  return `<button class="row-action row-menu-action" type="button" ${attribute}="${escapeHtml(id)}"
+    data-context-menu-trigger aria-haspopup="menu" aria-expanded="false" aria-controls="context-menu"
+    title="更多操作" aria-label="${escapeHtml(label)}">
+    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="${MENU_ICONS.more}" fill="currentColor" stroke="none" /></svg>
+  </button>`;
 }
 
-function showContextMenu(items, x, y) {
-  hideContextMenu();
+function hideContextMenu(options) {
+  contextMenuCleanup?.(options);
+}
+
+function showContextMenu(items, x, y, { restoreFocus = document.activeElement } = {}) {
+  hideContextMenu({ restoreFocus: false });
+  lastMenuPos = { x, y };
   const menu = elements["context-menu"];
+  const returnFocus = restoreFocus instanceof HTMLElement ? restoreFocus : null;
+  const trigger = returnFocus?.matches("[data-context-menu-trigger]") ? returnFocus : null;
   menu.innerHTML = items
     .map((item, index) =>
       item === "---"
@@ -1284,6 +4694,7 @@ function showContextMenu(items, x, y) {
     )
     .join("");
   menu.hidden = false;
+  trigger?.setAttribute("aria-expanded", "true");
   const rect = menu.getBoundingClientRect();
   menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - rect.width - 8))}px`;
   menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - rect.height - 8))}px`;
@@ -1300,7 +4711,11 @@ function showContextMenu(items, x, y) {
     if (!menu.contains(event.target)) hideContextMenu();
   };
   const onKey = (event) => {
-    if (event.key === "Escape") return hideContextMenu();
+    if (event.key === "Escape") {
+      event.preventDefault();
+      hideContextMenu();
+      return;
+    }
     if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
     const list = focusables();
     if (!list.length) return;
@@ -1309,23 +4724,42 @@ function showContextMenu(items, x, y) {
     const next = event.key === "ArrowDown" ? (current + 1) % list.length : (current - 1 + list.length) % list.length;
     list[next].focus();
   };
+  const onWindowBlur = () => hideContextMenu({ restoreFocus: false });
   menu.addEventListener("click", onPick);
   document.addEventListener("pointerdown", onDismiss, true);
   document.addEventListener("keydown", onKey);
-  window.addEventListener("blur", hideContextMenu, { once: true });
-  contextMenuCleanup = () => {
+  window.addEventListener("blur", onWindowBlur, { once: true });
+  contextMenuCleanup = ({ restoreFocus: shouldRestore = true } = {}) => {
     menu.hidden = true;
+    trigger?.setAttribute("aria-expanded", "false");
     menu.removeEventListener("click", onPick);
     document.removeEventListener("pointerdown", onDismiss, true);
     document.removeEventListener("keydown", onKey);
+    window.removeEventListener("blur", onWindowBlur);
     contextMenuCleanup = null;
+    if (shouldRestore && returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
   };
+}
+
+function showContextMenuFromTrigger(trigger, items) {
+  const rect = trigger.getBoundingClientRect();
+  showContextMenu(items, rect.left, rect.bottom + 4, { restoreFocus: trigger });
 }
 
 async function patchRunMeta(id, patch, message) {
   try {
     const updated = normalizeRun(await request(`/api/runs/${encodeURIComponent(id)}/meta`, { method: "PATCH", body: patch }), 0);
     state.runs = state.runs.map((run) => (run.id === updated.id ? updated : run));
+    let tabsChanged = false;
+    for (const tab of state.tabs) {
+      if (tab.runId !== updated.id || tab.title === updated.title) continue;
+      tab.title = updated.title;
+      tabsChanged = true;
+    }
+    if (tabsChanged) {
+      persistTabs();
+      renderTabs();
+    }
     renderRuns();
     if (message) toast(message, "success");
   } catch (error) {
@@ -1354,21 +4788,57 @@ async function revealPath(path) {
 function nativeSessionIdOf(run) {
   // "会话ID"取原生 CLI sessionId（可用于 claude --resume 等），优先主脑；无原生会话退回 run id
   const sessions = Array.isArray(run.sessions) ? run.sessions : [];
-  const coordinator = sessions.find((session) => (session.agentId ?? session.name) === (run.coordinatorId || "claude-fable"));
+  const coordinatorId = run.coordinatorId || run.startAgentId || "";
+  const coordinator = coordinatorId
+    ? sessions.find((session) => (session.agentId ?? session.name) === coordinatorId)
+    : null;
   return coordinator?.sessionId ?? sessions[0]?.sessionId ?? run.id;
 }
 
+function controlCenterDeepLink(name, value) {
+  const url = new URL(location.pathname, location.origin);
+  url.hash = new URLSearchParams([[name, String(value)]]).toString();
+  return url.href;
+}
+
+function openDeepLink(url) {
+  const target = new URL(url, location.href);
+  if (target.origin !== location.origin) {
+    toast("已阻止打开非同源控制台链接", "error");
+    return;
+  }
+  const opened = window.open("about:blank", "_blank");
+  if (!opened) {
+    toast("浏览器拦截了新窗口，请允许此站点打开窗口", "warning");
+    return;
+  }
+  try {
+    // 深链只含定位参数；登录态显式写入新窗口自己的 sessionStorage，随后切断 opener。
+    if (getAccessToken()) opened.sessionStorage.setItem(TOKEN_KEY, getAccessToken());
+    opened.opener = null;
+    opened.location.replace(target.href);
+  } catch (error) {
+    try {
+      opened.opener = null;
+      opened.location.replace(target.href);
+    } catch {}
+    toast(`新窗口未能继承当前登录态：${error.message}`, "warning", 6000);
+  }
+}
+
 function runDeepLink(run) {
-  return `${location.origin}/#token=${encodeURIComponent(accessToken)}&run=${encodeURIComponent(run.id)}`;
+  return controlCenterDeepLink("run", run.id);
 }
 
 function continueRunInNewTask(run) {
   state.selectedRunId = null;
+  state.selectionClearedByUser = true;
   state.sessionPreview = null;
   if (run.cwd) state.pendingCwd = run.cwd;
+  state.pendingRemote = run.remote ? { ...run.remote } : null; // 远程 run 的新任务沿用其远端位置
   renderRuns();
   elements["task-input"].focus();
-  toast(`已切到新任务模式${run.cwd ? `（项目地址 ${run.cwd}）` : ""}`, "success");
+  toast(`已切到新任务模式${run.cwd ? `（项目地址 ${run.cwd}）` : run.remote ? `（远程 ${run.remote.hostId} · ${run.remote.path}）` : ""}`, "success");
 }
 
 async function continueRunInWorktree(run) {
@@ -1377,8 +4847,10 @@ async function continueRunInWorktree(run) {
   try {
     const result = await request("/api/system/worktree", { method: "POST", body: { path: run.cwd } });
     state.selectedRunId = null;
+    state.selectionClearedByUser = true;
     state.sessionPreview = null;
     state.pendingCwd = result.worktree;
+    state.pendingRemote = null; // 本地工作树与远程位置互斥
     renderRuns();
     elements["task-input"].focus();
     toast(`工作树已创建，新任务将在 ${result.worktree} 运行`, "success", 6000);
@@ -1397,7 +4869,9 @@ function runContextItems(run) {
   return [
     { icon: "pin", label: run.pinned ? "取消置顶" : "置顶任务", action: () => void patchRunMeta(run.id, { pinned: !run.pinned }) },
     { icon: "rename", label: "重命名任务", action: () => void renameRun(run) },
-    { icon: "archive", label: "归档任务", action: () => void patchRunMeta(run.id, { archived: true }, "已归档（数据保留，仅从列表隐藏）") },
+    run.archived
+      ? { icon: "archive", label: "取消归档", action: () => void patchRunMeta(run.id, { archived: false }, "已从归档取出") }
+      : { icon: "archive", label: "归档任务", action: () => void patchRunMeta(run.id, { archived: true }, "已归档（数据保留，仅从列表隐藏）") },
     { icon: "eye", label: run.unread ? "标记为已读" : "标记为未读", action: () => void patchRunMeta(run.id, { unread: !run.unread }) },
     "---",
     { icon: "folder", label: "在资源管理器中打开", disabled: !run.cwd, action: () => void revealPath(run.cwd) },
@@ -1407,27 +4881,69 @@ function runContextItems(run) {
     "---",
     { icon: "plus", label: "在新任务中继续", action: () => continueRunInNewTask(run) },
     { icon: "branch", label: "在新工作树中继续", disabled: !run.cwd, action: () => void continueRunInWorktree(run) },
-    { icon: "window", label: "在新窗口中打开", action: () => window.open(runDeepLink(run), "_blank", "noopener") },
+    { icon: "window", label: "在新窗口中打开", action: () => openDeepLink(runDeepLink(run)) },
   ];
 }
 
-// 项目树下的原生 CLI 历史会话菜单（数据来自 ~/.claude/projects 扫描，与 Console run 是两类实体）
-function sessionContextItems(project, sessionId) {
+// Codex 恢复 ID：rollout 文件名里的线程 uuid（codex resume 用 uuid 不用文件名）
+function nativeResumeId(sessionId, cli) {
+  if (cli !== "codex") return sessionId;
+  const match = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i.exec(sessionId);
+  return match ? match[1] : sessionId;
+}
+
+// 项目树下的原生 CLI 历史会话菜单（数据来自各 CLI 本地存储扫描，与 Console run 是两类实体）
+// 项集对齐 run 菜单（Codex 式）：置顶/重命名/归档/未读走会话级偏好（project-prefs.json sessions 映射）
+function sessionContextItems(project, sessionId, cli = "claude", scope = "") {
+  const pref = sessionPrefOf(cli, project.id, sessionId);
+  const session = (project.sessions ?? []).find((item) => item.id === sessionId && (item.cli ?? "claude") === cli);
   return [
-    { icon: "eye", label: "查看会话", action: () => void openSessionPreview(project.id, sessionId) },
+    { icon: "eye", label: "查看会话", action: () => void openSessionPreview(project.id, sessionId, cli, scope) },
+    { icon: "pin", label: pref.pinned ? "取消置顶" : "置顶任务", action: () => void updateSessionPref(cli, project.id, sessionId, { pinned: !pref.pinned }) },
+    {
+      icon: "branch",
+      label: `从属团队：${teamById(effectiveSessionTeamId(project, session ?? { id: sessionId, cli }))?.name ?? "跟随项目"}`,
+      action: () => {
+        showContextMenu(
+          teamPickContextItems(effectiveSessionTeamId(project, session ?? { id: sessionId, cli }), (teamId) => updateSessionPref(cli, project.id, sessionId, { teamId })),
+          lastMenuPos.x,
+          lastMenuPos.y,
+        );
+      },
+    },
+    {
+      icon: "rename",
+      label: "重命名任务",
+      action: async () => {
+        const next = await promptDialog({ eyebrow: "历史会话", title: "重命名任务（仅影响侧栏显示）", value: pref.alias || (session ? sessionDisplayTitle(session) : "") });
+        if (next === null || !next) return;
+        void updateSessionPref(cli, project.id, sessionId, { alias: next });
+      },
+    },
+    pref.archived
+      ? { icon: "archive", label: "取消归档", action: () => void updateSessionPref(cli, project.id, sessionId, { archived: false }) }
+      : { icon: "archive", label: "归档任务", action: () => void updateSessionPref(cli, project.id, sessionId, { archived: true }) },
+    { icon: "eye", label: pref.unread ? "标记为已读" : "标记为未读", action: () => void updateSessionPref(cli, project.id, sessionId, { unread: !pref.unread }) },
+    "---",
     {
       icon: "folder",
       label: "在资源管理器中打开",
       action: async () => {
         try {
-          await request("/api/sessions/reveal", { method: "POST", body: { project: project.id, id: sessionId } });
+          await request("/api/sessions/reveal", { method: "POST", body: { source: cli, project: project.id, scope, id: sessionId } });
         } catch (error) {
           toast(`定位失败：${error.message}`, "error");
         }
       },
     },
-    { icon: "id", label: "复制会话ID", action: () => void copyText(sessionId, "会话ID") },
-    { icon: "copy", label: "复制恢复命令", action: () => void copyText(`claude -r ${sessionId}`, "恢复命令") },
+    { icon: "copy", label: "复制工作目录", disabled: !project.path, action: () => void copyText(project.path, "工作目录") },
+    { icon: "id", label: "复制会话ID", action: () => void copyText(nativeResumeId(sessionId, cli), "会话ID") },
+    {
+      icon: "copy",
+      label: "复制恢复命令",
+      action: () => void copyText(cli === "codex" ? `codex resume ${nativeResumeId(sessionId, cli)}` : `claude -r ${sessionId}`, "恢复命令"),
+    },
+    { icon: "link", label: "复制深度链接", action: () => void copyText(sessionDeepLink(cli, project.id, sessionId), "深度链接") },
     "---",
     {
       icon: "plus",
@@ -1435,31 +4951,772 @@ function sessionContextItems(project, sessionId) {
       disabled: !project.path,
       action: () => {
         state.selectedRunId = null;
+        state.selectionClearedByUser = true;
         state.sessionPreview = null;
         state.pendingCwd = project.path;
+        state.pendingRemote = null; // 本地项目与远程位置互斥
         renderRuns();
         elements["task-input"].focus();
         toast(`已切到新任务模式（项目地址 ${project.path}）`, "success");
       },
     },
+    {
+      icon: "branch",
+      label: "在新工作树中继续",
+      disabled: !project.path,
+      action: () => void continueRunInWorktree({ cwd: project.path }),
+    },
+    { icon: "window", label: "在新窗口中打开", action: () => openDeepLink(sessionDeepLink(cli, project.id, sessionId)) },
   ];
 }
 
-// ===== 项目侧栏偏好（置顶/重命名/隐藏）=====
-async function loadProjectPrefs() {
+// ===== v3.7 Automations（codeg 对标）：composer 快照的保存/列表/触发/启停 =====
+async function loadAutomations() {
   try {
-    const payload = await request("/api/projects/prefs");
-    state.projectPrefs = payload?.projects ? payload : { projects: {} };
-  } catch {
-    state.projectPrefs = { projects: {} };
+    const payload = await request("/api/automations");
+    state.automations = Array.isArray(payload?.automations) ? payload.automations : [];
+    state.automationStatus = payload?.status ?? {
+      state: "ready",
+      writable: true,
+      failClosed: false,
+      code: null,
+      message: null,
+    };
+    renderAutomations();
+    return payload;
+  } catch (error) {
+    // 保留最后一次成功读取的列表作为只读快照。连接失败时清空并隐藏会让用户误以为
+    // 自动化被删除；显式冻结写入口才符合存储层的 fail-closed 契约。
+    state.automationStatus = {
+      state: "unavailable",
+      writable: false,
+      failClosed: true,
+      code: error?.payload?.error?.code ?? "AUTOMATION_API_UNAVAILABLE",
+      message: error?.message ?? "无法读取自动化状态",
+    };
+    renderAutomations();
+    throw error;
   }
 }
 
-async function saveProjectPrefs() {
+function scheduleLabel(schedule) {
+  const match = /^every:(\d+)([mhd])$/.exec(String(schedule ?? ""));
+  if (!match) return "手动";
+  return `每 ${match[1]}${{ m: " 分钟", h: " 小时", d: " 天" }[match[2]]}`;
+}
+
+function automationStatusCopy(status = {}) {
+  // 状态请求失败不能证明本地存储的精确故障。优先呈现控制面不可达并冻结最后一次成功快照，
+  // 不把失败响应携带的诊断码误报成已确认的本地文件状态。
+  if (status.state === "unavailable") {
+    return ["自动化状态不可用", "现有数据保持只读，请恢复控制面连接后重试。"];
+  }
+  if (status.code === "AUTOMATION_STORE_CORRUPT") {
+    return ["自动化已暂停", "存储文件损坏，原文件已保留。修复文件后重启控制面。"];
+  }
+  if (status.code === "AUTOMATION_STORE_UNREADABLE") {
+    return ["自动化已暂停", "存储文件不可读，原路径已保留。检查权限后重启控制面。"];
+  }
+  return ["自动化已暂停", "存储当前不可写；现有数据不会被修改。"];
+}
+
+function automationsWritable() {
+  return state.automationStatus?.writable === true;
+}
+
+function renderAutomations() {
+  const rail = elements["rail-automations"];
+  if (!rail) return;
+  const items = state.automations;
+  const status = state.automationStatus ?? {};
+  const blocked = status.failClosed === true || ["degraded", "unavailable"].includes(status.state);
+  const writable = automationsWritable();
+  rail.hidden = !items.length && !blocked;
+  elements["automations-count"].textContent = blocked ? `${items.length} · 暂停` : String(items.length);
+  const saveButton = elements["save-automation-button"];
+  if (saveButton) {
+    saveButton.disabled = !writable;
+    saveButton.title = writable
+      ? "把当前 composer 全配置（任务/团队/直接目标/权限/模型/地址）存为可定时执行的自动化"
+      : "自动化存储不可写";
+  }
+  const [statusTitle, statusDetail] = automationStatusCopy(status);
+  const statusMarkup = blocked
+    ? `<div class="automation-store-alert" role="alert"><strong>${escapeHtml(statusTitle)}</strong><span>${escapeHtml(statusDetail)}</span>${status.code ? `<code>${escapeHtml(status.code)}</code>` : ""}</div>`
+    : "";
+  const itemMarkup = items
+    .map((item) => `
+      <div class="automation-row${item.enabled ? "" : " is-disabled"}${writable ? "" : " is-readonly"}">
+        <button class="automation-main" type="button" data-automation-open="${escapeHtml(item.id)}"
+          title="${escapeHtml(item.prompt.slice(0, 300))}${item.lastError ? `\n上次失败：${escapeHtml(item.lastError)}` : ""}">
+          <strong>${item.lastError ? `<span class="automation-error-dot" aria-label="上次触发失败"></span>` : ""}${escapeHtml(item.name)}</strong>
+          <span>${escapeHtml(scheduleLabel(item.schedule))}${item.enabled ? "" : " · 已停用"} · ${item.permissionMode || "plan"} · ${item.lastRunId ? `上次 ${formatDate(item.lastRunAt)}` : "未运行"}</span>
+        </button>
+        <span class="automation-actions">
+          <button class="rail-action" type="button" data-automation-edit="${escapeHtml(item.id)}" title="编辑/历史" aria-label="编辑 ${escapeHtml(item.name)}">
+            ${lucideIcon("settings")}
+          </button>
+          <button class="rail-action" type="button" data-automation-run="${escapeHtml(item.id)}" title="立即执行" aria-label="立即执行 ${escapeHtml(item.name)}"${writable ? "" : " disabled"}>
+            <svg class="icon" viewBox="0 0 24 24"><path d="M8 5v14l11-7z" /></svg>
+          </button>
+          <button class="rail-action" type="button" data-automation-toggle="${escapeHtml(item.id)}" title="${item.enabled ? "停用" : "启用"}" aria-label="${item.enabled ? "停用" : "启用"} ${escapeHtml(item.name)}"${writable ? "" : " disabled"}>
+            <svg class="icon" viewBox="0 0 24 24">${item.enabled ? '<path d="M10 9v6m4-6v6" />' : '<path d="M8 5v14l11-7z" opacity="0.4" />'}</svg>
+          </button>
+          <button class="rail-action" type="button" data-automation-remove="${escapeHtml(item.id)}" title="删除" aria-label="删除 ${escapeHtml(item.name)}"${writable ? "" : " disabled"}>
+            <svg class="icon" viewBox="0 0 24 24"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /></svg>
+          </button>
+        </span>
+      </div>`)
+    .join("");
+  commitMarkup(elements["automations-list"], `${statusMarkup}${itemMarkup}`);
+}
+
+// 「存为自动化」：当前 composer 全配置快照 → 名称 + 计划两问 → 落库
+async function saveAutomationFromComposer() {
+  if (!automationsWritable()) return toast("自动化存储当前不可写；现有数据保持不变", "error");
+  const prompt = elements["task-input"].value.trim();
+  if (!prompt) return toast("先在输入框写好任务内容，再存为自动化", "warning");
+  const composer = captureComposerConfig();
+  const name = await promptDialog({ eyebrow: "自动化", title: "命名这个自动化", placeholder: "如：每日体系体检", confirmLabel: "下一步" });
+  if (!name) return;
+  const schedule = await promptDialog({
+    eyebrow: "自动化",
+    title: "执行计划（manual = 仅手动；every:30m / every:6h / every:1d = 定时）",
+    value: "manual",
+    confirmLabel: "保存",
+  });
+  if (schedule === null) return;
   try {
-    await request("/api/projects/prefs", { method: "PUT", body: state.projectPrefs });
+    await request("/api/automations", {
+      method: "POST",
+      body: {
+        name,
+        prompt,
+        sources: state.attachments.length ? [...state.attachments] : undefined,
+        schedule: schedule.trim() || "manual",
+        teamId: composer.target.teamId,
+        startAgentId: composer.target.memberId || undefined,
+        requestedAgentIds: composer.requestedAgentIds.length ? [...composer.requestedAgentIds] : undefined,
+        permissionMode: composer.permissionMode,
+        model: composer.model,
+        effort: composer.effort,
+        cwd: composer.cwd,
+      },
+    });
+    toast(`自动化「${name}」已保存`, "success");
+    await loadAutomations();
   } catch (error) {
-    toast(`项目偏好保存失败：${error.message}`, "error");
+    toast(error.message, "error");
+  }
+}
+
+async function triggerAutomation(id) {
+  if (!automationsWritable()) return toast("自动化已暂停，无法执行", "error");
+  try {
+    const run = await request(`/api/automations/${encodeURIComponent(id)}/run`, { method: "POST", body: {} });
+    toast("自动化已触发", "success");
+    await Promise.all([loadAutomations(), loadRuns()]);
+    if (run?.id) selectRun(run.id);
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+async function toggleAutomation(id) {
+  if (!automationsWritable()) return toast("自动化已暂停，无法修改", "error");
+  const item = state.automations.find((entry) => entry.id === id);
+  if (!item) return;
+  try {
+    await request(`/api/automations/${encodeURIComponent(id)}`, { method: "PATCH", body: { enabled: !item.enabled } });
+    await loadAutomations();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+async function removeAutomation(id) {
+  if (!automationsWritable()) return toast("自动化已暂停，无法删除", "error");
+  const item = state.automations.find((entry) => entry.id === id);
+  if (!item) return;
+  const confirmed = await confirmAction({
+    eyebrow: "自动化",
+    title: `删除自动化「${item.name}」？`,
+    rows: [["计划", scheduleLabel(item.schedule)], ["任务", item.prompt.slice(0, 120)]],
+    confirmLabel: "删除",
+    danger: true,
+  });
+  if (!confirmed) return;
+  try {
+    await request(`/api/automations/${encodeURIComponent(id)}`, { method: "DELETE" });
+    toast("自动化已删除", "success");
+    await loadAutomations();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+function openAutomationLastRun(id) {
+  const item = state.automations.find((entry) => entry.id === id);
+  if (item?.lastRunId && state.runs.some((run) => run.id === item.lastRunId)) return selectRun(item.lastRunId);
+  toast(item?.lastRunId ? "上次运行已被清除" : "该自动化还没有运行记录", "info");
+}
+
+function fillAutomationManager(selectedId = null) {
+  const select = byId("automation-edit-select");
+  const name = byId("automation-edit-name");
+  const schedule = byId("automation-edit-schedule");
+  const permission = byId("automation-edit-permission");
+  const prompt = byId("automation-edit-prompt");
+  const history = byId("automation-history-list");
+  if (!select || !name || !schedule || !permission || !prompt || !history) return;
+  const items = state.automations;
+  select.innerHTML = items.length
+    ? items.map((item) => `<option value="${escapeHtml(item.id)}">${escapeHtml(item.name)}</option>`).join("")
+    : `<option value="">（暂无自动化）</option>`;
+  const id = selectedId && items.some((item) => item.id === selectedId)
+    ? selectedId
+    : (select.value || items[0]?.id || "");
+  if (id) select.value = id;
+  const item = items.find((entry) => entry.id === id);
+  name.disabled = !item || !automationsWritable();
+  schedule.disabled = !item || !automationsWritable();
+  permission.disabled = !item || !automationsWritable();
+  prompt.disabled = !item || !automationsWritable();
+  byId("automation-save-button").disabled = !item || !automationsWritable();
+  byId("automation-run-now-button").disabled = !item || !automationsWritable();
+  byId("automation-cancel-run-button").disabled = !item || !automationsWritable();
+  if (!item) {
+    name.value = "";
+    schedule.value = "manual";
+    permission.value = "plan";
+    prompt.value = "";
+    history.innerHTML = `<div class="empty-state compact-empty"><span>暂无运行历史</span></div>`;
+    return;
+  }
+  name.value = item.name || "";
+  schedule.value = item.schedule || "manual";
+  permission.value = ["build", "review"].includes(item.permissionMode) ? item.permissionMode : "plan";
+  prompt.value = item.prompt || "";
+  const rows = Array.isArray(item.runHistory) ? item.runHistory : [];
+  history.innerHTML = rows.length
+    ? rows.map((row) => `
+        <button class="automation-history-row" type="button" data-automation-history-run="${escapeHtml(row.runId)}"
+          title="打开运行 ${escapeHtml(row.runId)}">
+          <strong>${escapeHtml(row.source || "manual")} · ${escapeHtml(row.status || "?")}</strong>
+          <span>${escapeHtml(formatDate(row.at))} · ${escapeHtml(String(row.runId).slice(0, 8))}</span>
+        </button>`).join("")
+    : item.lastRunId
+      ? `<button class="automation-history-row" type="button" data-automation-history-run="${escapeHtml(item.lastRunId)}">
+          <strong>上次运行</strong><span>${escapeHtml(formatDate(item.lastRunAt))} · ${escapeHtml(String(item.lastRunId).slice(0, 8))}</span>
+        </button>`
+      : `<div class="empty-state compact-empty"><span>尚未运行</span></div>`;
+}
+
+function openAutomationManager(selectedId = null) {
+  fillAutomationManager(selectedId);
+  const dialog = byId("automation-dialog");
+  if (!dialog) return;
+  if (typeof dialog.showModal === "function" && !dialog.open) dialog.showModal();
+}
+
+function closeAutomationManager() {
+  const dialog = byId("automation-dialog");
+  if (dialog?.open) dialog.close();
+}
+
+async function saveAutomationEdits(event) {
+  event?.preventDefault?.();
+  if (!automationsWritable()) return toast("自动化已暂停，无法保存", "error");
+  const id = byId("automation-edit-select")?.value;
+  if (!id) return toast("请先选择自动化", "warning");
+  try {
+    await request(`/api/automations/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: {
+        name: byId("automation-edit-name").value.trim(),
+        schedule: byId("automation-edit-schedule").value.trim() || "manual",
+        permissionMode: byId("automation-edit-permission").value,
+        prompt: byId("automation-edit-prompt").value.trim(),
+      },
+    });
+    toast("自动化已更新", "success");
+    await loadAutomations();
+    fillAutomationManager(id);
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+async function cancelAutomationRun(id) {
+  if (!automationsWritable()) return toast("自动化已暂停，无法取消", "error");
+  try {
+    await request(`/api/automations/${encodeURIComponent(id)}/cancel`, { method: "POST", body: {} });
+    toast("已请求取消当前运行", "success");
+    await Promise.all([loadAutomations(), loadRuns()]);
+    fillAutomationManager(id);
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+// ── 斜杠命令：运行控制来自当前成员的 Adapter catalog；这里只保留控制台本地命令。 ──
+const LOCAL_SLASH_COMMANDS = Object.freeze([
+  { id: "new", label: "/new", detail: "新建任务输入模式", apply: () => {
+    state.selectedRunId = null;
+    state.selectionClearedByUser = true;
+    state.activeTabKey = null;
+    persistTabs();
+    renderTabs();
+    renderSelectedRun();
+  } },
+  { id: "team", label: "/team", detail: "打开团队工作区", apply: () => {
+    const team = teamById(state.selectedTeamId) || state.teams.find((item) => item.builtin);
+    if (team) void openTeamWorkspace(team);
+  } },
+  { id: "auto", label: "/auto", detail: "打开自动化管理", apply: () => openAutomationManager() },
+  { id: "commands", label: "/commands", detail: "打开命令面板", apply: () => openForgePalette() },
+]);
+
+function applyRuntimeSlashControl(command) {
+  const controlIds = {
+    model: "task-model",
+    effort: "task-effort",
+    permission: "task-permission",
+  };
+  const select = elements[controlIds[command.control]];
+  if (!select) return;
+  const value = String(command.value ?? "");
+  if (![...select.options].some((option) => option.value === value)) {
+    throw new Error(`${command.label} 不在当前成员的可执行目录中`);
+  }
+  select.value = value;
+  select.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+function fallbackRuntimeSlashCommands() {
+  const commands = [];
+  const addSelectCommands = (control, token, select, pick) => {
+    if (!select || pick?.hidden) return;
+    for (const option of select.options) {
+      const value = option.value;
+      const labelValue = value || "default";
+      commands.push({
+        id: `${control}:${labelValue}`,
+        label: `/${token} ${labelValue}`,
+        detail: `${option.textContent || labelValue} · 当前席位目录`,
+        control,
+        value,
+        apply() { applyRuntimeSlashControl(this); },
+      });
+    }
+  };
+  addSelectCommands("model", "model", elements["task-model"], elements["task-model-pick"]);
+  addSelectCommands("effort", "effort", elements["task-effort"], elements["task-effort-pick"]);
+  if (!elements["task-permission-pick"]?.hidden) {
+    for (const option of elements["task-permission"]?.options || []) {
+      commands.push({
+        id: `permission:${option.value}`,
+        label: `/${option.value}`,
+        detail: option.textContent || option.value,
+        control: "permission",
+        value: option.value,
+        apply() { applyRuntimeSlashControl(this); },
+      });
+    }
+  }
+  return commands;
+}
+
+function slashCommandsForContext() {
+  const continuing = Boolean(selectedRun() && !state.sessionPreview);
+  if (continuing) return [...LOCAL_SLASH_COMMANDS];
+  const agentId = activeComposerTarget().memberId || "";
+  const catalog = state.agentControlCatalog;
+  const runtimeCommands = catalog?.context?.memberId === agentId && Array.isArray(catalog.commands)
+    ? catalog.commands.map((command) => ({
+      ...command,
+      apply() { applyRuntimeSlashControl(this); },
+    }))
+    : fallbackRuntimeSlashCommands();
+  return [...runtimeCommands, ...LOCAL_SLASH_COMMANDS];
+}
+
+function hideSlashMenu() {
+  const menu = byId("slash-menu");
+  if (menu) {
+    menu.hidden = true;
+    menu.innerHTML = "";
+  }
+  state.slashActive = false;
+  state.slashIndex = -1;
+  state.slashCandidates = [];
+  state.slashRange = null;
+  elements["task-input"]?.setAttribute("aria-expanded", "false");
+  elements["task-input"]?.removeAttribute("aria-activedescendant");
+}
+
+function slashQueryAtCursor(textarea) {
+  if (!textarea) return null;
+  const value = textarea.value;
+  const caret = textarea.selectionStart ?? value.length;
+  const before = value.slice(0, caret);
+  const match = before.match(/(^|[\s\n])\/([A-Za-z0-9_-]*(?:[ \t]+[A-Za-z0-9._:/-]*)?)$/);
+  if (!match) return null;
+  return {
+    start: caret - match[2].length - 1,
+    end: caret,
+    query: match[2].toLowerCase().replace(/[ \t]+/g, " "),
+  };
+}
+
+function syncSlashActiveOption() {
+  const menu = byId("slash-menu");
+  const textarea = elements["task-input"];
+  if (!menu || !textarea) return;
+  menu.querySelectorAll(".slash-item").forEach((element, index) => {
+    const active = index === state.slashIndex;
+    element.classList.toggle("is-active", active);
+    element.setAttribute("aria-selected", String(active));
+    if (active) {
+      textarea.setAttribute("aria-activedescendant", element.id);
+      element.scrollIntoView({ block: "nearest" });
+    }
+  });
+}
+
+function renderSlashMenu() {
+  const menu = byId("slash-menu");
+  const textarea = elements["task-input"];
+  if (!menu || !textarea) return;
+  if (state.mentionActive) {
+    hideSlashMenu();
+    return;
+  }
+  const hit = slashQueryAtCursor(textarea);
+  if (!hit) {
+    hideSlashMenu();
+    return;
+  }
+  const candidates = slashCommandsForContext().filter((item) => {
+    if (!hit.query) return true;
+    const normalizedLabel = item.label.slice(1).toLowerCase().replace(/[ \t]+/g, " ");
+    return hit.query.includes(" ")
+      ? normalizedLabel.startsWith(hit.query)
+      : `${normalizedLabel} ${item.detail} ${item.id}`.toLowerCase().includes(hit.query);
+  });
+  if (!candidates.length) {
+    hideSlashMenu();
+    return;
+  }
+  state.slashActive = true;
+  state.slashCandidates = candidates;
+  state.slashIndex = 0;
+  state.slashRange = hit;
+  menu.hidden = false;
+  menu.innerHTML = candidates.map((item, index) => `
+    <button class="slash-item${index === 0 ? " is-active" : ""}" id="slash-option-${index}" type="button" role="option" aria-selected="${index === 0}" data-slash-id="${escapeHtml(item.id)}">
+      <strong>${escapeHtml(item.label)}</strong>
+      <span>${escapeHtml(item.detail)}</span>
+    </button>`).join("");
+  textarea.setAttribute("aria-expanded", "true");
+  textarea.setAttribute("aria-activedescendant", "slash-option-0");
+}
+
+function applySlashCommand(id) {
+  const command = state.slashCandidates.find((item) => item.id === id);
+  const textarea = elements["task-input"];
+  const range = state.slashRange;
+  if (!command || !textarea || !range) return;
+  const before = textarea.value.slice(0, range.start);
+  const after = textarea.value.slice(range.end);
+  textarea.value = `${before}${after}`.replace(/^\s+/, (s) => s); // keep leading if any
+  // 去掉命令 token，不把 /plan 留在 prompt 里
+  const caret = before.length;
+  textarea.setSelectionRange(caret, caret);
+  textarea.dispatchEvent(new Event("input", { bubbles: true }));
+  hideSlashMenu();
+  try {
+    command.apply();
+    toast(`已应用 ${command.label}`, "success", 1800);
+  } catch (error) {
+    toast(error.message, "error");
+  }
+  textarea.focus({ preventScroll: true });
+}
+
+// ===== 项目侧栏偏好（置顶/重命名/隐藏）=====
+function projectPrefsFromPayload(payload) {
+  const revision = Number(payload?.revision);
+  return payload?.projects
+    ? {
+        revision: Number.isSafeInteger(revision) && revision >= 0 ? revision : 0,
+        projects: payload.projects,
+        sessions: payload?.sessions ?? {},
+      }
+    : { revision: 0, projects: {}, sessions: {} };
+}
+
+function projectPrefsSnapshot(source = state.projectPrefs) {
+  // 快照必须与后续乐观修改隔离；structuredClone 避免 JSON 往返的额外文本副本。
+  const value = { projects: source?.projects ?? {}, sessions: source?.sessions ?? {} };
+  return typeof structuredClone === "function"
+    ? structuredClone(value)
+    : JSON.parse(JSON.stringify(value));
+}
+
+function cloneProjectPrefs(source) {
+  return { revision: source.revision, ...projectPrefsSnapshot(source) };
+}
+
+function projectPrefValueEqual(left, right) {
+  if (Object.is(left, right)) return true;
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+// CAS 冲突后只重放 base -> desired 的字段级本地意图。完整旧文档绝不能直接覆盖
+// 最新权威状态：远端不同 key/field 保留，同一字段才由本地最终意图覆盖。
+function diffProjectPrefs(base, desired) {
+  const changes = [];
+  for (const collection of ["projects", "sessions"]) {
+    const before = base?.[collection] ?? {};
+    const after = desired?.[collection] ?? {};
+    for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
+      if (!Object.hasOwn(after, key)) {
+        changes.push({ collection, key, removeEntry: true });
+        continue;
+      }
+      const beforeEntry = Object.hasOwn(before, key) && before[key] && typeof before[key] === "object" ? before[key] : {};
+      const afterEntry = after[key] && typeof after[key] === "object" ? after[key] : {};
+      for (const field of new Set([...Object.keys(beforeEntry), ...Object.keys(afterEntry)])) {
+        if (!Object.hasOwn(afterEntry, field)) changes.push({ collection, key, field, removeField: true });
+        else if (!Object.hasOwn(beforeEntry, field) || !projectPrefValueEqual(beforeEntry[field], afterEntry[field])) {
+          changes.push({ collection, key, field, value: afterEntry[field] });
+        }
+      }
+    }
+  }
+  return changes;
+}
+
+function applyProjectPrefsChanges(base, changes) {
+  const next = projectPrefsSnapshot(base);
+  for (const change of changes) {
+    const collection = next[change.collection];
+    if (change.removeEntry) {
+      delete collection[change.key];
+      continue;
+    }
+    const entry = collection[change.key] && typeof collection[change.key] === "object"
+      ? { ...collection[change.key] }
+      : {};
+    if (change.removeField) delete entry[change.field];
+    else entry[change.field] = change.value;
+    collection[change.key] = entry;
+  }
+  return next;
+}
+
+let projectPrefsAuthoritative = { revision: 0, projects: {}, sessions: {} };
+
+function setProjectPrefsAuthoritative(payload, { adopt = false } = {}) {
+  projectPrefsAuthoritative = cloneProjectPrefs(projectPrefsFromPayload(payload));
+  if (adopt) state.projectPrefs = cloneProjectPrefs(projectPrefsAuthoritative);
+  return projectPrefsAuthoritative;
+}
+
+function rebaseProjectPrefsOperation(operation, base) {
+  const changes = diffProjectPrefs(operation.baseSnapshot, operation.desired);
+  operation.baseSnapshot = projectPrefsSnapshot(base);
+  operation.desired = applyProjectPrefsChanges(operation.baseSnapshot, changes);
+  return operation.desired;
+}
+
+function mergeProjectPrefsOperations(...operations) {
+  const queued = operations.filter(Boolean);
+  const baseSnapshot = projectPrefsSnapshot(projectPrefsAuthoritative);
+  let desired = projectPrefsSnapshot(baseSnapshot);
+  for (const operation of queued) {
+    desired = applyProjectPrefsChanges(desired, diffProjectPrefs(operation.baseSnapshot, operation.desired));
+  }
+  return {
+    baseSnapshot,
+    desired,
+    revision: Math.max(0, ...queued.map((operation) => operation.revision ?? 0)),
+    waiters: queued.flatMap((operation) => operation.waiters ?? []),
+  };
+}
+
+let projectPrefsLoadPromise = null;
+async function loadProjectPrefs({ notify = true } = {}) {
+  if (state.projectPrefsStatus === "ready") return true;
+  if (projectPrefsLoadPromise) return projectPrefsLoadPromise;
+  state.projectPrefsStatus = "loading";
+  projectPrefsLoadPromise = (async () => {
+    try {
+      const authoritative = setProjectPrefsAuthoritative(await request("/api/projects/prefs"));
+      if (projectPrefsPendingSave) {
+        const optimistic = rebaseProjectPrefsOperation(projectPrefsPendingSave, authoritative);
+        state.projectPrefs = { revision: authoritative.revision, ...optimistic };
+      } else {
+        state.projectPrefs = cloneProjectPrefs(authoritative);
+      }
+      state.projectPrefsStatus = "ready";
+      state.projectPrefsError = null;
+      renderProjects();
+      renderStatusline();
+      if (projectPrefsPendingSave) queueMicrotask(() => void drainProjectPrefsSaves());
+      return true;
+    } catch (error) {
+      // 保留内存中的最后可信快照；首次失败也绝不伪装成“已加载的空库”。
+      state.projectPrefsStatus = "error";
+      state.projectPrefsError = error.message;
+      renderStatusline();
+      if (notify) toast(`项目偏好加载失败，写入已锁定：${error.message}`, "error", 6000);
+      return false;
+    } finally {
+      projectPrefsLoadPromise = null;
+    }
+  })();
+  return projectPrefsLoadPromise;
+}
+
+async function ensureProjectPrefsWritable() {
+  if (state.projectPrefsStatus === "ready") return true;
+  const ready = await loadProjectPrefs(); // error 状态允许用户动作触发真实重试
+  if (!ready) {
+    toast(
+      projectPrefsPendingSave
+        ? "项目偏好仍处于写锁；已保留的本地修改会等待重试，本次新修改尚未应用"
+        : "项目偏好尚未成功读取，本次修改未写入",
+      "warning",
+      5000,
+    );
+  }
+  return ready;
+}
+
+let projectPrefsSaveRevision = 0;
+let projectPrefsSaveActive = false;
+let projectPrefsPendingSave = null; // 一个 in-flight + 一个 latest；中间快照合并
+
+function saveProjectPrefs() {
+  if (state.projectPrefsStatus !== "ready") return Promise.resolve(false);
+  const desired = projectPrefsSnapshot();
+  const revision = ++projectPrefsSaveRevision;
+  const result = new Promise((resolveSave) => {
+    if (projectPrefsPendingSave) {
+      projectPrefsPendingSave.desired = desired;
+      projectPrefsPendingSave.revision = revision;
+      projectPrefsPendingSave.waiters.push(resolveSave);
+    } else {
+      projectPrefsPendingSave = {
+        baseSnapshot: projectPrefsSnapshot(projectPrefsAuthoritative),
+        desired,
+        revision,
+        waiters: [resolveSave],
+      };
+    }
+  });
+  queueMicrotask(() => void drainProjectPrefsSaves());
+  return result;
+}
+
+async function drainProjectPrefsSaves() {
+  if (projectPrefsSaveActive || state.projectPrefsStatus !== "ready") return;
+  projectPrefsSaveActive = true;
+  try {
+    while (projectPrefsPendingSave) {
+      const operation = projectPrefsPendingSave;
+      projectPrefsPendingSave = null;
+      let saved = false;
+      let stop = false;
+      let deferred = false;
+      let conflictRetries = 0;
+      while (!saved && !stop) {
+        try {
+          // 每次发送都以最后权威 revision 为基线，并将局部本地意图重放到该基线。
+          // 前一轮 PUT 或跨标签页 GET 推进 revision 后，排队操作不会复用陈旧整份快照。
+          const desired = rebaseProjectPrefsOperation(operation, projectPrefsAuthoritative);
+          const authoritative = setProjectPrefsAuthoritative(await request("/api/projects/prefs", {
+            method: "PUT",
+            body: { baseRevision: projectPrefsAuthoritative.revision, ...desired },
+          }));
+          if (projectPrefsPendingSave) {
+            const optimistic = rebaseProjectPrefsOperation(projectPrefsPendingSave, authoritative);
+            state.projectPrefs = { revision: authoritative.revision, ...optimistic };
+          } else {
+            state.projectPrefs = cloneProjectPrefs(authoritative);
+          }
+          renderProjects();
+          saved = true;
+        } catch (error) {
+          const conflict = error.status === 409 && error.payload?.error?.code === "PREFS_REVISION_MISMATCH";
+          if (conflict && conflictRetries < 3) {
+            conflictRetries += 1;
+            toast("项目偏好已被其它页面更新，正在合并本地修改", "warning", 5000);
+            try {
+              const authoritative = setProjectPrefsAuthoritative(await request("/api/projects/prefs"));
+              state.projectPrefsStatus = "ready";
+              state.projectPrefsError = null;
+              const currentDesired = rebaseProjectPrefsOperation(operation, authoritative);
+              const optimistic = projectPrefsPendingSave
+                ? rebaseProjectPrefsOperation(projectPrefsPendingSave, currentDesired)
+                : currentDesired;
+              state.projectPrefs = { revision: authoritative.revision, ...optimistic };
+              renderProjects();
+              continue;
+            } catch (refreshError) {
+              projectPrefsPendingSave = mergeProjectPrefsOperations(operation, projectPrefsPendingSave);
+              state.projectPrefs = {
+                revision: projectPrefsAuthoritative.revision,
+                ...projectPrefsSnapshot(projectPrefsPendingSave.desired),
+              };
+              state.projectPrefsStatus = "error";
+              state.projectPrefsError = refreshError.message;
+              deferred = true;
+              renderProjects();
+              renderStatusline();
+              toast(`项目偏好权威回读失败；本地修改已保留，写入已锁定：${refreshError.message}`, "error", 7000);
+              stop = true;
+              continue;
+            }
+          }
+          toast(
+            conflict ? "项目偏好连续发生版本冲突，本次修改未保存" : `项目偏好保存失败：${error.message}`,
+            "error",
+          );
+          try {
+            setProjectPrefsAuthoritative(await request("/api/projects/prefs"), { adopt: true });
+            state.projectPrefsStatus = "ready";
+            state.projectPrefsError = null;
+            renderProjects();
+          } catch (refreshError) {
+            projectPrefsPendingSave = mergeProjectPrefsOperations(operation, projectPrefsPendingSave);
+            state.projectPrefs = {
+              revision: projectPrefsAuthoritative.revision,
+              ...projectPrefsSnapshot(projectPrefsPendingSave.desired),
+            };
+            state.projectPrefsStatus = "error";
+            state.projectPrefsError = refreshError.message;
+            deferred = true;
+            renderProjects();
+            renderStatusline();
+            toast(`项目偏好权威回读失败；本地修改已保留，写入已锁定：${refreshError.message}`, "error", 7000);
+          }
+          stop = true;
+        }
+      }
+      if (!deferred) for (const settle of operation.waiters) settle(saved);
+      if (stop && projectPrefsPendingSave && !deferred) {
+        for (const settle of projectPrefsPendingSave.waiters) settle(false);
+        projectPrefsPendingSave = null;
+      }
+      if (stop) break;
+    }
+  } finally {
+    projectPrefsSaveActive = false;
+    // finally 与新调用可能同一微任务交错；若又有 latest，确保泵继续。
+    if (projectPrefsPendingSave && state.projectPrefsStatus === "ready") queueMicrotask(() => void drainProjectPrefsSaves());
   }
 }
 
@@ -1468,17 +5725,178 @@ function projectPrefOf(project) {
 }
 
 async function updateProjectPref(project, patch) {
+  if (!(await ensureProjectPrefsWritable())) return false;
   const key = normalizePathKey(project.path ?? project.id);
-  state.projectPrefs.projects[key] = { ...(state.projectPrefs.projects[key] ?? {}), ...patch };
+  const current = state.projectPrefs.projects[key] ?? {};
+  const nextPref = { ...current, ...patch };
+  // hidden/pinned 是最终态不变量，而非仅隐藏动作的副作用：隐藏项目即使从旧数据
+  // 迁移而来、或随后被其它偏好更新，也不能重新进入置顶集合。
+  if (nextPref.hidden) nextPref.pinned = false;
+  state.projectPrefs.projects[key] = nextPref;
+  // 乐观项目的「移除」= 退出 pending（刚选定又不要了；hidden 语义留给真实项目）
+  if (patch.hidden === true && project.pending) {
+    state.pendingProjects = state.pendingProjects.filter((item) => normalizePathKey(item.path) !== key);
+    persistPendingProjects();
+  }
   renderProjects();
-  await saveProjectPrefs();
+  return saveProjectPrefs();
+}
+
+// 乐观项目持久化（LO 报障：刷新后 pending 项目消失——改 localStorage，刷新/重启浏览器不丢）；
+// 扫描列表出现同路径真项目时 renderProjects 自动让位并同步清出持久层
+const PENDING_PROJECTS_KEY = "514cc-pending-projects";
+
+function persistPendingProjects() {
+  try {
+    localStorage.setItem(PENDING_PROJECTS_KEY, JSON.stringify(state.pendingProjects));
+  } catch {
+    // 写失败退化为内存态
+  }
+}
+
+function restorePendingProjects() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(PENDING_PROJECTS_KEY) ?? "[]");
+    state.pendingProjects = (Array.isArray(saved) ? saved : []).filter((item) => item?.path && item?.id);
+  } catch {
+    state.pendingProjects = [];
+  }
+}
+
+// 项目查找统一入口：乐观项目 + 扫描列表（右键菜单/从属菜单等曾只搜扫描列表——pending 项目无菜单）
+function findProjectById(id) {
+  return state.pendingProjects.find((project) => project.id === id)
+    ?? (state.projectsData?.projects ?? []).find((item) => item.id === id)
+    ?? remoteTreeNodes().find((item) => item.id === id)
+    ?? null;
+}
+
+// ===== 原生历史会话偏好（置顶/归档/未读/别名/团队）：与项目偏好同文件，键 = cli::projectId::sessionId =====
+function sessionPrefOf(cli, projectId, sessionId) {
+  const sessions = state.projectPrefs.sessions ?? {};
+  // 读取兼容旧两段键（projectId::sessionId，多 CLI 波次前的格式）——写入永远三段
+  return sessions[`${cli}::${projectId}::${sessionId}`] ?? sessions[`${projectId}::${sessionId}`] ?? {};
+}
+
+async function updateSessionPref(cli, projectId, sessionId, patch) {
+  if (!(await ensureProjectPrefsWritable())) return false;
+  const key = `${cli}::${projectId}::${sessionId}`;
+  state.projectPrefs.sessions = {
+    ...(state.projectPrefs.sessions ?? {}),
+    [key]: { ...sessionPrefOf(cli, projectId, sessionId), ...patch },
+  };
+  renderProjects(); // 内部连带重渲置顶/已归档区
+  return saveProjectPrefs();
+}
+
+function sessionDeepLink(cli, projectId, sessionId) {
+  return controlCenterDeepLink("session", `${cli}::${projectId}::${sessionId}`);
+}
+
+function projectDeepLink(project) {
+  return controlCenterDeepLink("project", project.id);
+}
+
+// 「从属团队」二级菜单：原位列出可选团队（当前项打勾）
+function teamPickContextItems(currentTeamId, onPick) {
+  return state.teams.map((team) => ({
+    icon: "branch",
+    label: `${team.id === currentTeamId ? "* " : ""}${team.name}${team.builtin ? "（默认）" : ""}`,
+    action: () => void onPick(team.id),
+  }));
 }
 
 function projectContextItems(project) {
   const pref = projectPrefOf(project);
+  // 远程项目：本地动作（资源管理器/归档/删会话文件）天然无意义，给精简如实菜单
+  if (project.remoteProject) {
+    const remote = project.remote;
+    return [
+      { icon: "pin", label: pref.pinned ? "取消置顶" : "置顶项目", action: () => void updateProjectPref(project, { pinned: !pref.pinned }) },
+      {
+        icon: "branch",
+        label: `从属团队：${teamById(effectiveProjectTeamId(project))?.name ?? "默认团队"}`,
+        action: () => {
+          showContextMenu(
+            teamPickContextItems(effectiveProjectTeamId(project), (teamId) => updateProjectPref(project, { teamId })),
+            lastMenuPos.x,
+            lastMenuPos.y,
+          );
+        },
+      },
+      {
+        icon: "branch",
+        label: "打开配置图谱",
+        disabled: remote.hostMissing || !remote.enabled,
+        action: () => {
+          selectConfigProject(project.remoteId);
+          setView("config", { configSurface: "providers", focus: false });
+        },
+      },
+      { icon: "window", label: "打开 SSH 终端", disabled: remote.hostMissing || !remote.enabled, action: () => void openRemoteTerminalForProject(project) },
+      {
+        icon: "folder",
+        label: "浏览文件（SFTP）",
+        disabled: remote.hostMissing || !remote.enabled,
+        action: () => {
+          // v41 波三：直达远程主机视图并预填主机+路径，由 hosts-panel 监听快显事件接管
+          setView("hosts");
+          window.dispatchEvent(new CustomEvent("forge:hosts-open-sftp", { detail: { hostId: remote.hostId, path: remote.path } }));
+        },
+      },
+      {
+        icon: "rename",
+        label: "重命名项目",
+        action: async () => {
+          const next = await promptDialog({ eyebrow: "项目侧栏", title: "重命名项目（仅影响侧栏显示）", value: pref.name || project.label });
+          if (next === null) return;
+          void updateProjectPref(project, { name: next });
+        },
+      },
+      "---",
+      {
+        icon: "remove",
+        label: "移除远程项目",
+        danger: true,
+        disabled: configRemoteWriteBlocked({ key: `project:${project.remoteId}`, hostId: remote.hostId, projectId: project.remoteId }, { notify: false }),
+        action: async () => {
+          if (configRemoteWriteBlocked({ key: `project:${project.remoteId}`, hostId: remote.hostId, projectId: project.remoteId })) return;
+          const verdict = await confirmAction({
+            eyebrow: "项目侧栏",
+            title: `移除远程项目「${pref.name || project.label}」？`,
+            rows: [["主机", `${remote.hostName}${remote.addr ? `（${remote.addr}）` : ""}`], ["路径", remote.path]],
+            warning: "仅从台账移除登记，不动远程主机上的任何文件。",
+            confirmLabel: "移除",
+            danger: true,
+          });
+          if (!verdict) return; // confirmAction 无 checkbox 时 resolve 布尔（波四修复：原 verdict.confirmed 恒 undefined，移除永不执行）
+          try {
+            await request(`/api/remote-projects/${encodeURIComponent(project.remoteId)}`, { method: "DELETE" });
+            await loadProjects();
+            toast("已移除远程项目", "success");
+          } catch (error) {
+            toast(`移除失败:${error.message}`, "error");
+          }
+        },
+      },
+    ];
+  }
   return [
     { icon: "pin", label: pref.pinned ? "取消置顶" : "置顶项目", action: () => void updateProjectPref(project, { pinned: !pref.pinned }) },
+    {
+      icon: "branch",
+      label: `从属团队：${teamById(effectiveProjectTeamId(project))?.name ?? "默认团队"}`,
+      action: () => {
+        showContextMenu(
+          teamPickContextItems(effectiveProjectTeamId(project), (teamId) => updateProjectPref(project, { teamId })),
+          lastMenuPos.x,
+          lastMenuPos.y,
+        );
+      },
+    },
     { icon: "folder", label: "在资源管理器中打开", disabled: !project.path, action: () => void revealPath(project.path) },
+    { icon: "link", label: "复制深度链接", action: () => void copyText(projectDeepLink(project), "深度链接") },
+    { icon: "window", label: "在新窗口中打开", action: () => openDeepLink(projectDeepLink(project)) },
     {
       icon: "rename",
       label: "重命名项目",
@@ -1488,6 +5906,9 @@ function projectContextItems(project) {
         void updateProjectPref(project, { name: next });
       },
     },
+    ...(pref.hidden
+      ? [{ icon: "check", label: "取消隐藏（恢复到侧栏）", action: () => void updateProjectPref(project, { hidden: false, pinned: false }) }]
+      : []),
     {
       icon: "archive",
       label: "归档任务",
@@ -1508,139 +5929,1511 @@ function projectContextItems(project) {
       label: "移除",
       danger: true,
       action: async () => {
-        const confirmed = await confirmAction({
+        const verdict = await confirmAction({
           eyebrow: "项目侧栏",
           title: `从侧栏移除「${pref.name || project.label}」？`,
           rows: [["路径", project.path ?? project.id]],
-          warning: "仅从侧栏隐藏，不删除磁盘上的任何文件或历史会话。",
+          warning: "默认仅从侧栏隐藏，不动磁盘上的任何文件。",
+          checkbox: { label: "同时删除磁盘上的会话文件（移入隔离区，可恢复）", checked: false },
           confirmLabel: "移除",
           danger: true,
         });
-        if (confirmed) void updateProjectPref(project, { hidden: true });
+        if (!verdict.confirmed) return;
+        if (verdict.checked) {
+          try {
+            const result = await request("/api/projects/delete-sessions", { method: "POST", body: { project: project.id, path: project.path } });
+            const statuses = Array.isArray(result.sources) ? result.sources : [];
+            const labels = { claude: "Claude", codex: "Codex", cursor: "Cursor", kimi: "Kimi", pi: "Pi" };
+            const removed = statuses
+              .filter((status) => Number(status?.removed) > 0)
+              .map((status) => `${labels[status.source] ?? status.source} ${status.removed} 个`);
+            const unsupported = statuses
+              .filter((status) => status?.supported === false)
+              .map((status) => labels[status.source] ?? status.source);
+            const limited = statuses
+              .filter((status) => status?.supported !== false && status?.limited)
+              .map((status) => labels[status.source] ?? status.source);
+            const messages = [];
+            messages.push(removed.length ? `已隔离 ${removed.join("、")}` : "Claude/Codex 未发现可隔离会话");
+            if (unsupported.length) messages.push(`${unsupported.join("、")} 暂不支持项目级会话删除`);
+            if (limited.length) messages.push(`${limited.join("、")} 扫描或隔离不完整，剩余数量未知`);
+            if (result.trash && removed.length) messages.push(`隔离区：${result.trash}`);
+            toast(messages.join("；"), unsupported.length || limited.length ? "warning" : removed.length ? "success" : "warning", 12_000);
+          } catch (error) {
+            toast(`删除会话文件失败：${error.message}`, "error", 6000);
+          }
+        }
+        void updateProjectPref(project, { hidden: true });
+        void loadProjects(); // 文件可能已消失，重新扫描保持树一致
       },
     },
   ];
 }
 
 const PROJECT_SUMMARIES_KEY = "514cc-project-summaries";
+const SHOW_SUBAGENTS_KEY = "514cc-show-subagents";
+const RECENT_ONLY_KEY = "514cc-recent-only";
+const SHOW_HIDDEN_KEY = "514cc-show-hidden";
+const RECENT_WINDOW_MS = 30 * 24 * 60 * 60 * 1000; // 「近期」= 近 30 天
 
 const FINISHED_RUN_STATES = new Set(["succeeded", "failed", "cancelled"]); // 与后端 orchestrator TERMINAL 同口径
 
 // ===== 团队：会话级能力配比预设（内置 514cc 冻结，自定义可增改删） =====
 const TEAM_KEY = "514cc-selected-team";
+const COMPOSER_CLI_OPEN_KEY = "514cc-composer-cli-open-v2";
 const BUILTIN_TEAM_ID = "team-514cc";
-// 与后端 teams.mjs COORDINATOR_ELIGIBLE 同口径：具备真实 CLI 会话语义、可任主脑的 provider
-const COORDINATOR_ELIGIBLE = new Set(["claude-fable", "codex-technical", "grok-build", "gemini-research", "pi-resident"]);
 
 function currentTeam() {
   return state.teams.find((team) => team.id === state.selectedTeamId) ?? state.teams[0] ?? null;
 }
 
-async function loadTeams() {
-  try {
-    const payload = await request(API.teams);
-    state.teams = payload.teams ?? [];
-    if (payload.rejectedOnLoad?.length) {
-      // 拒载必须可见——团队不能静默消失（烛 R12 建议）
-      toast(`${payload.rejectedOnLoad.length} 个团队配置校验失败被拒载：${payload.rejectedOnLoad[0].reason}`, "warning", 8000);
+let teamsLoadPromise = null;
+let teamsQueuedFreshPromise = null;
+let teamsFreshRequested = false;
+let teamsLoadEpoch = 0;
+let teamFormDirty = false;
+let teamFormBusy = false;
+let teamFormInitialized = false;
+let teamFormRevision = 0;
+
+function teamCatalogSignature(catalog = state.bootstrap?.teamCatalog) {
+  if (!Array.isArray(catalog)) return "";
+  return JSON.stringify(catalog.map((item) => [
+    item.id,
+    item.label,
+    item.shortLabel,
+    item.role,
+    item.provider,
+    item.runtimeProfileId,
+    item.enabled,
+    item.teamMemberEligible,
+    item.coordinatorEligible,
+    item.eligibilityReason,
+  ]));
+}
+
+function reconcileTeamFormCatalog(previousSignature) {
+  const nextSignature = teamCatalogSignature();
+  if (previousSignature === nextSignature || !teamFormInitialized || !elements["team-form"]) return;
+  if (teamFormDirty || teamFormBusy) {
+    const list = elements["team-members-list"];
+    if (!teamFormBusy && nextSignature && list) {
+      const members = new Set([...list.querySelectorAll('input[type="checkbox"]:checked')].map((input) => input.value));
+      const activeCoordinator = list.querySelector('input[name="team-coordinator"]:checked')?.value
+        || elements["team-form"].dataset.coordinator
+        || "";
+      renderTeamMemberOptions(teamById(state.editingTeamId), {
+        members,
+        activeCoordinator,
+        readOnly: Boolean(teamById(state.editingTeamId)?.builtin),
+      });
     }
-    // 只有成功响应确认所选团队不存在才回退——瞬时网络错误不清空、不改选择（烛 R10 建议）
-    if (!state.teams.some((team) => team.id === state.selectedTeamId)) {
-      state.selectedTeamId = BUILTIN_TEAM_ID;
-      sessionStorage.setItem(TEAM_KEY, state.selectedTeamId);
-    }
-  } catch (error) {
-    toast(`团队加载失败：${error.message}`, "error");
-    if (!state.teams.length) {
-      elements["team-picker"].innerHTML = emptyMarkup("团队加载失败", "点击刷新重试");
-    }
-    return; // 保留旧列表与选择
+    toast("团队成员目录已更新；当前未保存草稿已保留，保存前请复核成员与主脑", "warning", 7000);
+    return;
   }
-  renderTeams();
+  fillTeamForm(state.editingTeamId ? teamById(state.editingTeamId) : null);
+}
+
+function startTeamsLoad() {
+  const epoch = ++teamsLoadEpoch;
+  let requestPromise;
+  requestPromise = (async () => {
+    try {
+      const payload = await request(API.teams);
+      // 写操作要求 fresh 时，写前启动的 GET 即使晚到也不能回滚界面。
+      if (epoch !== teamsLoadEpoch) return successfulLoadResult(payload, { stale: true });
+      state.teams = payload.teams ?? [];
+      state.teamStoreStatus = payload.storeStatus ?? null;
+      if (payload.rejectedOnLoad?.length) {
+        // 拒载必须可见——团队不能静默消失（烛 R12 建议）
+        toast(`${payload.rejectedOnLoad.length} 个团队配置校验失败被拒载：${payload.rejectedOnLoad[0].reason}`, "warning", 8000);
+      }
+      if (payload.storeStatus?.failClosed) {
+        toast(payload.storeStatus.message || "团队存储不可验证；团队写入和成员换绑/删除已冻结", "error", 8000);
+      }
+      // 只有成功响应确认所选团队不存在才回退——瞬时网络错误不清空、不改选择（烛 R10 建议）
+      if (!state.teams.some((team) => team.id === state.selectedTeamId)) {
+        state.selectedTeamId = BUILTIN_TEAM_ID;
+        localStorage.setItem(TEAM_KEY, state.selectedTeamId);
+      }
+      renderTeams();
+      refreshTeamData();
+      renderTeamActivation();
+      if (elements["team-switch-select"]) {
+        const editing = teamById(state.editingTeamId);
+        if (state.editingTeamId && !editing) {
+          if (teamFormDirty && !teamFormBusy) {
+            state.editingTeamId = null;
+            teamFormRevision += 1;
+            elements["team-form-title"].textContent = "新建团队 · 原团队已不存在";
+            elements["team-builtin-note"].hidden = true;
+            elements["team-delete-button"].hidden = true;
+            elements["team-save-label"].textContent = "保存";
+            for (const field of ["team-name-input", "team-description-input", "team-prompt-input"]) elements[field].disabled = false;
+            for (const app of PROVIDER_APPS) elements[`team-provider-${app}`].disabled = false;
+            renderTeamSwitcher(null);
+            updateTeamFormStatus();
+            renderTeamActivation();
+            toast("正在编辑的团队已被外部删除；当前草稿已保留为新团队", "warning", 6000);
+          } else {
+            state.editingTeamId = null;
+            if (state.view === "team") fillTeamForm(currentTeam());
+            else renderTeamSwitcher(null);
+          }
+        } else if (editing && teamFormInitialized && !teamFormDirty && !teamFormBusy) {
+          // clean 表单跟随服务端新快照；dirty/busy 表单必须保留当前 DOM。
+          fillTeamForm(editing);
+        } else {
+          renderTeamSwitcher(editing);
+        }
+      }
+      missionControlDock?.refreshIdle?.();
+      return successfulLoadResult(payload);
+    } catch (error) {
+      if (epoch !== teamsLoadEpoch) return successfulLoadResult(null, { stale: true });
+      toast(`团队加载失败：${error.message}`, "error");
+      if (!state.teams.length) {
+        const tree = elements["workbench-project-tree"];
+        if (tree) tree.innerHTML = emptyMarkup("团队加载失败", "点击刷新重试");
+      }
+      return failedLoadResult(error); // 保留旧列表与选择
+    }
+  })().finally(() => {
+    if (teamsLoadPromise === requestPromise) teamsLoadPromise = null;
+  });
+  teamsLoadPromise = requestPromise;
+  return requestPromise;
+}
+
+function loadTeams({ fresh = false } = {}) {
+  // 已有 fresh 队列时，普通调用也等待最终快照，不能提前拿到被失效的中间结果。
+  if (teamsQueuedFreshPromise) {
+    if (fresh) {
+      teamsFreshRequested = true;
+      if (teamsLoadPromise) teamsLoadEpoch += 1;
+    }
+    return teamsQueuedFreshPromise;
+  }
+  if (!teamsLoadPromise) return startTeamsLoad();
+  if (!fresh) return teamsLoadPromise;
+
+  teamsFreshRequested = true;
+  teamsLoadEpoch += 1;
+  const activeLoad = teamsLoadPromise;
+  let queuedPromise;
+  queuedPromise = (async () => {
+    try {
+      let result = await activeLoad;
+      // fresh 在新请求进行中再次到达时继续补发，直到最后一次写之后的快照落盘。
+      while (teamsFreshRequested) {
+        teamsFreshRequested = false;
+        result = await startTeamsLoad();
+      }
+      return result;
+    } finally {
+      // 必须在 queued promise 结算前清空；最终 GET 的 then() 里再次 fresh 才会启动新请求。
+      if (teamsQueuedFreshPromise === queuedPromise) teamsQueuedFreshPromise = null;
+    }
+  })();
+  teamsQueuedFreshPromise = queuedPromise;
+  return teamsQueuedFreshPromise;
+}
+
+// ===== 团队层级树：团队 → 从属项目 → 会话 =====
+function defaultTeamId() {
+  return state.teams.find((team) => team.builtin)?.id ?? BUILTIN_TEAM_ID;
+}
+
+function teamById(id) {
+  return state.teams.find((team) => team.id === id) ?? null;
+}
+
+// 显式从属：只有右键手动归属过、且目标团队仍存在时才返回 team id，否则 null=未归属。
+// LO 2026-08-10 严格归属制：团队树下只挂显式归属的项目；未归属的进「未归属」虚拟组
+// 兜底可见（保留 08-08 "项目不能整片消失"的底线，但不再在所有团队混显）。
+function explicitProjectTeamId(project) {
+  const pref = projectPrefOf(project);
+  return pref.teamId && teamById(pref.teamId) ? pref.teamId : null;
+}
+
+// 项目从属：显式归属优先，未归属回落默认团队（会话从属比较、右键菜单当前值等仍需要一个具体 id）
+function effectiveProjectTeamId(project) {
+  return explicitProjectTeamId(project) ?? defaultTeamId();
+}
+
+// 会话从属：会话级 teamId 优先，缺省跟随项目
+function effectiveSessionTeamId(project, session) {
+  const pref = sessionPrefOf(session.cli ?? "claude", project.id, session.id);
+  return pref.teamId && teamById(pref.teamId) ? pref.teamId : effectiveProjectTeamId(project);
+}
+
+// 侧栏工作区团队（LO 2026-08-04：侧栏=团队工作区，只显示选中团队，不混显其他团队）；
+// 选中团队缺失（未加载/已删除）时回退内置/首个团队，teams 空时落到默认团队 id
+function railTeamId() {
+  return (teamById(state.selectedTeamId) ?? state.teams.find((team) => team.builtin) ?? state.teams[0])?.id ?? defaultTeamId();
+}
+
+function runInRailTeam(run) {
+  return (run?.teamId || defaultTeamId()) === railTeamId();
 }
 
 function renderTeams() {
-  const container = elements["team-picker"];
-  if (!container) return;
-  if (!state.teams.length) {
-    container.innerHTML = emptyMarkup("暂无团队", "团队服务未就绪");
+  // 团队呈现已并入团队树；composer 的直接收件人由目标标签唯一决定。
+  const select = elements["composer-team"];
+  if (select) {
+    select.innerHTML = state.teams
+      .map((team) => `<option value="${escapeHtml(team.id)}"${team.id === state.selectedTeamId ? " selected" : ""}>${escapeHtml(team.name)}</option>`)
+      .join("");
+  }
+  const startSelect = elements["start-agent"];
+  if (startSelect) {
+    const team = state.teams.find((item) => item.id === state.selectedTeamId) ?? state.teams.find((item) => item.builtin);
+    const members = team?.members ?? [];
+    const coordinator = team?.coordinator ?? members[0] ?? "";
+    const previous = startSelect.value;
+    startSelect.innerHTML = members
+      .map((member) => `<option value="${escapeHtml(member)}"${member === (members.includes(previous) ? previous : coordinator) ? " selected" : ""}>${escapeHtml(agentLabel(member))}${member === coordinator ? "（leader）" : ""}</option>`)
+      .join("");
+  }
+  renderProjects();
+  renderRuns(); // 侧栏按团队隔离后，团队任何变化都要联动会话/正在工作/置顶区
+  renderStatusline();
+  renderMemberStrip();
+  syncModelPick(); // 团队/目标成员变化后，CLI 专属控制目录同步
+}
+
+// 选项渲染（尽量保留当前选中；不在目录内则回落首项=默认）
+function renderPickOptions(select, options, currentValue) {
+  select.innerHTML = options
+    .map((option) => `<option value="${escapeHtml(option.id)}"${option.id === currentValue ? " selected" : ""}>${escapeHtml(option.label)}</option>`)
+    .join("");
+}
+
+let modelPickEpoch = 0;
+
+function composerControlKey(memberId, runtimeProfileId = null) {
+  const member = String(memberId || "").trim();
+  if (!member) return "";
+  return `${member}::${String(runtimeProfileId || member).trim()}`;
+}
+
+function nativePermissionToComposer(value) {
+  return {
+    plan: "plan",
+    "read-only": "review",
+    "workspace-write": "build",
+    "workspace-write:on-failure": "auto",
+    "danger-full-access": "full-access",
+    "config-default": "config",
+  }[value] || "plan";
+}
+
+function supportedControlValue(options, preferred, fallback = "") {
+  const values = (options || []).map((option) => String(option?.id ?? option?.value ?? ""));
+  const requested = String(preferred ?? "");
+  if (values.includes(requested)) return requested;
+  const safeFallback = String(fallback ?? "");
+  if (values.includes(safeFallback)) return safeFallback;
+  return values[0] ?? "";
+}
+
+function composerDraftFor(memberId, { runtimeProfileId, profile, template } = {}) {
+  const key = composerControlKey(memberId, runtimeProfileId);
+  const stored = key ? state.composerControlDrafts.get(key) : null;
+  if (stored) return { key, draft: { ...stored } };
+  const draft = {
+    model: "",
+    effort: "",
+    permission: nativePermissionToComposer(profile?.defaultPermissionMode || template?.defaultPermissionMode || "read-only"),
+  };
+  if (key) state.composerControlDrafts.set(key, draft);
+  return { key, draft: { ...draft } };
+}
+
+function rememberComposerControlDraft(target = activeComposerTarget()) {
+  if (target?.run || !target?.memberId) return;
+  const { runtimeProfileId } = staticControlContext(target.memberId);
+  const key = composerControlKey(target.memberId, runtimeProfileId);
+  if (!key) return;
+  state.composerControlDrafts.set(key, {
+    model: elements["task-model"]?.value || "",
+    effort: elements["task-effort"]?.value || "",
+    permission: elements["task-permission"]?.value || "plan",
+  });
+}
+
+function composerCliContextState(context = {}) {
+  const key = composerControlKey(context.memberId, context.runtimeProfileId);
+  return {
+    key,
+    value: (key && state.composerCliActionStates.get(key)) || { busy: false, result: null, epoch: 0 },
+  };
+}
+
+function beginComposerCliOperation(context) {
+  const { key, value } = composerCliContextState(context);
+  if (!key || value.busy) return null;
+  const next = { ...value, busy: true, epoch: Number(value.epoch || 0) + 1 };
+  state.composerCliActionStates.set(key, next);
+  return { key, epoch: next.epoch };
+}
+
+function finishComposerCliOperation(operation, patch = {}) {
+  if (!operation?.key) return false;
+  const current = state.composerCliActionStates.get(operation.key);
+  if (!current || current.epoch !== operation.epoch) return false;
+  state.composerCliActionStates.set(operation.key, { ...current, ...patch, busy: false });
+  return true;
+}
+
+function activeComposerTarget() {
+  const run = selectedRun() && !state.sessionPreview ? selectedRun() : null;
+  const teamId = run?.teamId || state.selectedTeamId || defaultTeamId();
+  const team = teamById(teamId) ?? teamById(state.selectedTeamId) ?? state.teams.find((item) => item.builtin) ?? state.teams[0] ?? null;
+  const members = (run && Array.isArray(run.teamMembers) && run.teamMembers.length
+    ? run.teamMembers
+    : team?.members || []).filter(Boolean);
+  const coordinatorId = run?.coordinatorId || team?.coordinator || members[0] || null;
+  const preferredAgentId = run ? activeAgentId() : state.composerTargetAgentId;
+  const defaultMemberId = run ? defaultRunRecipient(run) : coordinatorId;
+  const memberId = preferredAgentId && members.includes(preferredAgentId)
+    ? preferredAgentId
+    : members.includes(defaultMemberId) ? defaultMemberId : coordinatorId;
+  const mode = memberId ? "member" : "none";
+  return { mode, memberId, coordinatorId, members, teamId, team, run };
+}
+
+function syncSideChatTarget(target = activeComposerTarget()) {
+  const title = byId("mission-side-chat-title");
+  const input = byId("mission-side-chat-input");
+  const submit = byId("mission-side-chat-form")?.querySelector('button[type="submit"]');
+  const name = target.memberId ? agentLabel(target.memberId) : "未配置直接收件人";
+  if (title) title.textContent = name;
+  if (input) {
+    input.placeholder = target.memberId ? `直接发送给 ${name}` : "当前团队没有可执行成员";
+    input.disabled = !target.memberId;
+  }
+  if (submit) {
+    submit.disabled = !target.memberId;
+    submit.title = target.memberId ? `发送给 ${name}` : "当前没有可用收件人";
+    submit.setAttribute("aria-label", submit.title);
+  }
+}
+
+function syncLegacyComposerTarget(target = activeComposerTarget()) {
+  const memberId = target.memberId || "";
+  for (const id of ["start-agent", "followup-agent"]) {
+    const select = elements[id];
+    if (!select || !memberId) continue;
+    if (![...select.options].some((option) => option.value === memberId)) {
+      select.add(new Option(agentLabel(memberId), memberId));
+    }
+    select.value = memberId;
+  }
+}
+
+function syncComposerTargetUi(target = activeComposerTarget()) {
+  syncLegacyComposerTarget(target);
+  const shell = byId("composer-shell");
+  const name = byId("composer-target-name");
+  const logo = byId("composer-target-logo");
+  const cliBadge = byId("composer-target-cli");
+  const route = byId("composer-target-route");
+  const sessionControls = byId("composer-session-controls");
+  const memberName = target.memberId ? agentLabel(target.memberId) : "未配置主脑";
+  const cli = target.memberId ? agentCli(target.memberId) : null;
+  const { template } = staticControlContext(target.memberId);
+  const cliName = template?.label || (cli ? `${cli[0].toUpperCase()}${cli.slice(1)} CLI` : "CLI 未配置");
+  if (shell) {
+    shell.dataset.targetMode = target.mode;
+    shell.dataset.targetAgent = target.memberId || "";
+  }
+  if (name) name.textContent = memberName;
+  if (logo) logo.innerHTML = cli ? cliIconMarkup(cli, "cli-logo") : lucideIcon("terminal", "icon lucide");
+  if (cliBadge) cliBadge.textContent = cliName;
+  const waitingAnswer = Boolean(target.run?.pendingAsk);
+  const answeringAsk = waitingAnswer && target.run.pendingAsk.from === target.memberId;
+  if (route) route.textContent = answeringAsk ? "回答该成员" : "直接收件人";
+  if (sessionControls) {
+    sessionControls.hidden = !target.run;
+    sessionControls.querySelector("span").textContent = `沿用 ${memberName} 会话配置`;
+  }
+  if (elements["submit-task-button"]) {
+    const action = answeringAsk ? `回答 ${memberName}` : `发送给 ${memberName}`;
+    elements["submit-task-button"].title = action;
+    elements["submit-task-button"].setAttribute("aria-label", action);
+  }
+  const input = elements["task-input"];
+  if (input) {
+    const steering = Boolean(target.run) && !waitingAnswer && ACTIVE_RUN_STATES.has(target.run.status);
+    const askerName = waitingAnswer ? agentLabel(target.run.pendingAsk.from) : "";
+    input.placeholder = answeringAsk
+      ? `回答 ${askerName}：${String(target.run.pendingAsk.text || "").slice(0, 80)}`
+      : waitingAnswer
+        ? `${askerName} 正等待回答；当前消息将排队发送给 ${memberName}`
+      : steering
+        ? `会话进行中——发送给 ${memberName} 的消息将在当前轮结束后送达`
+        : target.run
+          ? `直接发送给 ${memberName}：补充要求、质疑证据或继续执行`
+          : `直接交给 ${memberName} 执行`;
+  }
+  syncSideChatTarget(target);
+}
+
+function runPermissionOptions(permissionModes = []) {
+  const rows = [];
+  const add = (id, label) => {
+    if (!rows.some((row) => row.id === id)) rows.push({ id, label });
+  };
+  // Codex 官方权限档：adapter 声明 danger-full-access（预设族标记位）时，
+  // 用与 Codex 桌面批准菜单同款的四档替换 514cc 自造档位。
+  if (permissionModes.includes("danger-full-access")) {
+    if (permissionModes.includes("workspace-write")) add("ask", "请求批准");
+    if (permissionModes.includes("workspace-write:on-failure")) add("auto", "帮我批准");
+    add("full-access", "完全访问权限");
+    if (permissionModes.includes("config-default")) add("config", "自定义 (config.toml)");
+    if (rows.length) return rows;
+  }
+  if (permissionModes.includes("plan")) add("plan", "Plan · 只读规划");
+  if (permissionModes.includes("read-only")) add("review", "Review · 只读深审");
+  if (permissionModes.includes("workspace-write")) add("build", "Build · 写盘审批");
+  return rows.length ? rows : [{ id: "plan", label: "Plan · 只读规划" }];
+}
+
+// 权限 pill（Codex 桌面式选择器）：`<select id="task-permission">` 仍是唯一状态源，
+// pill/menu 只是它的镜像。文案如实对应 permissions.json 的 modes——不虚构后端没有的能力档。
+const PERMISSION_MODE_META = {
+  plan: { short: "只读规划", title: "Plan · 只读规划", desc: "不写入、不执行命令、不联网——只产出计划与方案", icon: "book-open" },
+  review: { short: "只读深审", title: "Review · 只读深审", desc: "允许只读 shell 排查证据，不落盘任何修改", icon: "scan-search" },
+  build: { short: "写盘审批", title: "Build · 写盘审批", desc: "隔离工作区写盘，写动作逐个审批后才执行", icon: "hammer" },
+  // Codex 官方权限档：文案与 Codex 桌面批准菜单逐字对齐，不夸大不缩水
+  ask: { short: "请求批准", title: "请求批准", desc: "编辑外部文件和使用互联网时始终询问", icon: "shield-check" },
+  auto: { short: "帮我批准", title: "帮我批准", desc: "仅对检测到的风险操作请求批准", icon: "zap" },
+  "full-access": { short: "完全访问", title: "完全访问权限", desc: "可不受限制地访问互联网和您电脑上的任何文件", icon: "triangle-alert" },
+  config: { short: "自定义", title: "自定义 (config.toml)", desc: "使用 config.toml 中定义的权限", icon: "settings" },
+};
+
+function permissionModeMeta(id, fallbackLabel = "") {
+  return PERMISSION_MODE_META[id] || { short: fallbackLabel || id, title: fallbackLabel || id, desc: "", icon: "shield" };
+}
+
+function syncPermissionPill() {
+  const select = elements["task-permission"];
+  const pill = elements["permission-pill"];
+  const menu = elements["permission-menu"];
+  if (!select || !pill || !menu) return;
+  const options = [...select.options].map((option) => ({ id: option.value, label: option.textContent.trim() }));
+  const current = permissionModeMeta(select.value, options.find((option) => option.id === select.value)?.label);
+  if (elements["permission-pill-label"]) elements["permission-pill-label"].textContent = current.short;
+  pill.disabled = select.disabled;
+  menu.innerHTML = options.map((option) => {
+    const meta = permissionModeMeta(option.id, option.label);
+    const active = option.id === select.value;
+    return `
+      <button type="button" class="permission-menu-row${active ? " is-active" : ""}" role="menuitemradio" aria-checked="${active}" data-permission-option="${escapeHtml(option.id)}">
+        <span class="permission-menu-icon" aria-hidden="true">${lucideIcon(meta.icon, "icon lucide")}</span>
+        <span class="permission-menu-copy">
+          <strong>${escapeHtml(meta.title)}</strong>
+          ${meta.desc ? `<span>${escapeHtml(meta.desc)}</span>` : ""}
+        </span>
+        <span class="permission-menu-check" aria-hidden="true">${active ? lucideIcon("check", "icon lucide") : ""}</span>
+      </button>`;
+  }).join("");
+}
+
+function setPermissionMenuOpen(open) {
+  const pill = elements["permission-pill"];
+  const menu = elements["permission-menu"];
+  if (!pill || !menu) return;
+  menu.hidden = !open;
+  pill.setAttribute("aria-expanded", String(open));
+}
+
+// 会话中权限热改白名单——与 orchestrator PERMISSION_HOT_TRANSITIONS 严格同表：
+// 只放开机制上每轮可改、治理上安全的迁移（降档写面收缩 / Codex ask↔auto 同 sandbox）。
+const PERMISSION_HOT_TRANSITIONS = Object.freeze({
+  plan: [],
+  review: ["plan"],
+  build: ["review", "plan"],
+  ask: ["auto"],
+  auto: ["ask"],
+  "full-access": [],
+  config: [],
+});
+
+// 续聊时权限 picker 的选项 = 当前档 + 可热迁移档（其余档要求新建任务，不列出来骗人）
+function continuingPermissionOptions(currentMode) {
+  const current = PERMISSION_MODE_META[currentMode] ? currentMode : "plan";
+  return [current, ...(PERMISSION_HOT_TRANSITIONS[current] || [])]
+    .map((id) => ({ id, label: permissionModeMeta(id).title }));
+}
+
+// 续聊中改模型/Effort/权限 = run 级热改（PATCH /controls），下一轮生效；失败回滚 select 显示
+async function applyRunControlChange(controlId, value) {
+  const run = selectedRun();
+  if (!run) return;
+  // 恢复条未确认：热改与续聊同闸——先点「确认恢复并继续」，本地直接拦下不说英文黑话
+  if (run.status === "recovery_required" && state.recoveryAckRunId !== run.id) {
+    toast("热改被拒绝：上一轮原生会话提交状态不明，请先点恢复条上的「确认恢复并继续」", "error", 4200);
+    await syncModelPick(); // 回滚 select 到 run 的真实档位
     return;
   }
-  const focusWasInside = container.contains(document.activeElement);
-  container.innerHTML = state.teams
-    .map((team) => {
-      const selected = team.id === state.selectedTeamId;
-      return `<button class="team-option${selected ? " is-selected" : ""}" type="button"
-        aria-pressed="${selected}" data-team-select="${escapeHtml(team.id)}"
-        title="${escapeHtml(team.description || team.name)}">
-        <span class="team-name">${escapeHtml(team.name)}</span>
-        ${team.builtin ? `<span class="team-lock" title="内置团队，配置冻结" aria-label="内置团队，配置冻结">内置</span>` : ""}
-        <span class="team-count">${(team.members ?? []).length} 成员</span>
-      </button>`;
-    })
-    .join("");
-  // 重绘会销毁旧焦点节点——焦点原在选择器内则落回选中项（烛 R10 建议）
-  if (focusWasInside) container.querySelector(".team-option.is-selected")?.focus?.({ preventScroll: true });
-  renderStatusline();
+  const patch = controlId === "task-model"
+    ? { model: value }
+    : controlId === "task-effort"
+      ? { effort: value }
+      : { permissionMode: value };
+  // 恢复条已确认但未发送：确认标记随本次热改一次性消费，服务端原子完成"放弃 claim + 改档"
+  if (run.status === "recovery_required") patch.acknowledgeRecovery = true;
+  try {
+    const updated = normalizeRun(await request(`/api/runs/${encodeURIComponent(run.id)}/controls`, { method: "PATCH", body: patch }), 0);
+    state.runs = state.runs.map((entry) => (entry.id === updated.id ? updated : entry));
+    if (patch.acknowledgeRecovery) state.recoveryAckRunId = null; // 确认标记一次性消费（与发送链路同语义）
+    const what = controlId === "task-model"
+      ? `模型已切换为 ${value || "席位默认"}`
+      : controlId === "task-effort"
+        ? `Effort 已调整为 ${value || "CLI 默认"}`
+        : `权限已切换为 ${permissionModeMeta(value, value).short}`;
+    toast(`${patch.acknowledgeRecovery ? "恢复已确认·" : ""}${what}，下一轮生效`, "success", 2400);
+    renderSelectedRun();
+  } catch (error) {
+    toast(`热改被拒绝：${error.message}`, "error", 3600);
+    await syncModelPick(); // 回滚 select 到 run 的真实档位
+  }
+}
+
+function syncComposerControlVisibility() {
+  const continuing = Boolean(selectedRun() && !state.sessionPreview);
+  const controls = state.agentControlCatalog?.controls;
+  const { template } = staticControlContext(activeComposerTarget().memberId);
+  const modelUnsupported = controls
+    ? controls.model?.supported === false
+    : template?.modelMode === "none";
+  const effortUnsupported = controls
+    ? controls.effort?.supported !== true
+    : template?.effortMode === "none";
+  if (elements["task-model-pick"]) {
+    // 模型每轮可改：Codex turn/start 接受 per-turn model（0.146.0 实测），spawn 型 argv 本就每轮带
+    elements["task-model-pick"].hidden = modelUnsupported;
+  }
+  if (elements["task-effort-pick"]) {
+    // Effort 两种 Adapter 都是每轮参数（codex turn/start / spawn argv）——续聊也可热调
+    elements["task-effort-pick"].hidden = effortUnsupported;
+  }
+  // 权限续聊可见：白名单迁移（降档 + Codex ask↔auto）由后端校验，选项随当前档收窄
+  if (elements["task-permission-pick"]) elements["task-permission-pick"].hidden = false;
+  if (byId("composer-session-controls")) byId("composer-session-controls").hidden = !continuing;
+}
+
+function staticControlContext(agentId) {
+  const member = (state.memberCatalog || []).find((item) => item.id === agentId);
+  const runtimeProfileId = member?.runtimeProfileId || agentId;
+  const profile = (state.bootstrap?.providers ?? []).find((item) => item.id === runtimeProfileId) || null;
+  const templates = state.bootstrap?.adapterTemplates || state.adapterTemplatesData?.templates || [];
+  const template = templates.find((item) => item.id === profile?.adapter) || null;
+  return { member, runtimeProfileId, profile, template };
+}
+
+function composerCliCatalog() {
+  const agentId = activeComposerTarget().memberId || "";
+  const loaded = state.agentControlCatalog;
+  if (loaded?.context?.memberId === agentId) return loaded;
+  const { runtimeProfileId, profile, template } = staticControlContext(agentId);
+  const modelOptions = (profile?.modelOptions || []).filter((option) => option?.id);
+  const effortLevels = template?.effortMode === "none"
+    ? []
+    : [...new Set([...(profile?.effortLevels || []), ...(template?.effortLevels || [])])];
+  const providerApp = template?.providerApp || null;
+  const actions = [
+    {
+      id: "refresh-catalog", label: "刷新能力目录", detail: "重新读取当前 CLI 的模型与推理档位。",
+      execution: "server-catalog-refresh", risk: "read-only",
+    },
+    ...(template?.diagnosticActions || []).map((action) => ({ ...action, execution: "allowlisted-cli" })),
+    { id: "open-seat-config", label: "编辑席位完整配置", execution: "frontend-seat-editor", risk: "configuration-write" },
+    { id: "open-connection", label: providerApp ? "编辑 Provider 连接" : "查看 CLI 认证归属", execution: "frontend-connection-editor", risk: providerApp ? "credential-configuration" : "read-only" },
+  ];
+  return {
+    version: 2,
+    context: {
+      memberId: agentId,
+      runtimeProfileId,
+      runtimeProfileLabel: profile?.label || runtimeProfileId,
+      adapterId: template?.id || profile?.adapter || "",
+      adapterLabel: template?.label || profile?.adapter || "CLI",
+      transport: template?.transport || "unknown",
+      providerApp,
+      providerId: profile?.providerId || null,
+      providerBindingMode: template?.providerBindingMode || "unknown",
+      selectable: template?.selectable !== false,
+      enabled: profile?.enabled !== false,
+    },
+    source: "fallback",
+    models: modelOptions,
+    effortLevels,
+    controls: {
+      command: { supported: template?.commandMode !== "none", value: profile?.command || template?.defaultCommand || null, help: template?.commandHelp || "" },
+      model: { supported: template?.modelMode !== "none", options: modelOptions.map((option) => ({ value: option.id, label: option.label })) },
+      effort: { supported: template?.effortMode !== "none", options: effortLevels.map((value) => ({ value, label: value })) },
+      permission: { supported: true, options: (template?.permissionModes || ["read-only"]).map((value) => ({ value, label: value })) },
+      cwd: { mode: template?.cwdMode || "process-fixed" },
+    },
+    defaults: {
+      model: profile?.model || null,
+      effort: profile?.defaultEffort || null,
+      permission: profile?.defaultPermissionMode || template?.defaultPermissionMode || "read-only",
+      quickEditable: template?.selectable !== false,
+    },
+    connection: {
+      mode: template?.providerBindingMode || "unknown",
+      providerApp,
+      providerId: profile?.providerId || null,
+    },
+    commands: fallbackRuntimeSlashCommands(),
+    actions,
+    notes: [...(template?.controlNotes || [])],
+  };
+}
+
+function composerCliPermissionLabel(value) {
+  return {
+    plan: "Plan · 只读规划",
+    "read-only": "Review · 只读深审",
+    "workspace-write": "Build · 写盘审批",
+  }[value] || value;
+}
+
+function renderComposerCliSelect(select, options, currentValue, emptyLabel, { includeEmpty = true } = {}) {
+  if (!select) return;
+  const normalized = includeEmpty ? [{ id: "", label: emptyLabel }] : [];
+  for (const option of options || []) {
+    const id = String(option?.value ?? option?.id ?? "");
+    if (!id || normalized.some((entry) => entry.id === id)) continue;
+    normalized.push({ id, label: String(option?.label || id) });
+  }
+  if (currentValue && !normalized.some((entry) => entry.id === currentValue)) {
+    normalized.push({ id: currentValue, label: `${currentValue}（当前）` });
+  }
+  renderPickOptions(select, normalized, currentValue || "");
+}
+
+function setComposerCliTab(tab, { focus = false } = {}) {
+  const consoleRoot = elements["composer-cli-console"];
+  if (!consoleRoot) return;
+  const next = ["commands", "defaults", "connection"].includes(tab) ? tab : "commands";
+  state.composerCliTab = next;
+  consoleRoot.querySelectorAll("[data-composer-cli-tab]").forEach((button) => {
+    const active = button.dataset.composerCliTab === next;
+    button.setAttribute("aria-selected", String(active));
+    button.tabIndex = active ? 0 : -1;
+    if (active && focus) button.focus({ preventScroll: true });
+  });
+  for (const name of ["commands", "defaults", "connection"]) {
+    const panel = byId(`composer-cli-panel-${name}`);
+    if (panel) panel.hidden = name !== next;
+  }
+}
+
+function setComposerCliOpen(open) {
+  state.composerCliOpen = Boolean(open);
+  const panel = elements["composer-cli-console-panel"];
+  const toggle = elements["composer-cli-console-toggle"];
+  if (panel) panel.hidden = !state.composerCliOpen;
+  if (toggle) toggle.setAttribute("aria-expanded", String(state.composerCliOpen));
+  try { localStorage.setItem(COMPOSER_CLI_OPEN_KEY, state.composerCliOpen ? "1" : "0"); } catch { /* storage may be blocked */ }
+}
+
+function renderComposerCliConsole() {
+  const root = elements["composer-cli-console"];
+  if (!root) return;
+  const target = activeComposerTarget();
+  const catalog = composerCliCatalog();
+  const context = catalog.context || {};
+  const cliContextState = composerCliContextState(context);
+  const cliBusy = cliContextState.value.busy;
+  const continuing = Boolean(target.run);
+  const diagnosticActions = (catalog.actions || []).filter((action) => ["server-catalog-refresh", "allowlisted-cli"].includes(action.execution));
+  const sourceLabel = catalog.source === "dynamic" ? "CLI 实时目录" : catalog.source === "fallback" ? "配置回退目录" : "能力目录";
+  elements["composer-cli-console-title"].textContent = `${context.adapterLabel || "CLI"} 操作台`;
+  elements["composer-cli-console-summary"].textContent = `${catalog.commands?.length || 0} Composer 命令 · ${diagnosticActions.length} CLI 工具 · ${sourceLabel}`;
+  elements["composer-cli-console-state"].textContent = cliBusy
+    ? "执行中"
+    : continuing ? "会话配置·可热调" : context.enabled === false ? "席位已停用" : "本次任务可配置";
+  elements["composer-cli-console-state"].classList.toggle("is-warning", continuing || context.enabled === false);
+  root.dataset.adapter = context.adapterId || "unknown";
+  root.dataset.busy = String(cliBusy);
+  root.dataset.context = cliContextState.key;
+  setComposerCliOpen(state.composerCliOpen);
+  setComposerCliTab(state.composerCliTab);
+
+  const commandGroups = new Map();
+  for (const command of catalog.commands || []) {
+    const group = command.control || "other";
+    if (!commandGroups.has(group)) commandGroups.set(group, []);
+    commandGroups.get(group).push(command);
+  }
+  const groupLabels = { permission: "执行模式", model: "模型", effort: "推理强度", other: "命令" };
+  const controlSelectIds = { model: "task-model", effort: "task-effort", permission: "task-permission" };
+  const commandMarkup = [...commandGroups.entries()].map(([group, commands]) => `
+    <section class="composer-cli-command-group" aria-label="${escapeHtml(groupLabels[group] || group)}">
+      <span class="composer-cli-command-group-label">${escapeHtml(groupLabels[group] || group)}</span>
+      <div class="composer-cli-command-chips">${commands.map((command) => {
+        const select = elements[controlSelectIds[command.control]];
+        const selected = select?.value === String(command.value ?? "");
+        // 续聊：chips 只放行当前 select 里可热迁移的项（模型/Effort 全量；权限限白名单档）
+        const hotReachable = [...(select?.options || [])].some((option) => option.value === String(command.value ?? ""));
+        const disabled = cliBusy || (continuing && !hotReachable);
+        return `<button type="button" class="composer-cli-command${selected ? " is-selected" : ""}" data-composer-cli-command="${escapeHtml(command.id)}"
+          title="${escapeHtml(command.detail || command.label)}" aria-pressed="${selected}"${disabled ? " disabled" : ""}><code>${escapeHtml(command.label)}</code></button>`;
+      }).join("")}</div>
+    </section>`).join("");
+  elements["composer-cli-command-list"].innerHTML = commandMarkup || '<p class="composer-cli-console-empty">当前 Adapter 没有可应用到 Composer 的命令。</p>';
+  elements["composer-cli-command-note"].textContent = continuing
+    ? "Codex 沙箱轴随原生会话固化；模型、Effort、权限降档与 ask↔auto 可热调，下一轮生效。"
+    : (catalog.notes?.[0] || "命令只改变本次新任务；发送后配置固化到会话。");
+
+  const modelControl = catalog.controls?.model || {};
+  const effortControl = catalog.controls?.effort || {};
+  const permissionControl = catalog.controls?.permission || {};
+  renderComposerCliSelect(elements["composer-cli-default-model"], modelControl.options, catalog.defaults?.model, modelControl.supported === false ? "未接入" : "CLI 默认");
+  renderComposerCliSelect(elements["composer-cli-default-effort"], effortControl.options, catalog.defaults?.effort, effortControl.supported === true ? "未设置" : "未接入");
+  renderComposerCliSelect(
+    elements["composer-cli-default-permission"],
+    (permissionControl.options || []).map((option) => ({ value: option.value, label: composerCliPermissionLabel(option.value) })),
+    catalog.defaults?.permission,
+    "Adapter 默认",
+    { includeEmpty: false },
+  );
+  elements["composer-cli-default-model"].disabled = modelControl.supported === false || !catalog.defaults?.quickEditable || cliBusy;
+  elements["composer-cli-default-effort"].disabled = effortControl.supported !== true || !catalog.defaults?.quickEditable || cliBusy;
+  elements["composer-cli-default-permission"].disabled = !catalog.defaults?.quickEditable || cliBusy;
+  elements["composer-cli-default-save"].disabled = !catalog.defaults?.quickEditable || cliBusy;
+  elements["composer-cli-command-value"].textContent = catalog.controls?.command?.value
+    ? `执行命令：${catalog.controls.command.value}`
+    : "该通道不接受席位级执行命令";
+  elements["composer-cli-open-seat"].disabled = !context.runtimeProfileId || cliBusy;
+
+  const connection = catalog.connection || {};
+  const connectionText = connection.providerApp
+    ? connection.providerId
+      ? `${connection.providerApp} · Provider ${connection.providerId}`
+      : `${connection.providerApp} · 尚未绑定 Provider（可使用官方或 CLI 登录态）`
+    : connection.mode === "cli-managed"
+      ? "认证与 token 由当前 CLI 自身管理，控制台不读取明文。"
+      : `连接由 ${connection.mode || "Adapter"} 管理，控制台不暴露凭据。`;
+  elements["composer-cli-connection-copy"].textContent = connectionText;
+  elements["composer-cli-open-connection"].textContent = connection.providerApp ? (connection.providerId ? "编辑 Provider" : "新建 Provider") : "查看认证归属";
+  elements["composer-cli-open-connection"].disabled = cliBusy;
+  elements["composer-cli-open-capabilities"].disabled = !context.memberId || cliBusy;
+
+  elements["composer-cli-diagnostic-actions"].innerHTML = diagnosticActions.map((action) => `
+    <button class="button secondary" type="button" data-composer-cli-action="${escapeHtml(action.id)}" title="${escapeHtml(action.detail || action.label)}"${cliBusy ? " disabled" : ""}>
+      ${lucideIcon(action.id === "refresh-catalog" ? "refresh-cw" : "activity")}
+      ${escapeHtml(action.label)}
+    </button>`).join("");
+  const output = elements["composer-cli-diagnostic-output"];
+  const diagnostic = cliContextState.value.result;
+  output.dataset.context = cliContextState.key;
+  if (diagnostic) {
+    output.dataset.status = diagnostic.status === "ok" ? "ok" : "failed";
+    output.textContent = `${diagnostic.label ? `${diagnostic.label}\n` : ""}${diagnostic.output || "诊断完成，未返回文本"}`;
+    output.hidden = false;
+  } else {
+    delete output.dataset.status;
+    output.textContent = "";
+    output.hidden = true;
+  }
+}
+
+async function saveComposerCliDefaults() {
+  const catalog = composerCliCatalog();
+  const context = catalog.context || {};
+  const runtimeProfileId = catalog.context?.runtimeProfileId;
+  if (!runtimeProfileId || !catalog.defaults?.quickEditable || composerCliContextState(context).value.busy) return;
+  const patch = {
+    model: catalog.controls?.model?.supported === false
+      ? catalog.defaults?.model ?? null
+      : elements["composer-cli-default-model"].value || null,
+    defaultEffort: catalog.controls?.effort?.supported === true
+      ? elements["composer-cli-default-effort"].value || null
+      : catalog.defaults?.effort ?? null,
+    defaultPermissionMode: elements["composer-cli-default-permission"].value || catalog.defaults.permission,
+  };
+  const operation = beginComposerCliOperation(context);
+  if (!operation) return;
+  renderComposerCliConsole();
+  try {
+    const result = await request(`${API.runtimeSeats}/${encodeURIComponent(runtimeProfileId)}`, {
+      method: "PUT",
+      body: patch,
+    });
+    await Promise.all([
+      loadBootstrap(),
+      runtimeSeatManager?.load({ fresh: true, preferredId: runtimeProfileId, preserveDraft: true }),
+    ]);
+    const active = result?.transaction?.activation?.status === "reloaded" || result?.seat?.activation === "live";
+    toast(active ? "CLI 席位默认值已保存并激活" : "CLI 席位默认值已保存，等待运行时重载", active ? "success" : "warning", active ? 2600 : 5200);
+    await syncModelPick();
+  } catch (error) {
+    toast(`默认值保存失败：${error.message}`, "error", 6000);
+  } finally {
+    finishComposerCliOperation(operation);
+    renderComposerCliConsole();
+  }
+}
+
+async function openComposerCliSeat() {
+  const catalog = composerCliCatalog();
+  await openMemberConfigTarget({
+    surface: "runtime",
+    memberId: catalog.context?.memberId,
+    runtimeProfileId: catalog.context?.runtimeProfileId,
+  });
+}
+
+async function openComposerCliCapabilities() {
+  const catalog = composerCliCatalog();
+  await openMemberConfigTarget({
+    surface: "capabilities",
+    memberId: catalog.context?.memberId,
+    runtimeProfileId: catalog.context?.runtimeProfileId,
+  });
+}
+
+async function openComposerCliConnection() {
+  const catalog = composerCliCatalog();
+  const connection = catalog.connection || {};
+  if (!connection.providerApp) {
+    toast(connection.mode === "cli-managed" ? "该成员使用 CLI 自管理认证；控制台不会读取或展示 token" : `连接由 ${connection.mode || "Adapter"} 管理`, "info", 4200);
+    return;
+  }
+  if (!state.providersData) await loadProviders();
+  const provider = (state.providersData?.providers || []).find((item) => item.id === connection.providerId) || null;
+  openProviderDialog(provider, { app: connection.providerApp });
+}
+
+async function runComposerCliAction(actionId) {
+  const catalog = composerCliCatalog();
+  const memberId = catalog.context?.memberId;
+  const action = (catalog.actions || []).find((item) => item.id === actionId);
+  const context = catalog.context || {};
+  if (!memberId || !action || composerCliContextState(context).value.busy) return;
+  const operation = beginComposerCliOperation(context);
+  if (!operation) return;
+  elements["composer-cli-console-state"].textContent = `${action.label}…`;
+  renderComposerCliConsole();
+  let diagnostic = null;
+  try {
+    const result = await request(API.agentActions, { method: "POST", body: { agent: memberId, action: actionId } });
+    if (result.catalog) {
+      diagnostic = { status: "ok", label: action.label, output: `${action.label}完成`, actionId, finishedAt: new Date().toISOString() };
+      const active = activeComposerTarget();
+      const activeContext = staticControlContext(active.memberId);
+      if (composerControlKey(active.memberId, activeContext.runtimeProfileId) === operation.key) {
+        state.agentControlCatalog = result.catalog;
+        await syncModelPick();
+      }
+      toast(`${action.label}完成`, "success", 2200);
+    } else {
+      diagnostic = {
+        status: result.status === "ok" ? "ok" : "failed",
+        label: action.label,
+        output: result.output || "诊断完成，未返回文本",
+        actionId,
+        finishedAt: new Date().toISOString(),
+      };
+      toast(result.status === "ok" ? `${action.label}完成` : `${action.label}执行失败`, result.status === "ok" ? "success" : "error", 3200);
+    }
+  } catch (error) {
+    diagnostic = {
+      status: "failed",
+      label: action.label,
+      output: `${action.label}失败：${error.message}`,
+      actionId,
+      finishedAt: new Date().toISOString(),
+    };
+    toast(`${action.label}失败：${error.message}`, "error", 6000);
+  } finally {
+    finishComposerCliOperation(operation, { result: diagnostic });
+    renderComposerCliConsole();
+  }
+}
+
+function applyComposerCliCommand(commandId) {
+  const continuing = Boolean(selectedRun() && !state.sessionPreview);
+  const command = (composerCliCatalog().commands || []).find((item) => item.id === commandId);
+  if (!command) return toast("命令已不在当前 CLI 目录中，请刷新后重试", "warning");
+  if (continuing) {
+    // 续聊只放行当前 select 里可热迁移的命令（模型/Effort 每轮原生可改；权限限白名单档）
+    const select = elements[{ model: "task-model", effort: "task-effort", permission: "task-permission" }[command.control]];
+    const hotReachable = [...(select?.options || [])].some((option) => option.value === String(command.value ?? ""));
+    if (!hotReachable) {
+      return toast(`${command.label} 不在当前会话的可热迁移配置中（权限沙箱轴/升档需新建任务）`, "warning", 2800);
+    }
+  }
+  try {
+    applyRuntimeSlashControl(command);
+    renderComposerCliConsole();
+    if (!continuing) toast(`已应用 ${command.label}`, "success", 1800);
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+// /model·/effort 随逻辑成员 -> runtime profile -> Adapter catalog 联动。
+async function syncModelPick() {
+  const epoch = ++modelPickEpoch;
+  const agentId = activeComposerTarget().memberId;
+  const context = staticControlContext(agentId);
+  const { runtimeProfileId, profile, template } = context;
+  const { key: draftKey, draft } = composerDraftFor(agentId, context);
+  // 续聊：模型/Effort/权限 picker 镜像 run 的当前配置（可热调），不写成员草稿——
+  // 草稿是"下一个新任务"的默认值，不能被现有会话污染
+  const continuingRun = selectedRun() && !state.sessionPreview ? selectedRun() : null;
+  const modelSelect = elements["task-model"];
+  const modelPick = elements["task-model-pick"];
+  const effortPick = elements["task-effort-pick"];
+  const effortSelect = elements["task-effort"];
+  const permissionSelect = elements["task-permission"];
+  state.agentControlCatalog = null;
+  if (modelPick) {
+    delete modelPick.dataset.catalogAgent;
+    delete modelPick.dataset.catalogSource;
+  }
+  syncComposerTargetUi();
+
+  const staticModels = [
+    { id: "", label: profile?.model ? `${profile.model}（席位默认）` : "CLI 默认" },
+    ...(profile?.modelOptions || []).filter((option) => option?.id),
+  ];
+  if (modelSelect) {
+    const selected = supportedControlValue(staticModels, continuingRun ? (continuingRun.modelOverride ?? "") : draft.model, "");
+    renderPickOptions(modelSelect, staticModels, selected);
+    if (!continuingRun) draft.model = selected;
+  }
+  const staticEfforts = template?.effortMode === "none"
+    ? []
+    : [...new Set([...(profile?.effortLevels || []), ...(template?.effortLevels || [])])];
+  if (effortSelect) {
+    const options = staticEfforts.length
+      ? [{ id: "", label: "CLI 默认" }, ...staticEfforts.map((level) => ({ id: level, label: level }))]
+      : [{ id: "", label: "未接入" }];
+    const selected = supportedControlValue(options, continuingRun ? (continuingRun.effortOverride ?? "") : draft.effort, "");
+    renderPickOptions(effortSelect, options, selected);
+    if (!continuingRun) draft.effort = selected;
+    effortSelect.disabled = template?.effortMode === "none";
+  }
+  if (permissionSelect) {
+    const options = continuingRun
+      ? continuingPermissionOptions(continuingRun.permissionMode)
+      : runPermissionOptions(template?.permissionModes || ["plan", "read-only", "workspace-write"]);
+    const fallback = nativePermissionToComposer(profile?.defaultPermissionMode || template?.defaultPermissionMode || "read-only");
+    const selected = supportedControlValue(options, continuingRun ? continuingRun.permissionMode : draft.permission, fallback);
+    renderPickOptions(permissionSelect, options, selected);
+    if (!continuingRun) draft.permission = selected;
+    syncPermissionPill();
+  }
+  if (draftKey && !continuingRun) state.composerControlDrafts.set(draftKey, { ...draft });
+  if (modelPick) modelPick.hidden = template?.modelMode === "none";
+  if (effortPick) effortPick.hidden = template?.effortMode === "none" || !staticEfforts.length;
+  syncComposerControlVisibility();
+  renderComposerCliConsole();
+  if (!agentId) return;
+  try {
+    const discovered = await request(`/api/agents/models?agent=${encodeURIComponent(agentId)}`);
+    if (epoch !== modelPickEpoch || activeComposerTarget().memberId !== agentId) return;
+    state.agentControlCatalog = discovered;
+    const activeDraft = (draftKey && state.composerControlDrafts.get(draftKey)) || draft;
+    const modelSupported = discovered.controls?.model?.supported !== false;
+    const effortSupported = discovered.controls?.effort?.supported === true;
+    if (modelSelect) {
+      const defaultLabel = discovered.defaultModel
+        ? discovered.models?.find((model) => model.id === discovered.defaultModel)?.label || discovered.defaultModel
+        : `${agentLabel(agentId)} CLI`;
+      const options = [
+        { id: "", label: `${defaultLabel}（默认）` },
+        ...(discovered.models || []).map((model) => ({ id: model.id, label: model.label })),
+      ];
+      const selected = supportedControlValue(options, continuingRun ? (continuingRun.modelOverride ?? "") : activeDraft.model, "");
+      renderPickOptions(
+        modelSelect,
+        options,
+        selected,
+      );
+      if (!continuingRun) activeDraft.model = selected;
+      modelSelect.disabled = !modelSupported;
+    }
+    if (effortSelect) {
+      const options = effortSupported
+        ? [{ id: "", label: "CLI 默认" }, ...(discovered.effortLevels || []).map((level) => ({ id: level, label: level }))]
+        : [{ id: "", label: "未接入" }];
+      const selected = supportedControlValue(options, continuingRun ? (continuingRun.effortOverride ?? "") : activeDraft.effort, "");
+      renderPickOptions(effortSelect, options, selected);
+      if (!continuingRun) activeDraft.effort = selected;
+      effortSelect.disabled = !effortSupported;
+    }
+    if (permissionSelect) {
+      const nativeModes = (discovered.controls?.permission?.options || []).map((option) => option.value);
+      const options = continuingRun ? continuingPermissionOptions(continuingRun.permissionMode) : runPermissionOptions(nativeModes);
+      const fallback = nativePermissionToComposer(discovered.defaults?.permission || profile?.defaultPermissionMode || template?.defaultPermissionMode || "read-only");
+      const selected = supportedControlValue(options, continuingRun ? continuingRun.permissionMode : activeDraft.permission, fallback);
+      renderPickOptions(permissionSelect, options, selected);
+      if (!continuingRun) activeDraft.permission = selected;
+      syncPermissionPill();
+    }
+    if (draftKey && !continuingRun) state.composerControlDrafts.set(draftKey, { ...activeDraft });
+    if (modelPick) {
+      modelPick.title = `${discovered.context?.adapterLabel || agentLabel(agentId)} 模型目录 · ${discovered.source === "dynamic" ? "CLI 动态发现" : "静态回退"}`;
+      modelPick.dataset.catalogAgent = agentId;
+      modelPick.dataset.catalogSource = discovered.source || "unknown";
+    }
+    if (effortPick) effortPick.title = `${discovered.context?.adapterLabel || agentLabel(agentId)} 推理强度`;
+    syncComposerControlVisibility();
+    renderComposerCliConsole();
+    if (state.slashActive) renderSlashMenu();
+  } catch {
+    // 动态目录失败保持静态（端点自身已回退，这里是双保险）
+    renderComposerCliConsole();
+  }
 }
 
 function selectTeam(id) {
   if (!state.teams.some((team) => team.id === id)) return;
+  rememberComposerControlDraft();
   state.selectedTeamId = id;
-  sessionStorage.setItem(TEAM_KEY, id);
+  state.composerTargetAgentId = null;
+  state.requestedAgentIds = [];
+  renderRequestedAgentChips();
+  localStorage.setItem(TEAM_KEY, id); // LO 2026-08-04：跨客户端重启记忆所选团队（原 sessionStorage 随退出丢失）
+  state.expandedTeams.add(id); // 切团队后侧栏直接展开该团队全部项目
   renderTeams();
+  refreshTeamData();
+  renderTeamActivation();
+  if (state.view === "team") void refreshCollabFlow();
 }
 
-function knownProviderOptions() {
-  const providers = Array.isArray(state.bootstrap?.providers) ? state.bootstrap.providers : [];
-  if (providers.length) return providers.map((profile) => ({ id: profile.id, label: profile.label || profile.id }));
-  // bootstrap 未就绪时回退内置团队成员清单（服务端 knownProviders 必然包含）
-  const builtin = state.teams.find((team) => team.builtin);
-  return (builtin?.members ?? ["claude-fable"]).map((id) => ({ id, label: id }));
+function updateTeamFormStatus() {
+  const status = elements["team-form-status"];
+  if (!status) return;
+  const editing = teamById(state.editingTeamId);
+  if (teamFormBusy) {
+    status.textContent = "正在处理";
+    status.className = "status-label is-neutral";
+  } else if (teamFormDirty) {
+    status.textContent = "有未保存修改";
+    status.className = "status-label is-warning";
+  } else if (!editing) {
+    status.textContent = "新团队草稿";
+    status.className = "status-label is-warning";
+  } else if (editing.builtin) {
+    status.textContent = "只读";
+    status.className = "status-label is-neutral";
+  } else {
+    status.textContent = "已保存";
+    status.className = "status-label is-ok";
+  }
+}
+
+function setTeamFormBusy(busy) {
+  teamFormBusy = Boolean(busy);
+  for (const id of ["team-save-button", "team-new-button", "team-cancel-button", "team-delete-button", "team-export-button", "team-import-button", "team-preset-select"]) {
+    if (elements[id]) elements[id].disabled = teamFormBusy;
+  }
+  if (elements["team-switch-select"]) {
+    elements["team-switch-select"].disabled = teamFormBusy || (state.teams.length === 0 && Boolean(state.editingTeamId));
+  }
+  updateTeamFormStatus();
+  renderTeamActivation();
+}
+
+function setTeamFormDirty(dirty) {
+  teamFormDirty = Boolean(dirty);
+  updateTeamFormStatus();
+  renderTeamActivation();
+}
+
+function markTeamFormDirty() {
+  if (teamById(state.editingTeamId)?.builtin) return;
+  teamFormRevision += 1;
+  setTeamFormDirty(true);
+}
+
+function renderTeamActivation() {
+  const editing = teamById(state.editingTeamId);
+  const active = currentTeam();
+  const activateButton = elements["team-activate-button"];
+  const applyButton = elements["team-apply-providers-button"];
+  const status = elements["team-active-status"];
+  const runtimeName = elements["team-runtime-team-name"];
+
+  if (runtimeName) {
+    runtimeName.textContent = active?.name ?? "未选择团队";
+    runtimeName.className = `status-label ${active ? "is-ok" : "is-neutral"}`;
+  }
+  if (!activateButton || !status) return;
+
+  if (!editing) {
+    status.textContent = "新团队草稿";
+    status.className = "status-label is-warning";
+    activateButton.disabled = true;
+    elements["team-activate-label"].textContent = "先保存团队";
+  } else if (editing.id === state.selectedTeamId) {
+    status.textContent = "本标签页当前";
+    status.className = "status-label is-ok";
+    activateButton.disabled = true;
+    elements["team-activate-label"].textContent = "已选用";
+  } else {
+    status.textContent = "仅查看";
+    status.className = "status-label is-neutral";
+    activateButton.disabled = teamFormDirty || teamFormBusy;
+    elements["team-activate-label"].textContent = teamFormBusy ? "正在处理" : teamFormDirty ? "先保存修改" : "设为当前团队";
+  }
+
+  if (applyButton) {
+    const bindingCount = Object.keys(editing?.providers ?? {}).length;
+    applyButton.disabled = !editing || bindingCount === 0 || teamFormDirty || teamFormBusy;
+    applyButton.title = teamFormBusy
+      ? "团队操作正在进行"
+      : teamFormDirty
+      ? "先保存团队修改，再应用供应商方案"
+      : bindingCount
+      ? `按「${editing.name}」的 ${bindingCount} 项绑定切换各 CLI live 配置`
+      : "该团队没有供应商绑定";
+  }
+}
+
+function knownProviderOptions(team = null) {
+  const catalog = Array.isArray(state.bootstrap?.teamCatalog) ? state.bootstrap.teamCatalog : [];
+  // bootstrap 未就绪时不伪造 Claude 资格；既有团队成员只作禁用占位，目录到达后再恢复真实控件。
+  // 当前团队的目录外成员以幽灵项保留，绝不静默删除。
+  const options = catalog.length
+    ? catalog.map((profile) => ({
+        id: profile.id,
+        label: profile.label || profile.id,
+        shortLabel: profile.shortLabel || "",
+        role: profile.role || "",
+        description: profile.description || "",
+        provider: profile.provider || "",
+        runtimeProfileId: profile.runtimeProfileId || profile.id,
+        ghost: false,
+        catalogPending: false,
+        enabled: profile.enabled !== false,
+        teamMemberEligible: profile.teamMemberEligible === true,
+        coordinatorEligible: profile.coordinatorEligible === true,
+        coordinatorEligibilityReason: profile.coordinatorEligibilityReason || null,
+        eligibilityReason: profile.eligibilityReason || null,
+      }))
+    : [];
+  const seen = new Set(options.map((option) => option.id));
+  for (const id of team?.members ?? []) {
+    if (seen.has(id)) continue;
+    const meta = PROFILE_META[id] || {};
+    options.push({
+      id,
+      label: meta.name || id,
+      shortLabel: AGENT_SHORT[id] || "",
+      role: "",
+      description: "",
+      provider: meta.provider || "",
+      runtimeProfileId: id,
+      ghost: true,
+      catalogPending: !catalog.length,
+      enabled: true,
+      teamMemberEligible: Boolean(catalog.length),
+      coordinatorEligible: Boolean(catalog.length) && id === team?.coordinator,
+      coordinatorEligibilityReason: catalog.length ? "runtime-profile-ineligible" : "catalog-unavailable",
+      eligibilityReason: catalog.length ? "adapter-not-team-eligible" : "catalog-unavailable",
+    });
+    seen.add(id);
+  }
+  return options;
+}
+
+function renderTeamSwitcher(team) {
+  const switcher = elements["team-switch-select"];
+  if (!switcher) return;
+  const options = state.teams.map((item) =>
+    `<option value="${escapeHtml(item.id)}" ${item.id === team?.id ? "selected" : ""}>${escapeHtml(item.name)}${item.builtin ? "（内置）" : ""}</option>`,
+  );
+  if (!team) options.unshift('<option value="" selected>＋ 新团队</option>');
+  switcher.innerHTML = options.join("");
+  switcher.disabled = teamFormBusy || (state.teams.length === 0 && Boolean(team));
+}
+
+function updateTeamRosterSummary() {
+  const list = elements["team-members-list"];
+  const summary = elements["team-roster-summary"];
+  if (!list || !summary) return;
+  const memberInputs = [...list.querySelectorAll('input[type="checkbox"]')];
+  for (const input of memberInputs) {
+    input.closest(".team-member-option")?.classList.toggle("is-selected", input.checked);
+  }
+  // 组头计数（n 席 · 已选 m）随勾选实时刷新；hidden 行照常计入——过滤只是视图。
+  for (const group of list.querySelectorAll(".tm-group")) {
+    const rows = [...group.querySelectorAll(".team-member-option")];
+    const checked = rows.filter((row) => row.querySelector('input[type="checkbox"]')?.checked).length;
+    const counter = group.querySelector(".tm-group-count");
+    if (counter) counter.textContent = `${rows.length} 席 · 已选 ${checked}`;
+  }
+  const count = memberInputs.filter((input) => input.checked).length;
+  const coordinatorId = list.querySelector('input[name="team-coordinator"]:checked')?.value || "";
+  const coordinator = knownProviderOptions(teamById(state.editingTeamId)).find((option) => option.id === coordinatorId);
+  summary.textContent = `${count} 个成员 · ${coordinatorId ? `主脑 ${coordinator?.label || coordinatorId}` : "未设置主脑"}`;
+  summary.dataset.state = coordinatorId ? "ready" : count ? "missing-coordinator" : "empty";
+}
+
+function teamEligibilityReason(reason) {
+  return ({
+    "profile-disabled": "Profile 已禁用",
+    "command-not-configured": "未配置 CLI 命令",
+    "adapter-not-team-eligible": "Adapter 未开放团队席位",
+    "runtime-profile-missing": "绑定的运行席位不存在",
+    "runtime-profile-ineligible": "绑定的运行席位不可用",
+    "runtime-capability-conflict": "能力声明超出运行席位",
+    "member-main-brain-disabled": "成员未开放主脑资格",
+    "adapter-not-coordinator-capable": "Adapter 不支持主脑职责",
+    "seat-main-brain-disabled": "运行席位未开放主脑资格",
+    "runtime-coordinator-disabled": "运行席位未开放主脑资格",
+    "catalog-unavailable": "成员目录加载中",
+  })[reason] || "未接入可执行 Adapter";
+}
+
+// 成员选择区分组/搜索（2026-08-02 LO）：按品牌分组可折叠；搜索只切换 hidden——
+// checked 行绝不移出 DOM，新团队草稿已选成员不会因过滤在保存时静默丢失（collectTeamForm 直接读 DOM）。
+const TM_GROUP_ORDER = ["claude", "codex", "grok", "kimi", "gemini", "pi", "other"];
+const TM_GROUP_LABELS = { claude: "Claude", codex: "Codex", grok: "Grok", kimi: "Kimi", gemini: "Gemini", pi: "Pi", other: "其他" };
+let teamMembersQuery = "";
+const teamMemberGroupCollapsed = new Set();
+
+function teamMemberSearchHay(option, meta) {
+  return `${option.id} ${option.label} ${option.shortLabel} ${option.role} ${option.provider} ${option.runtimeProfileId} ${meta.name || ""} ${TM_GROUP_LABELS[option.brand] || ""}`.toLowerCase();
+}
+
+function applyTeamMemberFilter() {
+  const list = elements["team-members-list"];
+  if (!list) return;
+  const tokens = teamMembersQuery.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const rows = [...list.querySelectorAll(".team-member-option")];
+  for (const row of rows) {
+    const hay = row.dataset.search || "";
+    row.hidden = tokens.length > 0 && !tokens.every((token) => hay.includes(token));
+  }
+  for (const group of list.querySelectorAll(".tm-group")) {
+    const groupRows = [...group.querySelectorAll(".team-member-option")];
+    const anyVisible = groupRows.some((row) => !row.hidden);
+    group.hidden = groupRows.length > 0 && !anyVisible;
+    const expanded = teamMemberGroupCollapsed.has(group.dataset.groupBrand) === false || tokens.length > 0;
+    const body = group.querySelector(".tm-group-body");
+    if (body) body.hidden = !expanded;
+    group.querySelector(".tm-group-header")?.setAttribute("aria-expanded", String(expanded));
+  }
+  const empty = list.querySelector(".tm-filter-empty");
+  if (empty) empty.hidden = tokens.length === 0 || rows.some((row) => !row.hidden);
+}
+
+function renderTeamMemberOptions(team, {
+  members = new Set(team?.members ?? []),
+  activeCoordinator = team?.coordinator ?? "",
+  readOnly = Boolean(team?.builtin),
+} = {}) {
+  const list = elements["team-members-list"];
+  if (!list) return;
+  const selectedMembers = members instanceof Set ? members : new Set(members ?? []);
+  const options = knownProviderOptions(team);
+  if (!options.length) {
+    list.innerHTML = '<div class="team-catalog-loading" role="status">正在加载可执行席位</div>';
+    updateTeamRosterSummary();
+    return;
+  }
+  const rows = options.map((option) => {
+    const { id, label, shortLabel, role, provider, runtimeProfileId, ghost, catalogPending, enabled, teamMemberEligible, coordinatorEligible, coordinatorEligibilityReason, eligibilityReason } = option;
+    const meta = PROFILE_META[id] || {};
+    const presentation = profileRolePresentation(role, meta);
+    const name = label || meta.name || id;
+    const brand = resolveCatalogBrand(provider, `${meta.provider || ""} ${id}`);
+    const cli = CLI_ICONS[brand] ? brand : "";
+    const statusSuffix = `${enabled === false ? " · 已禁用" : ""}${teamMemberEligible === false ? ` · 不可用（${teamEligibilityReason(eligibilityReason)}）` : ""}`;
+    const coordinatorSuffix = coordinatorEligible
+      ? " · 可任主脑"
+      : ` · 不可任主脑（${teamEligibilityReason(coordinatorEligibilityReason || eligibilityReason)}）`;
+    const runtimeSuffix = runtimeProfileId && runtimeProfileId !== id ? ` · ${runtimeProfileId}` : "";
+    const sub = catalogPending
+      ? `${presentation.title} · 成员目录加载中`
+      : ghost
+        ? `${presentation.title} · 未在当前成员目录，保存时保留`
+        : `${presentation.title}${presentation.role ? ` · ${presentation.role}` : ""}${runtimeSuffix}${statusSuffix}${coordinatorSuffix}`;
+    const logo = cliIconMarkup(cli, "tm-logo");
+    const avatar = logo || `<span class="tm-initials">${escapeHtml(shortLabel || AGENT_SHORT[id] || name.slice(0, 2))}</span>`;
+    const search = teamMemberSearchHay({ ...option, brand }, meta);
+    const html = `<div class="team-member-option${ghost ? " is-ghost" : ""}${catalogPending ? " is-catalog-placeholder" : ""}${selectedMembers.has(id) ? " is-selected" : ""}${teamMemberEligible === false ? " is-disabled-profile" : ""}" data-brand="${escapeHtml(brand)}" data-search="${escapeHtml(search)}">
+        <label class="team-member-toggle">
+          <input type="checkbox" value="${escapeHtml(id)}" ${selectedMembers.has(id) ? "checked" : ""}
+            ${readOnly || teamMemberEligible === false ? "disabled" : ""} />
+          <span class="tm-avatar" aria-hidden="true">${avatar}</span>
+          <span class="tm-meta"><strong>${escapeHtml(name)}</strong><span>${escapeHtml(sub)}</span></span>
+        </label>
+        ${teamMemberEligible !== false && coordinatorEligible ? `<label class="coordinator-pick"><input type="radio" name="team-coordinator" value="${escapeHtml(id)}"
+          ${id === activeCoordinator ? "checked" : ""} ${readOnly ? "disabled" : ""} aria-label="将 ${escapeHtml(name)} 设为团队主脑" /><span>主脑</span></label>` : ""}
+        <button class="icon-button team-member-edit" type="button" data-edit-team-member="${escapeHtml(id)}" title="编辑 ${escapeHtml(name)}" aria-label="编辑 ${escapeHtml(name)}">
+          <svg class="icon lucide"><use href="#lucide-pencil"></use></svg>
+        </button>
+      </div>`;
+    return { id, brand, html };
+  });
+  const groups = new Map();
+  for (const row of rows) {
+    if (!groups.has(row.brand)) groups.set(row.brand, []);
+    groups.get(row.brand).push(row);
+  }
+  const ordered = [...groups.entries()].sort(([a], [b]) => {
+    const ia = TM_GROUP_ORDER.indexOf(a);
+    const ib = TM_GROUP_ORDER.indexOf(b);
+    return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib) || a.localeCompare(b);
+  });
+  list.innerHTML = ordered.map(([brand, groupRows]) => {
+    const logo = cliIconMarkup(CLI_ICONS[brand] ? brand : "", "tm-group-logo");
+    const selected = groupRows.filter((row) => selectedMembers.has(row.id)).length;
+    return `<section class="tm-group" data-group-brand="${escapeHtml(brand)}">
+      <button class="tm-group-header" type="button" data-toggle-member-group aria-expanded="true">
+        <svg class="icon lucide tm-group-chevron" aria-hidden="true"><use href="#lucide-chevron-down"></use></svg>
+        ${logo}<strong>${escapeHtml(TM_GROUP_LABELS[brand] || brand)}</strong>
+        <span class="tm-group-count">${groupRows.length} 席 · 已选 ${selected}</span>
+      </button>
+      <div class="tm-group-body">${groupRows.map((row) => row.html).join("")}</div>
+    </section>`;
+  }).join("") + '<div class="tm-filter-empty" hidden>没有匹配的席位</div>';
+  applyTeamMemberFilter();
+  updateTeamRosterSummary();
 }
 
 function fillTeamForm(team) {
   const readOnly = Boolean(team?.builtin);
   state.editingTeamId = team?.id ?? null;
-  elements["team-dialog-title"].textContent = team ? (readOnly ? `查看团队 · ${team.name}` : `编辑团队 · ${team.name}`) : "新建团队";
+  teamFormDirty = false;
+  teamFormInitialized = true;
+  teamFormRevision += 1;
+  elements["team-form-title"].textContent = team ? (readOnly ? `查看团队 · ${team.name}` : `编辑团队 · ${team.name}`) : "新建团队";
   elements["team-builtin-note"].hidden = !readOnly;
   elements["team-name-input"].value = team?.name ?? "";
   elements["team-description-input"].value = team?.description ?? "";
   elements["team-prompt-input"].value = team?.systemPrompt ?? "";
-  elements["team-skills-input"].value = (team?.skills ?? []).join(", ");
-  elements["team-mcp-input"].value = (team?.mcp ?? []).join(", ");
-  const members = new Set(team?.members ?? ["claude-fable"]);
-  const activeCoordinator = team?.coordinator ?? "claude-fable";
+  renderTeamChips(team?.skills ?? [], team?.mcp ?? [], readOnly);
+  // 供应商绑定下拉：档案未到时先占位，loadProviders 末尾钩子会按 dialog.open 回填（与芯片墙同纪律）
+  populateTeamProviderSelects(team?.providers ?? {});
+  for (const app of PROVIDER_APPS) elements[`team-provider-${app}`].disabled = readOnly;
+  if (!state.providersData) void loadProviders();
+  const members = new Set(team?.members ?? []);
+  const activeCoordinator = team?.coordinator ?? "";
   elements["team-form"].dataset.coordinator = activeCoordinator; // 保存时若无 radio 可选（bootstrap 未就绪）的回退锚点
-  elements["team-members-list"].innerHTML = knownProviderOptions()
-    .map(({ id, label }) => {
-      const mandatory = id === "claude-fable"; // 主脑候补席位，始终在队
-      const eligible = COORDINATOR_ELIGIBLE.has(id);
-      return `<label class="team-member-option">
-        <input type="checkbox" value="${escapeHtml(id)}" ${members.has(id) || mandatory ? "checked" : ""}
-          ${mandatory || readOnly ? "disabled" : ""} />
-        <span>${escapeHtml(label)}</span>
-        ${eligible ? `<span class="coordinator-pick"><input type="radio" name="team-coordinator" value="${escapeHtml(id)}"
-          ${id === activeCoordinator ? "checked" : ""} ${readOnly ? "disabled" : ""} aria-label="设为主脑" />主脑</span>` : ""}
-      </label>`;
-    })
-    .join("");
-  for (const field of ["team-name-input", "team-description-input", "team-prompt-input", "team-skills-input", "team-mcp-input"]) {
+  teamMembersQuery = ""; // 切换团队/重建草稿时重置成员过滤，折叠态跨团队保留
+  if (elements["team-members-search"]) elements["team-members-search"].value = "";
+  renderTeamMemberOptions(team, { members, activeCoordinator, readOnly });
+  // 同页团队浏览器只切换设置草稿；是否作为新会话当前团队由独立动作明确决定。
+  renderTeamSwitcher(team);
+  for (const field of ["team-name-input", "team-description-input", "team-prompt-input"]) {
     elements[field].disabled = readOnly;
   }
-  elements["team-save-button"].textContent = readOnly ? "另存为新团队" : "保存";
+  elements["team-save-label"].textContent = readOnly ? "另存为新团队" : "保存";
   elements["team-delete-button"].hidden = readOnly || !team;
+  updateTeamFormStatus();
+  renderTeamActivation();
+  memberLibrary?.updateTeamToggle();
+  memberLibrary?.refreshUsage?.(); // 团队数据落盘后同步成员库徽章/使用情况
 }
 
-function openTeamDialog(team) {
-  fillTeamForm(team);
-  const dialog = elements["team-dialog"];
-  if (typeof dialog.showModal === "function" && !dialog.open) dialog.showModal();
+// 能力声明芯片墙：逗号文本已成历史——目录来自 /api/capabilities（与配置图谱能力面同源），
+// 幽灵项（团队声明了但目录没有）照常渲染为虚线片，可手动摘除，绝不静默吞掉
+function checkedChipValues(id, fallback) {
+  const wall = elements[id];
+  if (!wall) return fallback;
+  const boxes = wall.querySelectorAll("input[type=checkbox]");
+  if (!boxes.length) return fallback;
+  return [...boxes].filter((input) => input.checked).map((input) => input.value);
 }
 
-function closeTeamDialog() {
-  elements["team-dialog"].close();
-  state.editingTeamId = null;
+function chipWallMarkup(items, selected, readOnly) {
+  const sel = new Set(selected);
+  return items
+    .map((item) => `<label class="chip${item.ghost ? " is-ghost" : ""}${item.off ? " is-off" : ""}" title="${escapeHtml(item.title || item.code)}">
+      <input type="checkbox" value="${escapeHtml(item.code)}"${sel.has(item.code) ? " checked" : ""}${readOnly ? " disabled" : ""} />
+      <span>${escapeHtml(item.code)}</span>
+    </label>`)
+    .join("");
+}
+
+function renderTeamChips(selectedSkills, selectedMcp, readOnly) {
+  const skillsWall = elements["team-skills-chips"];
+  const mcpWall = elements["team-mcp-chips"];
+  if (!skillsWall || !mcpWall) return;
+  const data = state.capabilitiesData;
+  if (!data) {
+    // 失败态必须显式停在「失败 + 重试」——绝不在渲染层回环重触发 loadCapabilities（请求失败会无限自旋）；
+    // 勾选意图暂存 teamChipsPending，重试/回填不吞用户选择
+    state.teamChipsPending = { skills: selectedSkills, mcp: selectedMcp, readOnly };
+    const message = state.capabilitiesError
+      ? `<span class="subtle">目录读取失败：${escapeHtml(state.capabilitiesError)}</span><button class="text-button" type="button" data-chips-retry>重试</button>`
+      : '<span class="subtle">正在读取能力目录…</span>';
+    skillsWall.innerHTML = message;
+    mcpWall.innerHTML = message;
+    if (!state.capabilitiesError) void loadCapabilities(); // 完成后由 loadCapabilities 末尾钩子回填（checkedChipValues 保留当前勾选）
+    return;
+  }
+  const skillItems = (data.skills?.items ?? []).map((skill) => ({ code: skill.code, title: skill.description || skill.path }));
+  for (const code of selectedSkills) {
+    if (!skillItems.some((item) => item.code === code)) skillItems.push({ code, ghost: true, title: "目录中不存在——取消勾选即摘除" });
+  }
+  const mcpItems = (data.mcp?.servers ?? []).map((server) => ({ code: server.name, title: `${server.transport} · ${server.scope}`, off: server.disabled }));
+  for (const name of selectedMcp) {
+    if (!mcpItems.some((item) => item.code === name)) mcpItems.push({ code: name, ghost: true, title: "目录中不存在——取消勾选即摘除" });
+  }
+  skillsWall.innerHTML = skillItems.length ? chipWallMarkup(skillItems, selectedSkills, readOnly) : '<span class="subtle">能力目录为空</span>';
+  mcpWall.innerHTML = mcpItems.length ? chipWallMarkup(mcpItems, selectedMcp, readOnly) : '<span class="subtle">能力目录为空</span>';
+}
+
+async function confirmDiscardTeamDraft() {
+  if (teamFormBusy) {
+    toast("团队操作正在进行，请稍候", "warning");
+    return false;
+  }
+  if (!teamFormDirty) return true;
+  const editing = teamById(state.editingTeamId);
+  return confirmAction({
+    eyebrow: "未保存修改",
+    title: `放弃「${editing?.name || "新团队"}」的修改？`,
+    rows: [
+      ["当前状态", "有未保存修改"],
+      ["影响", "名称、成员、能力与供应商绑定草稿都不会保存"],
+    ],
+    warning: "切换后无法恢复这份草稿。",
+    confirmLabel: "放弃修改",
+    danger: true,
+  });
+}
+
+async function openTeamWorkspace(team = currentTeam()) {
+  const target = team ?? currentTeam();
+  if (teamFormDirty && state.editingTeamId !== target?.id && !await confirmDiscardTeamDraft()) return false;
+  setView("team");
+  memberLibrary?.setSurface("orchestration", { focus: false });
+  // 从其他视图返回同一草稿时保留 DOM；其余入口按当前磁盘快照回填。
+  if (!teamFormDirty || state.editingTeamId !== target?.id) fillTeamForm(target);
+  requestAnimationFrame(() => elements["team-settings-panel"]?.scrollIntoView({ block: "start", behavior: "smooth" }));
+  return true;
+}
+
+function resetTeamForm() {
+  fillTeamForm(teamById(state.editingTeamId) ?? currentTeam());
+}
+
+function activateEditingTeam() {
+  const team = teamById(state.editingTeamId);
+  if (teamFormDirty) {
+    toast("先保存团队修改，再设为当前团队", "warning");
+    return;
+  }
+  if (!team || team.id === state.selectedTeamId) return;
+  selectTeam(team.id);
+  toast(`「${team.name}」已设为本标签页当前团队`, "success", 2600);
 }
 
 function splitList(value) {
@@ -1650,24 +7443,38 @@ function splitList(value) {
     .filter(Boolean);
 }
 
+function teamChipFallback(kind) {
+  const pending = state.teamChipsPending;
+  if (!state.capabilitiesData && Array.isArray(pending?.[kind])) return pending[kind];
+  const editing = teamById(state.editingTeamId);
+  return Array.isArray(editing?.[kind]) ? editing[kind] : [];
+}
+
 function collectTeamForm() {
-  const members = [...elements["team-members-list"].querySelectorAll("input[type=checkbox]")]
+  const memberInputs = [...elements["team-members-list"].querySelectorAll("input[type=checkbox]")];
+  const renderedMemberIds = new Set(memberInputs.map((input) => input.value));
+  const members = memberInputs
     .filter((input) => input.checked)
     .map((input) => input.value);
-  if (!members.includes("claude-fable")) members.unshift("claude-fable");
+  // 若 DOM 因目录/渲染故障少了既有成员，保存其他字段时仍必须保留；已渲染且主动取消的成员照常移除。
+  for (const member of teamById(state.editingTeamId)?.members ?? []) {
+    if (!renderedMemberIds.has(member) && !members.includes(member)) members.push(member);
+  }
   // 无 radio 选中（bootstrap 未就绪、coordinator 选项未渲染）时回退编辑前的原主脑，
-  // 而非静默改成 claude-fable——防止保存其他字段时把主脑悄悄换掉（严禁 silent fallback）
+  // 新团队保持空值并在保存前显式拦截，不能静默改成任一 Agent。
   const checkedCoordinator = elements["team-members-list"].querySelector("input[name=team-coordinator]:checked")?.value;
-  const coordinator = checkedCoordinator || elements["team-form"].dataset.coordinator || "claude-fable";
-  if (!members.includes(coordinator)) members.push(coordinator); // 主脑必是成员
+  const coordinator = checkedCoordinator || elements["team-form"].dataset.coordinator || "";
+  if (coordinator && !members.includes(coordinator)) members.push(coordinator); // 主脑必是成员；空值不能伪装成成员
+  const providers = collectTeamProviderBindings();
   return {
     name: elements["team-name-input"].value.trim(),
     description: elements["team-description-input"].value.trim(),
     systemPrompt: elements["team-prompt-input"].value.trim(),
     coordinator,
     members,
-    skills: splitList(elements["team-skills-input"].value),
-    mcp: splitList(elements["team-mcp-input"].value),
+    skills: checkedChipValues("team-skills-chips", teamChipFallback("skills")),
+    mcp: checkedChipValues("team-mcp-chips", teamChipFallback("mcp")),
+    providers,
   };
 }
 
@@ -1676,34 +7483,66 @@ async function saveTeamForm(event) {
   if (elements["team-save-button"].disabled) return;
   const editing = state.teams.find((team) => team.id === state.editingTeamId);
   const payload = collectTeamForm();
+  const submissionEditingId = state.editingTeamId;
+  const submissionRevision = teamFormRevision;
+  let savedTeamId = editing?.id ?? null;
+  let savedTeam = editing ?? null;
   if (!payload.name) {
     toast("团队名称不能为空", "error");
     return;
   }
-  elements["team-save-button"].disabled = true; // 防双击并发提交（烛 R10 致命3 前端面）
+  if (!payload.members.length) {
+    toast("至少选择一名团队成员", "error");
+    return;
+  }
+  if (!payload.coordinator) {
+    toast("请从已选成员中指定团队主脑", "error");
+    return;
+  }
+  setTeamFormBusy(true); // 防双击/切换；输入仍可继续，revision gate 保留保存期间产生的新修改。
   try {
     if (editing?.builtin) {
       // 内置团队只读——"另存为新团队"路径；重名时提示改名
       if (payload.name === editing.name) payload.name = `${editing.name} 副本`;
       const created = await request(API.teams, { method: "POST", body: payload });
+      savedTeam = created;
+      savedTeamId = created.id;
       toast(`已基于 ${editing.name} 创建新团队`, "success");
-      await loadTeams();
-      selectTeam(created.id);
     } else if (editing) {
-      await request(`${API.teams}/${encodeURIComponent(editing.id)}`, { method: "PUT", body: payload });
+      savedTeam = await request(`${API.teams}/${encodeURIComponent(editing.id)}`, { method: "PUT", body: payload });
       toast("团队已保存", "success");
-      await loadTeams();
     } else {
       const created = await request(API.teams, { method: "POST", body: payload });
+      savedTeam = created;
+      savedTeamId = created.id;
       toast("团队已创建", "success");
-      await loadTeams();
-      selectTeam(created.id);
     }
-    closeTeamDialog();
+    const reloadResult = await loadTeams({ fresh: true });
+    if (loadResultFailed(reloadResult) && savedTeam) {
+      const index = state.teams.findIndex((team) => team.id === savedTeam.id);
+      if (index === -1) state.teams.push(savedTeam);
+      else state.teams[index] = savedTeam;
+      renderTeams();
+      toast("写入已完成，但团队列表回读失败；当前显示写入响应", "warning", 6000);
+    }
+    const saved = teamById(savedTeamId) ?? savedTeam ?? currentTeam();
+    const draftUnchanged = teamFormRevision === submissionRevision && state.editingTeamId === submissionEditingId;
+    if (draftUnchanged) fillTeamForm(saved);
+    else {
+      // 新建请求已落盘时，把保存期间继续输入的草稿绑定到已创建团队，下一次保存必须走 PUT。
+      if (submissionEditingId === null && saved?.id) {
+        state.editingTeamId = saved.id;
+        elements["team-form-title"].textContent = `编辑团队 · ${saved.name}`;
+        elements["team-delete-button"].hidden = false;
+        renderTeamSwitcher(saved);
+      }
+      toast("团队已保存；保存期间产生的新修改仍保留，需再次保存", "warning", 6000);
+    }
+    if (saved?.id === state.selectedTeamId) void refreshCollabFlow();
   } catch (error) {
     toast(`团队保存失败：${error.message}`, "error");
   } finally {
-    elements["team-save-button"].disabled = false;
+    setTeamFormBusy(false);
   }
 }
 
@@ -1722,15 +7561,2184 @@ async function deleteEditingTeam() {
     danger: true,
   });
   if (!proceed) return;
+  setTeamFormBusy(true);
   try {
     await request(`${API.teams}/${encodeURIComponent(team.id)}`, { method: "DELETE" });
     toast(`团队「${team.name}」已删除`, "success");
-    closeTeamDialog();
-    await loadTeams();
+    const reloadResult = await loadTeams({ fresh: true });
+    if (loadResultFailed(reloadResult)) {
+      state.teams = state.teams.filter((item) => item.id !== team.id);
+      if (state.selectedTeamId === team.id) {
+        state.selectedTeamId = BUILTIN_TEAM_ID;
+        localStorage.setItem(TEAM_KEY, state.selectedTeamId);
+      }
+      renderTeams();
+    }
+    fillTeamForm(currentTeam());
+    void refreshCollabFlow();
+  } catch (error) {
+    toast(`删除失败：${error.message}`, "error");
+  } finally {
+    setTeamFormBusy(false);
+  }
+}
+
+// ── 团队配置便利层（team-config-kit）：预设模板一键新建 + 团队包导入导出 ──
+// 纯前端编排，CRUD 全走既有 /api/teams /api/team-members；逐成员失败如实上报不静默。
+
+function renderTeamPresetSelect() {
+  const select = elements["team-preset-select"];
+  if (!select) return;
+  select.innerHTML = [
+    '<option value="" selected>从预设新建…</option>',
+    ...TEAM_PRESETS.map((preset) =>
+      `<option value="${escapeHtml(preset.id)}" title="${escapeHtml(preset.summary)}">${escapeHtml(preset.label)}</option>`),
+  ].join("");
+}
+
+async function applyTeamPreset(presetId) {
+  const preset = presetById(presetId);
+  if (!preset) return;
+  if (!await confirmDiscardTeamDraft()) {
+    renderTeamPresetSelect(); // 放弃则回占位，不残留选中态
+    return;
+  }
+  // 席位目录未就绪时等它（bootstrap 在启动期被长连接挤占，实测迟到 6-8s）：
+  // 轮询至多 12s，到位照常套用；仍不到才明示放弃——绝不用空目录套"全席位缺席"假草稿。
+  let catalogReady = Array.isArray(state.bootstrap?.teamCatalog) && state.bootstrap.teamCatalog.length > 0;
+  if (!catalogReady) {
+    toast("席位目录仍在加载，到位后自动套用预设…", "info", 3000);
+    const deadline = Date.now() + 12_000;
+    while (!catalogReady && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      catalogReady = Array.isArray(state.bootstrap?.teamCatalog) && state.bootstrap.teamCatalog.length > 0;
+    }
+  }
+  if (!catalogReady) {
+    renderTeamPresetSelect();
+    toast("席位目录加载超时，请稍后重选预设", "warning", 6000);
+    return;
+  }
+  memberLibrary?.setSurface("orchestration", { focus: false });
+  fillTeamForm(null);
+  const { members, coordinator, dropped } = resolvePreset(preset, knownProviderOptions(null));
+  elements["team-name-input"].value = preset.name;
+  elements["team-description-input"].value = preset.description;
+  elements["team-prompt-input"].value = preset.systemPrompt;
+  elements["team-form"].dataset.coordinator = coordinator;
+  renderTeamMemberOptions(null, { members: new Set(members), activeCoordinator: coordinator, readOnly: false });
+  renderTeamChips([], [], false);
+  teamFormDirty = true;
+  teamFormRevision += 1;
+  updateTeamFormStatus();
+  renderTeamPresetSelect();
+  if (!members.length) {
+    toast(`预设「${preset.label}」的席位在本机目录全不可用，请手动勾选成员`, "warning", 6000);
+  } else if (dropped.length) {
+    toast(`已套用预设「${preset.label}」；本机缺席席位已跳过：${dropped.join("、")}`, "warning", 6000);
+  } else {
+    toast(`已套用预设「${preset.label}」——可改后保存`, "success");
+  }
+}
+
+async function exportEditingTeam() {
+  const team = teamById(state.editingTeamId) ?? currentTeam();
+  if (!team) {
+    toast("没有可导出的团队", "warning");
+    return;
+  }
+  try {
+    const payload = await request(API.teamMembers);
+    const catalog = unwrapList(payload, ["members"]);
+    const pack = buildTeamPack({ team, catalog });
+    const blob = new Blob([JSON.stringify(pack, null, 2)], { type: "application/json" });
+    const anchor = document.createElement("a");
+    anchor.href = URL.createObjectURL(blob);
+    anchor.download = `514cc-team-${String(team.name).replace(/[\\/:*?"<>|]/g, "-")}-${new Date().toISOString().slice(0, 10)}.json`;
+    anchor.click();
+    URL.revokeObjectURL(anchor.href);
+    if (teamFormDirty && team.id === state.editingTeamId) {
+      toast("已导出「已保存」版本——未保存的草稿修改不在包内", "warning", 6000);
+    } else {
+      toast(`团队「${team.name}」已导出（含 ${pack.members.custom.length} 个自定义成员定义）`, "success");
+    }
+  } catch (error) {
+    toast(`导出失败：${error.message}`, "error");
+  }
+}
+
+async function importTeamPack(file) {
+  let pack;
+  try {
+    pack = parseTeamPack(await file.text());
+  } catch (error) {
+    toast(`导入失败：${error.message}`, "error", 6000);
+    return;
+  }
+  if (!await confirmDiscardTeamDraft()) return;
+  setTeamFormBusy(true);
+  try {
+    const payload = await request(API.teamMembers);
+    const plan = planMemberResolution(pack, unwrapList(payload, ["members"]));
+    const idMap = { ...plan.idMap };
+    const createdLabels = [];
+    const failedNotes = [];
+    for (const def of plan.toCreate) {
+      try {
+        const created = await request(API.teamMembers, {
+          method: "POST",
+          body: {
+            runtimeProfileId: def.runtimeProfileId,
+            label: def.label,
+            shortLabel: def.shortLabel,
+            role: def.role,
+            description: def.description,
+            systemPrompt: def.systemPrompt,
+            capabilities: def.capabilities,
+            defaultModel: def.defaultModel,
+            defaultEffort: def.defaultEffort,
+            mainBrainAllowed: def.mainBrainAllowed,
+          },
+        });
+        idMap[def.id] = created.id;
+        createdLabels.push(def.label || def.id);
+      } catch (error) {
+        failedNotes.push(`${def.label || def.id}（${error.message}）`);
+      }
+    }
+    const body = remappedTeamPayload(pack, idMap);
+    const skippedNotes = [...plan.skipped.map((item) => `${item.id}（${item.reason}）`), ...failedNotes];
+    if (!body) {
+      toast(`导入中止：团队成员在本机无一可用——${skippedNotes.join("、") || "包内成员列表为空"}`, "error", 8000);
+      return;
+    }
+    if (state.teams.some((team) => team.name === body.name)) body.name = `${body.name}（导入）`;
+    const createdTeam = await request(API.teams, { method: "POST", body });
+    await loadTeams({ fresh: true });
+    fillTeamForm(teamById(createdTeam.id) ?? createdTeam);
+    void refreshCollabFlow();
+    if (skippedNotes.length) {
+      toast(`团队「${createdTeam.name}」已导入；跳过：${skippedNotes.join("、")}`, "warning", 8000);
+    } else {
+      toast(`团队「${createdTeam.name}」已导入（新建成员 ${createdLabels.length} 个、复用 ${Object.keys(plan.idMap).length} 个）`, "success", 6000);
+    }
+  } catch (error) {
+    toast(`导入失败：${error.message}`, "error", 8000);
+  } finally {
+    setTeamFormBusy(false);
+  }
+}
+
+
+// ── 供应商方案（cc-switch 式统一档案）：面板渲染 + 对话框 CRUD + 一键切换 + 团队方案应用 ──
+const PROVIDER_APP_META = Object.freeze([
+  { app: "claude", label: "Claude Code", icon: "sparkles", modelHint: (p) => p.models?.claude?.model },
+  { app: "codex", label: "Codex", icon: "brain", modelHint: (p) => p.models?.codex?.model },
+  { app: "gemini", label: "Gemini", icon: "diamond", modelHint: (p) => p.models?.gemini?.model },
+  { app: "grokbuild", label: "Grok Build", icon: "terminal", modelHint: (p) => p.models?.grokbuild?.model },
+  { app: "kimi", label: "Kimi Code", icon: "moon", modelHint: (p) => p.models?.kimi?.model },
+  { app: "opencode", label: "OpenCode", icon: "code-2", modelHint: (p) => p.models?.opencode?.model, cumulative: true },
+  { app: "openclaw", label: "OpenClaw", icon: "box", modelHint: (p) => p.models?.openclaw?.model, cumulative: true },
+  { app: "hermes", label: "Hermes", icon: "bot", modelHint: (p) => p.models?.hermes?.model, cumulative: true },
+]);
+const PROVIDER_APPS = Object.freeze(PROVIDER_APP_META.map((entry) => entry.app));
+// 后端继续识别旧 Claude Desktop 档案；前端不再把它作为供应商方案选项，但编辑时必须原样保留旧关联。
+const PROVIDER_STORAGE_APPS = Object.freeze([...PROVIDER_APPS, "claude-desktop"]);
+
+function providerBelongsToScheme(provider) {
+  return PROVIDER_APPS.some((app) => provider?.apps?.[app]);
+}
+
+function providerSchemeBindings(team) {
+  return Object.entries(team?.providers ?? {}).filter(([app, providerId]) => PROVIDER_APPS.includes(app) && providerId);
+}
+
+// 供应商列表聚焦 app（CC Switch 形态：一次只看一个应用）：localStorage 持久化，不可用则退化内存态
+const PROVIDER_ACTIVE_APP_KEY = "514cc-control-provider-app";
+try {
+  const storedProviderApp = localStorage.getItem(PROVIDER_ACTIVE_APP_KEY);
+  if (PROVIDER_APPS.includes(storedProviderApp)) state.providerActiveApp = storedProviderApp;
+} catch {
+  // localStorage 不可用（隐私模式等）：保持默认 claude
+}
+
+function providerActiveApp() {
+  return PROVIDER_APPS.includes(state.providerActiveApp) ? state.providerActiveApp : "claude";
+}
+
+function setProviderActiveApp(app) {
+  if (!PROVIDER_APPS.includes(app)) return;
+  state.providerActiveApp = app;
+  try {
+    localStorage.setItem(PROVIDER_ACTIVE_APP_KEY, app);
+  } catch {
+    // 同上：仅内存态
+  }
+  renderProviders();
+}
+
+let providersLoadPromise = null;
+let providersQueuedFreshPromise = null;
+let providersFreshRequested = false;
+let providersLoadEpoch = 0;
+
+function startProvidersLoad() {
+  const epoch = ++providersLoadEpoch;
+  state.providersLoading = true;
+  let requestPromise;
+  requestPromise = (async () => {
+    try {
+      const payload = await request(API.providers);
+      if (epoch !== providersLoadEpoch) return successfulLoadResult(payload, { stale: true });
+      state.providersData = payload;
+      return successfulLoadResult(state.providersData);
+    } catch (error) {
+      if (epoch !== providersLoadEpoch) return successfulLoadResult(null, { stale: true });
+      state.providersData = { error: error.message, providers: [], current: {}, live: {} };
+      return failedLoadResult(error);
+    } finally {
+      if (epoch === providersLoadEpoch) {
+        state.providersLoading = false;
+        renderProviders();
+        renderConfigTopology();
+        if (state.configHostId && state.configSurface === "providers") renderConfigRemotePanel();
+        runtimeSeatManager?.syncProviders();
+        reconcileUsageAutoQuery();
+        // 团队设置已并入团队页；档案晚到或改名时同步刷新绑定下拉。
+        if (elements["team-settings-panel"]) {
+          const editing = state.teams.find((team) => team.id === state.editingTeamId) ?? null;
+          const bindings = teamFormDirty ? collectTeamProviderBindings() : (editing?.providers ?? {});
+          populateTeamProviderSelects(bindings);
+          renderTeamActivation();
+        }
+      }
+    }
+  })().finally(() => {
+    if (providersLoadPromise === requestPromise) providersLoadPromise = null;
+  });
+  providersLoadPromise = requestPromise;
+  return requestPromise;
+}
+
+function loadProviders({ fresh = false } = {}) {
+  if (providersQueuedFreshPromise) {
+    if (fresh) {
+      providersFreshRequested = true;
+      if (providersLoadPromise) providersLoadEpoch += 1;
+    }
+    return providersQueuedFreshPromise;
+  }
+  if (!providersLoadPromise) return startProvidersLoad();
+  if (!fresh) return providersLoadPromise;
+
+  providersFreshRequested = true;
+  providersLoadEpoch += 1;
+  const activeLoad = providersLoadPromise;
+  let queuedPromise;
+  queuedPromise = (async () => {
+    try {
+      let result = await activeLoad;
+      while (providersFreshRequested) {
+        providersFreshRequested = false;
+        result = await startProvidersLoad();
+      }
+      return result;
+    } finally {
+      if (providersQueuedFreshPromise === queuedPromise) providersQueuedFreshPromise = null;
+    }
+  })();
+  providersQueuedFreshPromise = queuedPromise;
+  return providersQueuedFreshPromise;
+}
+
+// cc-switch autoQueryInterval：启用且间隔>0 的档案按分钟级定时自动查用量（会话级，关页即停）
+const usageAutoTimers = new Map();
+function reconcileUsageAutoQuery() {
+  const providers = state.providersData?.providers ?? [];
+  const wanted = new Map();
+  for (const item of providers) {
+    const script = item.meta?.usageScript;
+    if (script?.enabled && Number(script.autoQueryInterval) > 0) wanted.set(item.id, Number(script.autoQueryInterval));
+  }
+  for (const [id, entry] of usageAutoTimers) {
+    if (!wanted.has(id)) {
+      clearInterval(entry.timer);
+      usageAutoTimers.delete(id);
+    }
+  }
+  for (const [id, minutes] of wanted) {
+    const existing = usageAutoTimers.get(id);
+    if (existing?.minutes === minutes) continue;
+    if (existing) clearInterval(existing.timer);
+    void queryProviderUsageNow(id); // 立即查一次，后续按间隔
+    usageAutoTimers.set(id, {
+      minutes,
+      timer: setInterval(() => void queryProviderUsageNow(id), Math.min(1440, minutes) * 60_000),
+    });
+  }
+}
+
+function providerById(id) {
+  return (state.providersData?.providers ?? []).find((item) => item.id === id) ?? null;
+}
+
+function providerOptionMarkup(app, selectedId) {
+  const options = (state.providersData?.providers ?? []).filter((item) => item.apps?.[app]);
+  const rows = [`<option value="">跟随当前全局</option>`];
+  let selectedMissing = Boolean(selectedId);
+  for (const item of options) {
+    if (item.id === selectedId) selectedMissing = false;
+    rows.push(`<option value="${escapeHtml(item.id)}"${item.id === selectedId ? " selected" : ""}>${escapeHtml(item.name)}</option>`);
+  }
+  // 绑了已删档案：如实示形「失效绑定」，绝不静默抹掉（与幽灵芯片同一原则）
+  if (selectedMissing) rows.push(`<option value="${escapeHtml(selectedId)}" selected>失效绑定（${escapeHtml(selectedId.slice(0, 18))}…）</option>`);
+  return rows.join("");
+}
+
+function collectTeamProviderBindings() {
+  const bindings = {};
+  const existing = teamById(state.editingTeamId)?.providers ?? {};
+  for (const app of PROVIDER_STORAGE_APPS) {
+    const select = elements[`team-provider-${app}`];
+    const value = select ? select.value : existing[app] ?? "";
+    if (value) bindings[app] = value; // 空 = 跟随当前全局，不落键
+  }
+  return bindings;
+}
+
+function populateTeamProviderSelects(bindings = {}) {
+  for (const app of PROVIDER_APPS) {
+    const select = elements[`team-provider-${app}`];
+    if (select) select.innerHTML = providerOptionMarkup(app, bindings[app] ?? "");
+  }
+}
+
+/** 健康状态点：灰=未查 / 绿=operational / 黄=degraded / 红=failed（stream_check 三档语义）。 */
+function healthBadgeOf(providerId) {
+  const health = state.providerHealth[providerId];
+  if (!health) return { level: "unknown", title: "未检查——点击卡片上的检查按钮探测可达性" };
+  const latency = health.responseTimeMs != null ? `${health.responseTimeMs}ms` : "—";
+  if (health.status === "operational") return { level: "operational", title: `可达（${latency}）` };
+  if (health.status === "degraded") return { level: "degraded", title: `较慢（${latency}，超降级阈值）` };
+  return { level: "failed", title: `不可达：${health.message ?? "连接失败"}` };
+}
+
+/** 用量行（cc-switch UsageFooter 语义）：planName + used/total unit 或剩余。 */
+function usageLineOf(item) {
+  const script = item.meta?.usageScript;
+  if (!script?.enabled) return "";
+  const usage = state.providerUsage[item.id];
+  if (!usage) {
+    return `<p class="provider-usage-line"><button class="provider-usage-query" type="button" data-provider-usage="${escapeHtml(item.id)}">查询用量</button></p>`;
+  }
+  if (!usage.success) {
+    return `<p class="provider-usage-line is-error" title="${escapeHtml(usage.error ?? "")}">用量查询失败：${escapeHtml((usage.error ?? "").slice(0, 42))} <button class="provider-usage-query" type="button" data-provider-usage="${escapeHtml(item.id)}">重试</button></p>`;
+  }
+  const parts = (usage.data ?? []).map((entry) => {
+    const unit = entry.unit ?? "";
+    if (entry.remaining != null) return `${entry.planName ? `${escapeHtml(entry.planName)} ` : ""}余 ${entry.remaining}${unit}`;
+    if (entry.used != null && entry.total != null) return `${entry.planName ? `${escapeHtml(entry.planName)} ` : ""}${entry.used}/${entry.total}${unit}`;
+    if (entry.isValid === false) return escapeHtml(entry.invalidMessage ?? "凭据无效");
+    return escapeHtml(entry.extra ?? "已查询");
+  });
+  return `<p class="provider-usage-line" title="用量（点击刷新）">${parts.join("；")} <button class="provider-usage-query" type="button" data-provider-usage="${escapeHtml(item.id)}" aria-label="刷新用量"><svg class="icon lucide"><use href="#lucide-refresh-cw"></use></svg></button></p>`;
+}
+
+/** failover 管理条（每应用列头下）：队列 P1..Pn + 自动转移开关。 */
+function failoverBarMarkup(app, data, compatibleProviderCount = 0) {
+  const queue = data.failoverQueue?.[app] ?? [];
+  const auto = Boolean(data.autoFailover?.[app]);
+  if (!queue.length && !auto && compatibleProviderCount < 2) return "";
+  const names = queue
+    .map((id, index) => {
+      const provider = providerById(id);
+      return `<span class="provider-failover-chip" title="${provider ? escapeHtml(provider.name) : "失效档案"}">P${index + 1} ${provider ? escapeHtml(provider.name) : "失效"}</span>`;
+    })
+    .join("");
+  return `<div class="provider-failover-bar">
+    <label class="provider-failover-toggle" title="健康检查失败时自动切换到队列下一可用项">
+      <input type="checkbox" data-failover-toggle="${escapeHtml(app)}"${auto ? " checked" : ""} />
+      <svg class="icon lucide"><use href="#lucide-repeat"></use></svg>
+      <span>自动转移</span>
+    </label>
+    <span class="provider-failover-queue">${names || '<span class="subtle">使用卡片上的循环图标加入队列</span>'}</span>
+  </div>`;
+}
+
+/** app 图标条（CC Switch 顶栏形态）：品牌图标优先（铁律不臆造，无品牌回落 lucide）；角标 = 该应用已关联档案数。 */
+/**
+ * 供应商行的身份块（拖拽/来源手柄 + 字母徽章 + 名称/健康点/徽标 + 端点链接 + 模型与 Key + 用量行）。
+ * 本机与远程行的**操作列**语义不同（本机=启用/排序/故障转移，远程=发布到远端），刻意不强行合并；
+ * 但「同一个档案长什么样」必须一份代码——否则两侧的徽标、掩码、用量行会各自漂移。
+ */
+function providerRowIdentityMarkup({ item, meta, health, latency = null, handle = "", badges = "" }) {
+  const link = item.websiteUrl || item.baseUrl || "官方默认端点";
+  const model = meta.modelHint(item) || "模型：不动现有";
+  const letter = escapeHtml((item.name || "?").trim().charAt(0).toUpperCase() || "?");
+  // 测速结果统一挂在端点行末的 chip 上（原远程侧把它塞进模型行，两侧位置不一致）
+  const latencyChip = latency
+    ? ` <span class="provider-latency${latency.latency == null ? " is-error" : ""}">${latency.latency != null ? `${latency.latency}ms` : escapeHtml(latency.error ?? "测速失败")}</span>`
+    : "";
+  return `${handle}
+    <span class="provider-row-icon"${item.iconColor ? ` data-provider-color="${escapeHtml(item.iconColor)}"` : ""}>${letter}</span>
+    <div class="provider-row-main">
+      <div class="provider-row-title">
+        <strong>${escapeHtml(item.name)}</strong>
+        <span class="provider-health-dot is-${health.level}" title="${escapeHtml(health.title)}" role="status"></span>
+        ${badges}
+        ${item.category && item.category !== "custom" ? `<span class="provider-badge is-category">${escapeHtml(PRESET_CATEGORY_LABELS[item.category] ?? item.category)}</span>` : ""}
+      </div>
+      <span class="provider-row-link" title="${escapeHtml(link)}">${escapeHtml(link)}${latencyChip}</span>
+      <span class="provider-meta-line">${escapeHtml(model)}${item.hasApiKey ? ` · Key ${escapeHtml(item.apiKeyMasked)}` : " · 无 Key"}</span>
+      ${usageLineOf(item)}
+    </div>`;
+}
+
+/**
+ * 应用页签条（本机与远程共用同一渲染器）：品牌徽标 + 名称 + 档案计数。
+ * 两侧只在「点击语义」与「title 补充信息」上不同——参数化这两处，形态与键盘语义永不漂移。
+ */
+function providerAppTabsMarkup({ active, dataAttr, extraTitle = () => "", focusable = false }) {
+  const providers = state.providersData?.providers ?? [];
+  return PROVIDER_APP_META.map((meta) => {
+    const brandCli = meta.app === "grokbuild" ? "grok" : CLI_ICONS[meta.app] ? meta.app : null;
+    const logo = brandCli
+      ? cliIconMarkup(brandCli, "cli-logo provider-app-tab-logo")
+      : `<svg class="icon lucide" aria-hidden="true"><use href="#lucide-${meta.icon}"></use></svg>`;
+    const count = providers.filter((item) => item.apps?.[meta.app]).length;
+    const isActive = meta.app === active;
+    const suffix = extraTitle(meta, count);
+    return `<button class="provider-app-tab${isActive ? " is-active" : ""}" type="button" role="tab" aria-selected="${isActive}"${focusable ? ` tabindex="${isActive ? "0" : "-1"}"` : ""} ${dataAttr}="${escapeHtml(meta.app)}" title="${escapeHtml(meta.label)}${suffix ? ` · ${escapeHtml(suffix)}` : ""}">${logo}<span class="provider-app-tab-label">${escapeHtml(meta.label)}</span>${count ? `<span class="provider-app-tab-count">${count}</span>` : ""}</button>`;
+  }).join("");
+}
+
+function renderProviderAppBar() {
+  const appBar = elements["provider-app-bar"];
+  if (!appBar) return;
+  const current = state.providersData?.current ?? {};
+  appBar.innerHTML = providerAppTabsMarkup({
+    active: providerActiveApp(),
+    dataAttr: "data-provider-app-tab",
+    extraTitle: (meta) => {
+      const currentName = providerById(current[meta.app])?.name ?? "";
+      return currentName ? `当前：${currentName}` : "";
+    },
+  });
+}
+
+/** 官方登录态虚拟行（live 检出 CLI 托管官方登录，如 kimi managed:kimi-code，且档案库无同端点档案）：
+ *  形态对齐真实档案行让「正在使用」一眼可见；操作面只给「存为档案」——OAuth 凭据绝不落档案。 */
+function officialLiveRowMarkup({ app, liveInfo }) {
+  const label = PROVIDER_APP_META.find((entry) => entry.app === app)?.label ?? app;
+  const letter = escapeHtml(label.trim().charAt(0).toUpperCase() || "?");
+  const link = liveInfo.baseUrl || "官方默认端点";
+  return `<article class="provider-row is-current" data-provider-official-row="${escapeHtml(app)}">
+    <span class="provider-drag-handle" title="虚拟行——存为档案后可排序" aria-hidden="true"><span class="provider-drag-glyph">⠿</span></span>
+    <span class="provider-row-icon">${letter}</span>
+    <div class="provider-row-main">
+      <div class="provider-row-title">
+        <strong>${escapeHtml(label)} 官方登录</strong>
+        <span class="provider-health-dot is-unknown" title="CLI 托管登录态——可达性以 CLI 自测为准" role="status"></span>
+        <span class="provider-badge is-live" title="live 配置正使用 CLI 托管的官方登录（凭据不落档案）">live</span>
+        <span class="provider-badge is-category">官方</span>
+      </div>
+      <span class="provider-row-link" title="${escapeHtml(link)}">${escapeHtml(link)}</span>
+      <span class="provider-meta-line">模型：${escapeHtml(liveInfo.model ?? "不动现有")} · 凭据 CLI 托管</span>
+    </div>
+    <div class="provider-row-actions">
+      <button class="button secondary provider-card-action" type="button" data-provider-archive-official="${escapeHtml(app)}">存为档案</button>
+    </div>
+  </article>`;
+}
+
+/** 单个供应商行（CC Switch 行式卡片）：拖拽手柄 + 字母图标徽章 + 名称/badge + accent 链接文本 + 右侧操作。 */
+function providerRowMarkup({ item, index, total, meta, app, current, liveInfo, queue, sortMode, storeBlocked }) {
+  const isCurrent = current[app] === item.id;
+  const isLiveMatch = liveInfo.matchedProviderId === item.id && !isCurrent;
+  // 生效行 = store 当前 或 live 认亲（外部切换后 store 未认时，live 才是真相）
+  const isActive = isCurrent || isLiveMatch;
+  const health = healthBadgeOf(item.id);
+  const queueIndex = queue.indexOf(item.id);
+  const latency = item.baseUrl ? state.providerLatency[item.baseUrl] : null;
+  const sortControls = sortMode
+    ? `<button class="icon-button provider-card-action" type="button" data-provider-move="${escapeHtml(app)}::${escapeHtml(item.id)}::-1" title="上移" aria-label="上移"${index === 0 ? " disabled" : ""}><svg class="icon lucide"><use href="#lucide-arrow-up"></use></svg></button>
+       <button class="icon-button provider-card-action" type="button" data-provider-move="${escapeHtml(app)}::${escapeHtml(item.id)}::1" title="下移" aria-label="下移"${index === total - 1 ? " disabled" : ""}><svg class="icon lucide"><use href="#lucide-arrow-down"></use></svg></button>`
+    : "";
+  const failoverButton = queueIndex === -1
+    ? `<button class="icon-button provider-card-action" type="button" data-provider-failover-add="${escapeHtml(app)}::${escapeHtml(item.id)}" title="加入故障转移队列" aria-label="加入故障转移队列"><svg class="icon lucide"><use href="#lucide-repeat"></use></svg></button>`
+    : `<button class="icon-button provider-card-action is-in-queue" type="button" data-provider-failover-remove="${escapeHtml(app)}::${escapeHtml(item.id)}" title="移出故障转移队列" aria-label="移出故障转移队列"><svg class="icon lucide"><use href="#lucide-repeat"></use></svg></button>`;
+  const primaryLabel = item.category === "omo" || item.category === "omo-slim"
+    ? "启用插件"
+    : meta.cumulative
+      ? "加入配置"
+      : "启用";
+  // 生效行右侧 = 可点的实心状态丸（store 当前 或 live 认亲都算）——一眼锁定「正在用」，
+  // 同时保留重新投影入口：编辑档案后 live 不会自动跟进，必须能再点一次重新启用。
+  const currentStateLabel = item.category === "omo" || item.category === "omo-slim"
+    ? "插件启用中"
+    : meta.cumulative
+      ? "已加入配置"
+      : "使用中";
+  const primaryAction = isActive
+    ? `<button class="provider-state-pill" type="button" data-provider-switch="${escapeHtml(app)}::${escapeHtml(item.id)}"${storeBlocked ? " disabled" : ""} title="${isCurrent ? "live 配置当前指向此档案" : "live 配置与此档案一致（外部切换认亲）"}——点击重新投影（编辑档案后需重新启用）"><span class="provider-state-pill-check" aria-hidden="true">✓</span>${escapeHtml(currentStateLabel)}</button>`
+    : `<button class="button secondary provider-card-action" type="button" data-provider-switch="${escapeHtml(app)}::${escapeHtml(item.id)}"${storeBlocked ? " disabled" : ""}>${primaryLabel}</button>`;
+  const draggable = !sortMode && !storeBlocked;
+  return `<article class="provider-row${isActive ? " is-current" : ""}" data-provider-row="${escapeHtml(item.id)}"${draggable ? ' draggable="true"' : ""}>
+    ${providerRowIdentityMarkup({
+      item,
+      meta,
+      health,
+      latency,
+      handle: `<span class="provider-drag-handle" title="${draggable ? "拖拽排序" : "排序模式：用右侧箭头移动"}" aria-hidden="true"><span class="provider-drag-glyph">⠿</span></span>`,
+      badges: `${isCurrent ? '<span class="provider-badge is-current">当前</span>' : ""}`
+        + `${isLiveMatch ? '<span class="provider-badge is-live" title="live 配置与此档案一致（外部切换认亲）">live</span>' : ""}`
+        + `${queueIndex !== -1 ? `<span class="provider-badge is-failover" title="故障转移队列优先级">P${queueIndex + 1}</span>` : ""}`,
+    })}
+    <div class="provider-row-actions">
+      ${sortControls || primaryAction}
+      <button class="icon-button provider-card-action" type="button" data-provider-check="${escapeHtml(item.id)}" title="连通性检查" aria-label="连通性检查"><svg class="icon lucide"><use href="#lucide-activity"></use></svg></button>
+      ${item.baseUrl ? `<button class="icon-button provider-card-action" type="button" data-provider-speed="${escapeHtml(item.id)}" title="端点测速" aria-label="端点测速"><svg class="icon lucide"><use href="#lucide-gauge"></use></svg></button>` : ""}
+      ${failoverButton}
+      <button class="icon-button provider-card-action" type="button" data-provider-edit="${escapeHtml(item.id)}" title="编辑档案" aria-label="编辑档案"><svg class="icon lucide"><use href="#lucide-settings"></use></svg></button>
+      <button class="icon-button provider-card-action" type="button" data-provider-delete="${escapeHtml(item.id)}" title="删除档案" aria-label="删除档案"><svg class="icon lucide"><use href="#lucide-trash-2"></use></svg></button>
+    </div>
+  </article>`;
+}
+
+/** 拖拽排序（HTML5 DnD）：dragover 标记插入位（前/后半行），drop 后按视觉顺序落 appOrder。 */
+let providerDragId = null;
+
+function clearProviderDragState() {
+  providerDragId = null;
+  const columns = elements["provider-columns"];
+  if (!columns) return;
+  for (const row of columns.querySelectorAll(".is-dragging, .is-dragover-before, .is-dragover-after")) {
+    row.classList.remove("is-dragging", "is-dragover-before", "is-dragover-after");
+  }
+}
+
+async function dropProviderRow(dragId, targetId, insertAfter) {
+  const app = providerActiveApp();
+  const eligible = (state.providersData?.providers ?? []).filter((item) => item.apps?.[app]).map((item) => item.id);
+  const ordered = (state.providersData?.appOrder?.[app] ?? []).filter((providerId) => eligible.includes(providerId));
+  for (const providerId of eligible) if (!ordered.includes(providerId)) ordered.push(providerId);
+  const from = ordered.indexOf(dragId);
+  if (from === -1) return;
+  const [moved] = ordered.splice(from, 1);
+  let insertAt = targetId ? ordered.indexOf(targetId) : ordered.length;
+  if (insertAt === -1) insertAt = ordered.length;
+  else if (insertAfter) insertAt += 1;
+  ordered.splice(insertAt, 0, moved);
+  try {
+    await request(API.providerSort, { method: "POST", body: { app, orderedIds: ordered } });
+    await loadProviders({ fresh: true });
+  } catch (error) {
+    toast(`排序失败：${error.message}`, "error");
+  }
+}
+
+function renderProviders() {
+  const columns = elements["provider-columns"];
+  if (!columns) return;
+  renderProviderAppBar();
+  const data = state.providersData;
+  if (!data) {
+    columns.innerHTML = '<p class="subtle provider-deck-placeholder">正在读取供应商档案…</p>';
+    void loadProviders();
+    return;
+  }
+  if (data.error) {
+    if (elements["provider-add-button"]) elements["provider-add-button"].hidden = true;
+    columns.innerHTML = `<p class="subtle provider-deck-placeholder">档案读取失败：${escapeHtml(data.error)}</p>`;
+    return;
+  }
+  const providers = data.providers ?? [];
+  const current = data.current ?? {};
+  const live = data.live ?? {};
+  const sortMode = Boolean(state.providerSortMode);
+  const storeBlocked = data.storeStatus?.state === "blocked";
+  const blockedBanner = storeBlocked
+    ? `<div class="provider-store-blocked" role="alert"><strong>供应商档案已冻结</strong><span>${escapeHtml(data.storeStatus.message || "现有 providers.json 无法安全读取")}</span><span>为防覆盖原文件，新增、编辑、排序和切换均已阻止。</span></div>`
+    : "";
+  const appHasRuntimeState = (app) => Boolean(
+    current[app]
+    || live[app]?.baseUrl
+    || (data.failoverQueue?.[app] ?? []).length
+    || data.autoFailover?.[app],
+  );
+  const globallyEmpty = !providers.some(providerBelongsToScheme) && !PROVIDER_APPS.some(appHasRuntimeState);
+  // 空库只保留内容区内的主 CTA；避免页头与空态重复出现两个“新增供应商”。
+  if (elements["provider-add-button"]) elements["provider-add-button"].hidden = globallyEmpty || storeBlocked;
+  let deckMarkup = "";
+  if (globallyEmpty) {
+    deckMarkup = `<section class="provider-global-empty" aria-labelledby="provider-global-empty-title">
+      <svg class="icon lucide" aria-hidden="true"><use href="#lucide-plug-zap"></use></svg>
+      <div><strong id="provider-global-empty-title">尚未创建供应商连接</strong><span>Provider 保存端点与私密凭据；运行席位只绑定 Provider ID。</span></div>
+      ${storeBlocked ? "" : '<button class="button primary" type="button" data-provider-add-app=""><svg class="icon lucide"><use href="#lucide-plus"></use></svg>新增供应商</button>'}
+    </section>`;
+  } else {
+    const app = providerActiveApp();
+    const meta = PROVIDER_APP_META.find((entry) => entry.app === app) ?? PROVIDER_APP_META[0];
+    const liveInfo = live[app] ?? {};
+    const queue = data.failoverQueue?.[app] ?? [];
+    const order = data.appOrder?.[app] ?? [];
+    const orderRank = new Map(order.map((id, index) => [id, index]));
+    const appProviders = providers
+      .filter((item) => item.apps?.[app])
+      .sort((a, b) => (orderRank.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (orderRank.get(b.id) ?? Number.MAX_SAFE_INTEGER));
+    const rows = appProviders
+      .map((item, index) => providerRowMarkup({ item, index, total: appProviders.length, meta, app, current, liveInfo, queue, sortMode, storeBlocked }))
+      .join("");
+    // 官方登录态虚拟行置顶——同端点档案已在列表（认亲成功）时不重复合成
+    const officialRow = liveInfo.official && !appProviders.some((item) => item.id === liveInfo.matchedProviderId)
+      ? officialLiveRowMarkup({ app, liveInfo })
+      : "";
+    const liveLine = liveInfo.official
+      ? `live：官方登录（managed:kimi-code）${liveInfo.baseUrl ? ` · ${escapeHtml(liveInfo.baseUrl)}` : ""}${liveInfo.model ? ` · 模型 ${escapeHtml(liveInfo.model)}` : ""}${liveInfo.matchedProviderId ? " · 端点已认亲" : " · 未关联档案"}`
+      : liveInfo.baseUrl
+        ? `live：${escapeHtml(liveInfo.baseUrl)}${liveInfo.matchedProviderId ? "" : "（未认亲——外部手改或非档案切换）"}`
+        : "未检测到自定义端点（CLI 可能使用官方登录）";
+    const emptyOtherApps = PROVIDER_APP_META.filter((entry) => entry.app !== app
+      && !providers.some((item) => item.apps?.[entry.app])
+      && !appHasRuntimeState(entry.app));
+    deckMarkup = `<div class="provider-app-strip">
+      <p class="provider-live-line" title="${liveLine}">${liveLine}</p>
+      ${failoverBarMarkup(app, data, appProviders.length)}
+      <div class="provider-row-list" data-provider-app-list="${escapeHtml(app)}">
+        ${(officialRow + rows) || `<p class="subtle provider-deck-placeholder">${appHasRuntimeState(app) ? "检测到外部 live 状态，尚未关联供应商档案。" : "该应用还没有关联供应商档案。"} <button class="provider-link-button" type="button" data-provider-add-app="${escapeHtml(app)}">新增/关联</button></p>`}
+      </div>
+      ${providerBackupTimelineMarkup(app, { storeBlocked })}
+    </div>`;
+    if (emptyOtherApps.length) {
+      deckMarkup += `<details class="provider-empty-apps">
+        <summary>还有 ${emptyOtherApps.length} 个应用未关联供应商</summary>
+        <div class="provider-empty-app-list">
+          ${emptyOtherApps.map((entry) => `<div><span><svg class="icon lucide" aria-hidden="true"><use href="#lucide-${entry.icon}"></use></svg>${escapeHtml(entry.label)}</span><span class="provider-empty-app-actions"><button class="button secondary" type="button" data-provider-app-tab="${escapeHtml(entry.app)}">切换过去</button><button class="button secondary" type="button" data-provider-add-app="${escapeHtml(entry.app)}">关联</button></span></div>`).join("")}
+        </div>
+      </details>`;
+    }
+  }
+  columns.innerHTML = blockedBanner + deckMarkup;
+  // 品牌点颜色走 CSSOM（铁规：禁内联 style 属性，setProperty 可）
+  for (const dot of columns.querySelectorAll("[data-provider-color]")) {
+    dot.style.setProperty("background", dot.dataset.providerColor);
+  }
+  // 团队方案应用条
+  const teamSelect = elements["provider-team-select"];
+  if (teamSelect) {
+    const boundTeams = state.teams.filter((team) => providerSchemeBindings(team).length > 0);
+    const previous = teamSelect.value;
+    teamSelect.innerHTML = boundTeams.length
+      ? boundTeams.map((team) => `<option value="${escapeHtml(team.id)}">${escapeHtml(team.name)}（${providerSchemeBindings(team).length} 绑）</option>`).join("")
+      : '<option value="">无绑定团队</option>';
+    if (boundTeams.some((team) => team.id === previous)) teamSelect.value = previous;
+    elements["provider-apply-team-button"].disabled = boundTeams.length === 0;
+  }
+  // 排序模式的可见反馈：显式「完成排序」按钮（原先只靠图标按钮高亮，用户看不出自己在什么模式里）
+  if (elements["provider-sort-exit"]) elements["provider-sort-exit"].hidden = !sortMode || storeBlocked;
+  for (const id of ["provider-add-button", "provider-tools-button"]) {
+    if (elements[id]) elements[id].disabled = storeBlocked;
+  }
+}
+
+/* ===== 本机 live 配置备份时间线：切换确认框承诺的「可回滚」在界面上真正兑现 =====
+ * 形态、操作与文案对齐远程 configRemoteBackupTimeline（LO 要求 2：本机/远程一致）。
+ * 恢复走服务端事务：备份原文从不经浏览器，脱敏文本只用于画差异。 */
+
+function loadProviderBackups({ fresh = false } = {}) {
+  if (state.providerBackups && !fresh) return Promise.resolve(state.providerBackups);
+  return request(API.providerBackups).then((data) => {
+    state.providerBackups = data;
+    state.providerBackupsError = null;
+    renderProviders();
+    return data;
+  }).catch((error) => {
+    state.providerBackups = null;
+    state.providerBackupsError = error.message || "备份台账不可读";
+    renderProviders();
+    return null;
+  });
+}
+
+function providerBackupEntries(app) {
+  const all = state.providerBackups?.backups ?? [];
+  return { forApp: all.filter((entry) => entry.app === app), otherCount: all.filter((entry) => entry.app !== app).length };
+}
+
+/** 备份行：时间 + 归属档案 + 目标文件 + 大小；展开=脱敏差异（- 会失去，+ 会回来）。 */
+function providerBackupRowMarkup(entry, { storeBlocked }) {
+  const open = state.providerBackupOpenName === entry.name;
+  const busy = state.providerBackupBusy.has(entry.name);
+  const cache = open ? state.providerBackupCache.get(entry.name) : null;
+  const reasonLabel = entry.reason === "restore" ? "回退留存" : entry.reason === "switch" ? "切换留存" : "发布留存";
+  const restoreTitle = !entry.restorable
+    ? entry.unresolved === "ambiguous"
+      ? "同名文件对应多个 live 目标，无法自动判定写回哪个——请手工处理"
+      : "该备份没有登记的 live 目标，不能自动写回"
+    : storeBlocked
+      ? "供应商档案已冻结，写入全部阻止"
+      : `把这份备份写回 ${entry.targetPath}`;
+  let body = "";
+  if (open) {
+    if (!cache || cache.status === "loading") {
+      body = '<p class="subtle">正在读取备份（脱敏后仅用于对比）…</p>';
+    } else if (cache.status === "error") {
+      body = `<p class="subtle">备份读取失败：${escapeHtml(cache.error)}</p>`;
+    } else {
+      const data = cache.data ?? {};
+      body = data.contentHidden
+        ? '<p class="subtle">该文件是凭据载体，内容不出服务端——可以回退，但不提供内容对比。</p>'
+        : '<p class="subtle config-remote-backup-note">下面是「回退到这份备份」会产生的变更：<code>-</code> 会失去，<code>+</code> 会回来。</p>'
+          + configRemoteDiffMarkup(data.current ?? "", data.content ?? "", {
+            emptyLabel: "这份备份与当前 live 配置一致，回退不会改变任何内容。",
+            label: `${entry.targetPath ?? entry.name} 回退差异`,
+          })
+          + (data.redacted ? '<p class="subtle">对比里有片段被脱敏替换；回退写回的是服务端读到的原文，不是这里显示的文本。</p>' : "");
+    }
+  }
+  return `<div class="config-remote-backup-row${open ? " is-open" : ""}${entry.restorable ? "" : " is-unresolved"}">
+    <div class="config-remote-backup-head">
+      <span class="config-remote-backup-dot" aria-hidden="true"></span>
+      <div class="config-remote-backup-meta">
+        <strong>${escapeHtml(formatConfigBackupTime(entry.createdAt))}</strong>
+        <code title="${escapeHtml(entry.name)}">${escapeHtml(entry.targetPath ?? entry.name)}</code>
+        <span class="subtle">${escapeHtml(reasonLabel)}${entry.providerName ? ` · 切到「${escapeHtml(entry.providerName)}」前` : ""} · ${escapeHtml(formatConfigBytes(entry.size))}${entry.hasManifest ? "" : " · 无归属清单（历史备份）"}</span>
+      </div>
+      <div class="config-remote-backup-actions">
+        <button class="button secondary" type="button" data-provider-backup-compare="${escapeHtml(entry.name)}" aria-pressed="${open}"${entry.restorable ? "" : " disabled"}><svg class="icon lucide"><use href="#lucide-scan-search"></use></svg>${open ? "收起" : "对比"}</button>
+        <button class="button secondary" type="button" data-provider-backup-restore="${escapeHtml(entry.name)}" title="${escapeHtml(restoreTitle)}"${entry.restorable && !busy && !storeBlocked ? "" : " disabled"}><svg class="icon lucide"><use href="#lucide-history"></use></svg>${busy ? "回退中…" : "回退到此份"}</button>
+        <button class="icon-button" type="button" data-provider-backup-delete="${escapeHtml(entry.name)}" title="删除此备份" aria-label="删除备份 ${escapeHtml(entry.name)}"${busy ? " disabled" : ""}><svg class="icon lucide"><use href="#lucide-trash-2"></use></svg></button>
+      </div>
+    </div>
+    ${open ? `<div class="config-remote-backup-body">${body}</div>` : ""}
+  </div>`;
+}
+
+function providerBackupTimelineMarkup(app, { storeBlocked }) {
+  const meta = PROVIDER_APP_META.find((entry) => entry.app === app);
+  const expanded = Boolean(state.providerBackupsOpen);
+  const loaded = Boolean(state.providerBackups);
+  const { forApp, otherCount } = providerBackupEntries(app);
+  // 收起态是一行「入口条」：不占版面，也不谎报「读取中」（台账只在展开时才拉）
+  if (!expanded) {
+    return `<button class="provider-backup-entry" type="button" data-provider-backups-toggle aria-expanded="false" title="每次切换或发布前都会先备份 live 配置">
+      <svg class="icon lucide" aria-hidden="true"><use href="#lucide-history"></use></svg>
+      <span class="provider-backup-entry-copy"><strong>发布备份</strong><span>${loaded ? `${escapeHtml(meta?.label ?? app)} ${forApp.length} 份可回退` : "切换或发布前的 live 配置都在这里，可对比并一键回退"}</span></span>
+      <span class="provider-backup-entry-cue">查看并回退</span>
+    </button>`;
+  }
+  const countLabel = state.providerBackupsError
+    ? "读取失败"
+    : loaded
+      ? `${forApp.length} 份${otherCount ? ` · 其他应用 ${otherCount} 份` : ""}`
+      : "读取中";
+  const head = `<header>
+    <h4>发布备份</h4>
+    <span class="subtle">${escapeHtml(countLabel)}</span>
+    <div class="provider-backup-head-actions">
+      <button class="icon-button" type="button" data-provider-backups-refresh title="重新读取备份台账" aria-label="重新读取备份台账"><svg class="icon lucide"><use href="#lucide-refresh-cw"></use></svg></button>
+      <button class="button secondary" type="button" data-provider-backups-toggle aria-expanded="true"><svg class="icon lucide"><use href="#lucide-chevron-down"></use></svg>收起</button>
+    </div>
+  </header>`;
+  let body;
+  if (state.providerBackupsError) {
+    body = `<p class="subtle">备份台账读取失败：${escapeHtml(state.providerBackupsError)}</p>`;
+  } else if (!loaded) {
+    body = '<p class="subtle">正在读取备份台账…</p>';
+  } else if (!forApp.length) {
+    body = `<p class="subtle">${escapeHtml(meta?.label ?? app)} 还没有留下备份${otherCount ? `（其他应用有 ${otherCount} 份，切换上方应用页签查看）` : "——切换或发布一次供应商后就会有"}。</p>`;
+  } else {
+    body = `<div class="config-remote-backup-list">${forApp.map((entry) => providerBackupRowMarkup(entry, { storeBlocked })).join("")}</div>
+      <p class="subtle">回退复用与切换同一条写入链：先备份当前内容再原子替换——所以回退本身也能再回退。</p>`;
+  }
+  return `<section class="config-remote-backup-timeline provider-backup-timeline is-open" aria-label="${escapeHtml(meta?.label ?? app)} 发布备份">${head}${body}</section>`;
+}
+
+function toggleProviderBackups() {
+  state.providerBackupsOpen = !state.providerBackupsOpen;
+  if (state.providerBackupsOpen && !state.providerBackups) void loadProviderBackups();
+  else renderProviders();
+}
+
+function toggleProviderBackupCompare(name) {
+  if (state.providerBackupOpenName === name) {
+    state.providerBackupOpenName = null;
+    renderProviders();
+    return;
+  }
+  state.providerBackupOpenName = name;
+  if (!state.providerBackupCache.has(name)) {
+    state.providerBackupCache.set(name, { status: "loading" });
+    void request(API.providerBackup(name)).then((data) => {
+      state.providerBackupCache.set(name, { status: "ok", data });
+    }).catch((error) => {
+      state.providerBackupCache.set(name, { status: "error", error: error.message || "读取失败" });
+    }).finally(() => {
+      if (state.providerBackupOpenName === name) renderProviders();
+    });
+  }
+  renderProviders();
+}
+
+async function restoreProviderBackup(name) {
+  const entry = (state.providerBackups?.backups ?? []).find((item) => item.name === name);
+  if (!entry || !entry.restorable) return;
+  // 差异已看过就带上当轮摘要做 CAS；没看过则让服务端按现状写（仍先备份当前内容）
+  const cached = state.providerBackupCache.get(name);
+  const expectedDigest = cached?.status === "ok" ? cached.data?.currentDigest ?? null : null;
+  const proceed = await confirmAction({
+    eyebrow: "回退 live 配置",
+    title: `把 ${entry.targetPath} 回退到 ${formatConfigBackupTime(entry.createdAt)} 的备份？`,
+    rows: [
+      ["目标文件", entry.targetPath],
+      ["备份来源", `${entry.reason === "restore" ? "上一次回退" : "切换供应商"}前留存${entry.providerName ? `（切到「${entry.providerName}」前）` : ""}`],
+      ["写入方式", "先为当前内容再留一份备份，再原子替换——回退可以再回退"],
+    ],
+    warning: entry.credential
+      ? "这是凭据载体文件，内容不出服务端；回退会用备份里的凭据覆盖当前值。"
+      : "当前 live 配置将被这份备份覆盖；相关 CLI 下次启动即按回退后的配置运行。",
+    confirmLabel: "回退",
+    danger: true,
+  });
+  if (!proceed) return;
+  state.providerBackupBusy.add(name);
+  renderProviders();
+  try {
+    const result = await request(API.providerBackupRestore(name), { method: "POST", body: { expectedDigest } });
+    toast(`已回退 ${result.target}（当前内容已另存为备份）`, "success", 6000);
+    state.providerBackupCache.clear();
+    state.providerBackupOpenName = null;
+    await Promise.all([loadProviderBackups({ fresh: true }), loadProviders({ fresh: true })]);
+  } catch (error) {
+    toast(error.code === "BACKUP_TARGET_CHANGED"
+      ? "live 配置在你查看之后被改过，已阻止覆盖——点刷新重看差异再决定"
+      : `回退失败：${error.message}`, "error", 8000);
+    await loadProviderBackups({ fresh: true });
+  } finally {
+    state.providerBackupBusy.delete(name);
+    renderProviders();
+  }
+}
+
+async function deleteProviderBackup(name) {
+  const entry = (state.providerBackups?.backups ?? []).find((item) => item.name === name);
+  if (!entry) return;
+  const proceed = await confirmAction({
+    eyebrow: "删除备份",
+    title: `删除 ${formatConfigBackupTime(entry.createdAt)} 的备份？`,
+    rows: [["文件", entry.targetPath ?? entry.name], ["影响", "该时间点的回退材料将不再可用"]],
+    warning: "备份删除后无法恢复。",
+    confirmLabel: "删除",
+    danger: true,
+  });
+  if (!proceed) return;
+  state.providerBackupBusy.add(name);
+  renderProviders();
+  try {
+    await request(API.providerBackup(name), { method: "DELETE" });
+    state.providerBackupCache.delete(name);
+    if (state.providerBackupOpenName === name) state.providerBackupOpenName = null;
+    toast("备份已删除", "success");
+    await loadProviderBackups({ fresh: true });
+  } catch (error) {
+    toast(`删除失败：${error.message}`, "error");
+  } finally {
+    state.providerBackupBusy.delete(name);
+    renderProviders();
+  }
+}
+
+function setProviderDialogTab(tab) {
+  state.providerDialogTab = tab;
+  const dialog = elements["provider-dialog"];
+  for (const button of dialog.querySelectorAll("[data-provider-tab]")) {
+    const active = button.dataset.providerTab === tab;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-selected", String(active));
+  }
+  for (const panel of dialog.querySelectorAll("[data-provider-panel]")) {
+    panel.hidden = panel.dataset.providerPanel !== tab;
+  }
+}
+
+function providerDialogSelection(provider, preferredApp = null) {
+  const requestedApp = PROVIDER_APPS.includes(preferredApp) ? preferredApp : providerActiveApp();
+  const firstLinkedApp = provider ? PROVIDER_APPS.find((app) => provider.apps?.[app]) : null;
+  const targetApp = provider && !provider.apps?.[requestedApp] ? (firstLinkedApp ?? requestedApp) : requestedApp;
+  const apps = Object.fromEntries(PROVIDER_STORAGE_APPS.map((app) => [
+    app,
+    Boolean(provider ? provider.apps?.[app] : app === targetApp),
+  ]));
+  return { targetApp, apps };
+}
+
+function fillProviderDialog(provider, { app: preferredApp = null, prefill = null } = {}) {
+  state.editingProviderId = provider?.id ?? null;
+  const selection = providerDialogSelection(provider, preferredApp);
+  state.providerDialogTargetApp = selection.targetApp;
+  state.providerDialogApps = selection.apps;
+  const targetLabel = PROVIDER_APP_META.find((entry) => entry.app === selection.targetApp)?.label ?? selection.targetApp;
+  elements["provider-dialog-title"].textContent = provider ? `编辑供应商 · ${provider.name}` : `新增供应商 · ${targetLabel}`;
+  elements["provider-name-input"].value = provider?.name ?? prefill?.name ?? "";
+  elements["provider-baseurl-input"].value = provider?.baseUrl ?? prefill?.baseUrl ?? "";
+  elements["provider-key-input"].value = "";
+  elements["provider-key-input"].placeholder = provider?.hasApiKey ? `现有 ${provider.apiKeyMasked}——留空保持不变` : "sk-…";
+  elements["provider-website-input"].value = provider?.websiteUrl ?? prefill?.websiteUrl ?? "";
+  elements["provider-notes-input"].value = provider?.notes ?? prefill?.notes ?? "";
+  for (const { app } of PROVIDER_APP_META) {
+    elements[`provider-models-${app}`].hidden = !selection.apps[app];
+  }
+  elements["provider-claude-model"].value = provider?.models?.claude?.model ?? "";
+  elements["provider-claude-haiku"].value = provider?.models?.claude?.haikuModel ?? "";
+  elements["provider-claude-sonnet"].value = provider?.models?.claude?.sonnetModel ?? "";
+  elements["provider-claude-opus"].value = provider?.models?.claude?.opusModel ?? "";
+  elements["provider-claude-fable"].value = provider?.models?.claude?.fableModel ?? "";
+  elements["provider-claude-subagent"].value = provider?.models?.claude?.subagentModel ?? "";
+  // 模型映射（高级 tab）：显示名 + 1M 声明
+  for (const role of ["sonnet", "opus", "fable", "haiku"]) {
+    elements[`provider-claude-${role}-name`].value = provider?.models?.claude?.[`${role}ModelName`] ?? "";
+  }
+  elements["provider-claude-model-1m"].checked = provider?.models?.claude?.model1m === "1";
+  for (const role of ["sonnet", "opus", "fable", "haiku", "subagent"]) {
+    elements[`provider-claude-${role}-1m`].checked = provider?.models?.claude?.[`${role}Model1m`] === "1";
+  }
+  elements["provider-codex-model"].value = provider?.models?.codex?.model ?? "";
+  elements["provider-codex-effort"].value = provider?.models?.codex?.reasoningEffort ?? "";
+  elements["provider-gemini-model"].value = provider?.models?.gemini?.model ?? "";
+  for (const app of ["grokbuild", "kimi", "opencode", "openclaw", "hermes"]) {
+    elements[`provider-${app}-model`].value = provider?.models?.[app]?.model ?? "";
+  }
+  elements["provider-delete-button"].hidden = !provider;
+  // ── cc-switch 二波分区 ──
+  const meta = provider?.meta ?? {};
+  state.providerDialogEndpoints = (meta.customEndpoints ?? []).map((entry) => ({ ...entry }));
+  elements["provider-endpoint-autoselect"].checked = Boolean(meta.endpointAutoSelect);
+  renderProviderEndpoints();
+  const usage = meta.usageScript ?? {};
+  elements["provider-usage-enabled"].checked = Boolean(usage.enabled);
+  elements["provider-usage-template"].value = usage.templateType ?? "custom";
+  elements["provider-usage-timeout"].value = usage.timeout ?? 10;
+  elements["provider-usage-interval"].value = usage.autoQueryInterval ?? 0;
+  elements["provider-usage-userid"].value = usage.userId ?? "";
+  elements["provider-usage-apikey"].value = "";
+  elements["provider-usage-apikey"].placeholder = usage.hasApiKey ? `现有 ${usage.apiKeyMasked}——留空保持不变` : "留空 = 用主 Key";
+  elements["provider-usage-baseurl"].value = usage.baseUrl ?? "";
+  elements["provider-usage-token"].value = "";
+  elements["provider-usage-token"].placeholder = usage.hasAccessToken ? `现有 ${usage.accessTokenMasked}——留空保持不变` : "New API 后台令牌";
+  elements["provider-usage-code"].value = usage.code ?? "";
+  elements["provider-usage-test-result"].textContent = "";
+  const proxy = meta.proxyConfig ?? {};
+  elements["provider-proxy-enabled"].checked = Boolean(proxy.enabled);
+  elements["provider-proxy-type"].value = proxy.proxyType ?? "http";
+  elements["provider-proxy-host"].value = proxy.host ?? "";
+  elements["provider-proxy-port"].value = proxy.port ?? "";
+  elements["provider-proxy-username"].value = proxy.username ?? "";
+  elements["provider-proxy-password"].value = "";
+  elements["provider-proxy-password"].placeholder = proxy.hasPassword ? "已设置——留空保持不变" : "可选";
+  const test = meta.testConfig ?? {};
+  elements["provider-test-timeout"].value = test.timeoutSecs ?? 8;
+  elements["provider-test-retries"].value = test.maxRetries ?? 1;
+  elements["provider-test-degraded"].value = test.degradedThresholdMs ?? 6000;
+  elements["provider-test-model"].value = test.testModel ?? "";
+  elements["provider-test-prompt"].value = test.testPrompt ?? "";
+  elements["provider-model-test-result"].textContent = "";
+  elements["provider-category"].value = provider?.category ?? prefill?.category ?? "custom";
+  elements["provider-apikey-field"].value = meta.apiKeyField ?? "ANTHROPIC_AUTH_TOKEN";
+  elements["provider-api-format"].value = meta.apiFormat ?? "anthropic";
+  // 本地代理请求覆盖（JSON 文本区回显美化；空 = 不覆盖）
+  const proxyOverrides = meta.proxyOverrides ?? {};
+  elements["provider-proxy-ua"].value = proxyOverrides.userAgent ?? "";
+  elements["provider-proxy-headers"].value = proxyOverrides.headers ? JSON.stringify(proxyOverrides.headers, null, 2) : "";
+  elements["provider-proxy-body"].value = proxyOverrides.body ? JSON.stringify(proxyOverrides.body, null, 2) : "";
+  elements["provider-cost-multiplier"].value = meta.costMultiplier ?? "";
+  elements["provider-limit-daily"].value = meta.limitDailyUsd ?? "";
+  elements["provider-limit-monthly"].value = meta.limitMonthlyUsd ?? "";
+  // ── 三波预设选择器：仅新建模式可见；编辑模式隐藏（预设附加 meta 已在档案里）──
+  state.providerPresetSelected = null;
+  state.providerPresetQuery = "";
+  const presetBlock = elements["provider-preset-block"];
+  if (presetBlock) presetBlock.hidden = Boolean(provider);
+  const presetSearch = elements["provider-preset-search"];
+  if (presetSearch) presetSearch.value = "";
+  const presetClear = elements["provider-preset-clear-button"];
+  if (presetClear) presetClear.hidden = true;
+  const presetHint = elements["provider-preset-hint"];
+  if (presetHint) {
+    presetHint.hidden = true;
+    presetHint.textContent = "";
+  }
+  const catalogList = elements["provider-catalog-list"];
+  if (catalogList) catalogList.innerHTML = "";
+  // 提示条与「配置 JSON」区块跟随聚焦应用（截图 2 形态：按应用给端点填写提示）
+  const hintApp = selection.targetApp;
+  const hintLabel = PROVIDER_APP_META.find((entry) => entry.app === hintApp)?.label ?? "Claude";
+  const baseurlHint = elements["provider-baseurl-hint"];
+  if (baseurlHint) baseurlHint.textContent = `填写兼容 ${hintLabel} API 的服务端点地址，不要以斜杠结尾；留空 = 官方默认端点`;
+  // 「配置预览」区块：聚焦应用 + 首轮干跑生成（之后随表单输入防抖刷新）；手改/明文/重置状态全部清零
+  const previewBlock = elements["provider-config-json-block"];
+  if (previewBlock) previewBlock.dataset.previewApp = hintApp;
+  providerPreviewState.files = [];
+  providerPreviewState.active = 0;
+  providerPreviewState.note = "预览生成中…";
+  providerPreviewState.edits = {};
+  providerPreviewState.revealed = {};
+  providerPreviewState.resets = new Set();
+  providerPreviewState.rawDirty = false;
+  renderProviderPreview();
+  void loadProviderConfigPreview();
+  setProviderDialogTab("basic");
+}
+
+/** 端点列表渲染：url + 添加时间 + 测速结果 + 设为主端点/移除。 */
+function renderProviderEndpoints() {
+  const list = elements["provider-endpoint-list"];
+  if (!list) return;
+  const endpoints = state.providerDialogEndpoints ?? [];
+  if (!endpoints.length) {
+    list.innerHTML = '<p class="subtle provider-deck-placeholder">无备选端点——下方添加后可测速选优</p>';
+    return;
+  }
+  list.innerHTML = endpoints.map((entry, index) => {
+    const latency = state.providerLatency[entry.url];
+    const latencyText = latency
+      ? latency.latency != null
+        ? `<span class="provider-latency">${latency.latency}ms</span>`
+        : `<span class="provider-latency is-error">${escapeHtml(latency.error ?? "失败")}</span>`
+      : "";
+    return `<div class="provider-endpoint-row">
+      <span class="provider-endpoint-url" title="${escapeHtml(entry.url)}">${escapeHtml(entry.url)}</span>
+      ${latencyText}
+      <button class="button secondary provider-endpoint-use" type="button" data-endpoint-use="${index}">设为主端点</button>
+      <button class="icon-button" type="button" data-endpoint-remove="${index}" title="移除" aria-label="移除端点"><svg class="icon lucide"><use href="#lucide-x"></use></svg></button>
+    </div>`;
+  }).join("");
+}
+
+let providerRevealSeq = 0;
+
+async function openProviderDialog(provider = null, options = {}) {
+  const seq = ++providerRevealSeq;
+  let editableProvider = provider;
+  if (provider?.id) {
+    try {
+      editableProvider = await request(`${API.providers}/${encodeURIComponent(provider.id)}?includeSecrets=1`);
+    } catch (error) {
+      if (seq === providerRevealSeq) toast(`供应商配置载入失败：${error.message}`, "error", 5000);
+      return;
+    }
+    if (seq !== providerRevealSeq) return;
+  }
+  // 「重置」的锚点：打开这一刻的档案与选项（fillProviderDialog 是唯一填充点，重放它即回到原样）
+  state.providerDialogSnapshot = { provider: editableProvider, options };
+  fillProviderDialog(editableProvider, options);
+  // 模板库晚到不阻塞：新建档案先给 custom 骨架，模板就位后仅在内容未手改时替换
+  void ensureUsageTemplates().then((templates) => {
+    if (!state.editingProviderId && !elements["provider-usage-code"].value.trim()) {
+      elements["provider-usage-code"].value = templates[elements["provider-usage-template"].value] ?? templates.custom ?? "";
+    }
+  }).catch(() => {});
+  // 预设目录晚到不阻塞：就位后渲染网格（仅新建模式）
+  if (!provider) {
+    renderProviderPresetGrid();
+    void ensureProviderPresets().then(() => renderProviderPresetGrid()).catch((error) => {
+      const grid = elements["provider-preset-grid"];
+      if (grid) grid.innerHTML = `<p class="subtle provider-deck-placeholder">预设目录加载失败：${escapeHtml(error.message)}</p>`;
+    });
+  }
+  const dialog = elements["provider-dialog"];
+  if (typeof dialog.showModal === "function" && !dialog.open) dialog.showModal();
+}
+
+function closeProviderDialog() {
+  elements["provider-dialog"].close();
+  state.editingProviderId = null;
+}
+
+/** 本地代理请求覆盖收集：两个 JSON 文本区解析（空=不设），非法 JSON 抛错由 save 兜底 toast。 */
+function collectProviderProxyOverrides() {
+  const parseObject = (raw, label) => {
+    const text = raw.trim();
+    if (!text) return undefined;
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      throw new Error(`${label} 不是合法 JSON`);
+    }
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error(`${label} 必须是 JSON 对象`);
+    return parsed;
+  };
+  return {
+    userAgent: elements["provider-proxy-ua"].value.trim(),
+    headers: parseObject(elements["provider-proxy-headers"].value, "Header 覆盖"),
+    body: parseObject(elements["provider-proxy-body"].value, "Body 覆盖"),
+  };
+}
+
+function collectProviderForm() {
+  const apps = Object.fromEntries(PROVIDER_STORAGE_APPS.map((app) => [app, Boolean(state.providerDialogApps?.[app])]));
+  const numberOrNull = (value) => {
+    const text = String(value ?? "").trim();
+    return text === "" ? null : Number(text);
+  };
+  // 预设带入的附加 meta（仅新建时选中预设才有；apiKeyField/apiFormat 以表单当前值为准）
+  const presetExtras = {};
+  if (state.providerPresetSelected) {
+    for (const key of ["extraEnv", "extraSettings", "codexTop", "codexProviderExtra", "modelCatalog", "appConfig"]) {
+      if (state.providerPresetSelected[key] != null) presetExtras[key] = state.providerPresetSelected[key];
+    }
+  }
+  const payload = {
+    name: elements["provider-name-input"].value.trim(),
+    baseUrl: elements["provider-baseurl-input"].value.trim(),
+    apiKey: elements["provider-key-input"].value, // 留空=保留原值（服务端语义），绝不预填
+    websiteUrl: elements["provider-website-input"].value.trim(),
+    notes: elements["provider-notes-input"].value.trim(),
+    apps,
+    category: elements["provider-category"].value,
+    models: {
+      claude: {
+        model: elements["provider-claude-model"].value.trim(),
+        haikuModel: elements["provider-claude-haiku"].value.trim(),
+        sonnetModel: elements["provider-claude-sonnet"].value.trim(),
+        opusModel: elements["provider-claude-opus"].value.trim(),
+        fableModel: elements["provider-claude-fable"].value.trim(),
+        subagentModel: elements["provider-claude-subagent"].value.trim(),
+        sonnetModelName: elements["provider-claude-sonnet-name"].value.trim(),
+        opusModelName: elements["provider-claude-opus-name"].value.trim(),
+        fableModelName: elements["provider-claude-fable-name"].value.trim(),
+        haikuModelName: elements["provider-claude-haiku-name"].value.trim(),
+        model1m: elements["provider-claude-model-1m"].checked ? "1" : "",
+        haikuModel1m: elements["provider-claude-haiku-1m"].checked ? "1" : "",
+        sonnetModel1m: elements["provider-claude-sonnet-1m"].checked ? "1" : "",
+        opusModel1m: elements["provider-claude-opus-1m"].checked ? "1" : "",
+        fableModel1m: elements["provider-claude-fable-1m"].checked ? "1" : "",
+        subagentModel1m: elements["provider-claude-subagent-1m"].checked ? "1" : "",
+      },
+      codex: { model: elements["provider-codex-model"].value.trim(), reasoningEffort: elements["provider-codex-effort"].value },
+      gemini: { model: elements["provider-gemini-model"].value.trim() },
+      grokbuild: { model: elements["provider-grokbuild-model"].value.trim() },
+      kimi: { model: elements["provider-kimi-model"].value.trim() },
+      opencode: { model: elements["provider-opencode-model"].value.trim() },
+      openclaw: { model: elements["provider-openclaw-model"].value.trim() },
+      hermes: { model: elements["provider-hermes-model"].value.trim() },
+    },
+    meta: {
+      ...presetExtras,
+      customEndpoints: (state.providerDialogEndpoints ?? []).map((entry) => ({ url: entry.url, addedAt: entry.addedAt, lastUsed: entry.lastUsed ?? null })),
+      endpointAutoSelect: elements["provider-endpoint-autoselect"].checked,
+      usageScript: {
+        enabled: elements["provider-usage-enabled"].checked,
+        templateType: elements["provider-usage-template"].value,
+        code: elements["provider-usage-code"].value,
+        timeout: Number(elements["provider-usage-timeout"].value) || 10,
+        autoQueryInterval: Number(elements["provider-usage-interval"].value) || 0,
+        userId: elements["provider-usage-userid"].value.trim(),
+        apiKey: elements["provider-usage-apikey"].value, // 留空=保留
+        baseUrl: elements["provider-usage-baseurl"].value.trim(),
+        accessToken: elements["provider-usage-token"].value, // 留空=保留
+      },
+      proxyConfig: {
+        enabled: elements["provider-proxy-enabled"].checked,
+        proxyType: elements["provider-proxy-type"].value,
+        host: elements["provider-proxy-host"].value.trim(),
+        port: Number(elements["provider-proxy-port"].value) || 0,
+        username: elements["provider-proxy-username"].value.trim(),
+        password: elements["provider-proxy-password"].value, // 留空=保留
+      },
+      testConfig: {
+        timeoutSecs: Number(elements["provider-test-timeout"].value) || 8,
+        maxRetries: Number(elements["provider-test-retries"].value) || 0,
+        degradedThresholdMs: Number(elements["provider-test-degraded"].value) || 6000,
+        testModel: elements["provider-test-model"].value.trim(),
+        testPrompt: elements["provider-test-prompt"].value.trim(),
+      },
+      apiKeyField: elements["provider-apikey-field"].value,
+      apiFormat: elements["provider-api-format"].value,
+      proxyOverrides: collectProviderProxyOverrides(),
+      costMultiplier: numberOrNull(elements["provider-cost-multiplier"].value) ?? undefined,
+      limitDailyUsd: numberOrNull(elements["provider-limit-daily"].value),
+      limitMonthlyUsd: numberOrNull(elements["provider-limit-monthly"].value),
+    },
+  };
+  // 预设图标一并落档案（列表卡片色点/图标用）
+  if (state.providerPresetSelected?.icon) payload.icon = state.providerPresetSelected.icon;
+  if (/^#[0-9a-fA-F]{6}$/.test(state.providerPresetSelected?.iconColor ?? "")) payload.iconColor = state.providerPresetSelected.iconColor;
+  return payload;
+}
+
+async function saveProviderForm(event) {
+  event.preventDefault();
+  if (elements["provider-save-button"].disabled) return;
+  let payload;
+  try {
+    payload = collectProviderForm();
+  } catch (error) {
+    toast(error.message, "error", 5000);
+    return;
+  }
+  // 配置预览手改：rawConfig 补丁随档案保存（编辑=明文覆盖，重置=删除）；服务端合并校验
+  const rawPatch = providerPreviewState.rawDirty ? collectRawConfigPatch() : undefined;
+  if (rawPatch) payload.meta = { ...payload.meta, rawConfig: rawPatch };
+  if (!payload.name) {
+    toast("供应商名称不能为空", "error");
+    return;
+  }
+  if (!Object.values(payload.apps).some(Boolean)) {
+    toast("供应商未关联目标应用，请关闭后从应用标签重新新建", "error");
+    return;
+  }
+  elements["provider-save-button"].disabled = true;
+  try {
+    const editingId = state.editingProviderId;
+    if (editingId) {
+      await request(`${API.providers}/${encodeURIComponent(editingId)}`, { method: "PUT", body: payload });
+      toast("供应商档案已更新", "success");
+    } else {
+      await request(API.providers, { method: "POST", body: payload });
+      toast("供应商档案已创建——点「启用」投影到 live 配置", "success");
+    }
+    closeProviderDialog();
+    await loadProviders({ fresh: true });
+  } catch (error) {
+    toast(`保存失败：${error.message}`, "error", 6000);
+  } finally {
+    elements["provider-save-button"].disabled = false;
+  }
+}
+
+async function deleteProvider(id) {
+  const provider = providerById(id);
+  if (!provider) return;
+  const activeApps = PROVIDER_APPS.filter((app) => state.providersData?.current?.[app] === id);
+  if (activeApps.length) {
+    toast(`不能删除正在使用的档案：请先切换 ${activeApps.map((app) => PROVIDER_APP_META.find((item) => item.app === app)?.label ?? app).join("、")}`, "warning", 7000);
+    return;
+  }
+  const boundTeams = state.teams.filter((team) => Object.values(team.providers ?? {}).includes(id));
+  const proceed = await confirmAction({
+    eyebrow: "删除供应商",
+    title: `删除供应商「${provider.name}」？`,
+    rows: [
+      ["影响", "仅删除未在使用的档案；live 配置不会留下失去归属的当前项"],
+      ["团队绑定", boundTeams.length ? `${boundTeams.map((team) => team.name).join("、")} 的绑定将失效` : "无团队绑定"],
+    ],
+    warning: "档案删除后无法恢复（Key 随档案一并销毁）。",
+    confirmLabel: "删除",
+    danger: true,
+  });
+  if (!proceed) return;
+  try {
+    await request(`${API.providers}/${encodeURIComponent(id)}`, { method: "DELETE" });
+    toast(`供应商「${provider.name}」已删除`, "success");
+    if (state.editingProviderId === id) closeProviderDialog();
+    await loadProviders({ fresh: true });
   } catch (error) {
     toast(`删除失败：${error.message}`, "error");
   }
 }
+
+async function switchProvider(app, providerId) {
+  const provider = providerById(providerId);
+  if (!provider) return;
+  const meta = PROVIDER_APP_META.find((entry) => entry.app === app);
+  const action = meta.cumulative ? "加入配置" : "切换供应商";
+  const proceed = await confirmAction({
+    eyebrow: action,
+    title: meta.cumulative ? `将「${provider.name}」加入 ${meta.label} 配置？` : `将 ${meta.label} 切换到「${provider.name}」？`,
+    rows: [
+      ["Base URL", provider.baseUrl || "官方默认端点"],
+      ["模型", meta.modelHint(provider) || "不动现有"],
+      ["备份", "切换前自动备份现有 live 配置——可在下方「发布备份」一键回退"],
+    ],
+    warning: `${meta.label} 的 live 配置将被${meta.cumulative ? "合并" : "投影"}改写；改写前的内容进「发布备份」时间线，随时可回退。`,
+    confirmLabel: meta.cumulative ? "加入配置" : "启用",
+  });
+  if (!proceed) return;
+  try {
+    await request(API.providerSwitch, { method: "POST", body: { app, providerId } });
+    toast(`${meta.label} 已切换到「${provider.name}」——改写前的配置已进「发布备份」`, "success", 6000);
+    state.providerBackupCache.clear();
+    await Promise.all([loadProviders({ fresh: true }), state.providerBackups ? loadProviderBackups({ fresh: true }) : Promise.resolve(null)]);
+  } catch (error) {
+    toast(`切换失败：${error.message}`, "error", 6000);
+  }
+}
+
+async function applyTeamProviders(teamId = elements["provider-team-select"].value) {
+  if (teamFormDirty && teamId === state.editingTeamId) {
+    toast("先保存团队修改，再应用供应商方案", "warning");
+    return;
+  }
+  const team = state.teams.find((item) => item.id === teamId);
+  if (!team) return;
+  const bindings = providerSchemeBindings(team);
+  if (!bindings.length) {
+    toast("该团队没有可用的供应商方案绑定", "warning");
+    return;
+  }
+  const lines = bindings.map(([app, id]) => [app, providerById(id)?.name ?? `失效绑定（${id.slice(0, 18)}…）`]);
+  const proceed = await confirmAction({
+    eyebrow: "应用团队方案",
+    title: `按团队「${team.name}」的绑定逐应用切换？`,
+    rows: [...lines, ["备份", "每个应用切换前自动留时间戳备份"]],
+    warning: "对应应用的 live 配置将被投影改写；部分失败会如实逐项回报。",
+    confirmLabel: "一键应用",
+  });
+  if (!proceed) return;
+  try {
+    const report = await request(API.providerApplyTeam, { method: "POST", body: { teamId, apps: bindings.map(([app]) => app) } });
+    const failures = (report.applied ?? []).filter((entry) => !entry.ok);
+    if (report.skipped) toast("该团队没有供应商绑定", "warning");
+    else if (failures.length) toast(`部分失败：${failures.map((entry) => `${entry.app}（${entry.error}）`).join("；")}`, "error", 8000);
+    else toast(`团队「${team.name}」方案已应用（${report.applied.length} 个应用）`, "success");
+    state.providerBackupCache.clear();
+    await Promise.all([loadProviders({ fresh: true }), state.providerBackups ? loadProviderBackups({ fresh: true }) : Promise.resolve(null)]);
+  } catch (error) {
+    toast(`应用失败：${error.message}`, "error", 6000);
+  }
+}
+
+// ── cc-switch 二波动作面：检查/测速/用量/排序/failover/导入导出/深链接/环境检查 ──
+
+async function checkProviderHealth(id) {
+  const provider = providerById(id);
+  if (!provider) return;
+  state.providerHealth[id] = { status: "checking", message: "检查中…" };
+  renderProviders();
+  if (state.configHostId && state.configSurface === "providers") renderConfigRemotePanel();
+  try {
+    const result = await request(API.providerCheck(id), { method: "POST", body: {} });
+    state.providerHealth[id] = result;
+    if (result.failover?.switched) {
+      const target = providerById(result.failover.to);
+      toast(`「${provider.name}」不可达——已自动故障转移到「${target?.name ?? result.failover.to}」`, "warning", 6000);
+      await loadProviders({ fresh: true });
+      return;
+    }
+  } catch (error) {
+    state.providerHealth[id] = { status: "failed", message: error.message };
+  }
+  renderProviders();
+  if (state.configHostId && state.configSurface === "providers") renderConfigRemotePanel();
+}
+
+async function speedTestProvider(id) {
+  const provider = providerById(id);
+  if (!provider?.baseUrl) return;
+  state.providerLatency[provider.baseUrl] = { latency: null, error: "测速中…" };
+  renderProviders();
+  if (state.configHostId && state.configSurface === "providers") renderConfigRemotePanel();
+  try {
+    const { results } = await request(API.providerTestEndpoints, { method: "POST", body: { urls: [provider.baseUrl] } });
+    state.providerLatency[provider.baseUrl] = results?.[0] ?? { latency: null, error: "无结果" };
+  } catch (error) {
+    state.providerLatency[provider.baseUrl] = { latency: null, error: error.message };
+  }
+  renderProviders();
+  if (state.configHostId && state.configSurface === "providers") renderConfigRemotePanel();
+}
+
+async function queryProviderUsageNow(id) {
+  const provider = providerById(id);
+  if (!provider) return;
+  try {
+    state.providerUsage[id] = await request(API.providerUsage(id), { method: "POST", body: {} });
+  } catch (error) {
+    state.providerUsage[id] = { success: false, error: error.message };
+  }
+  renderProviders();
+  if (state.configHostId && state.configSurface === "providers") renderConfigRemotePanel();
+}
+
+async function moveProvider(app, id, direction) {
+  const eligible = (state.providersData?.providers ?? []).filter((item) => item.apps?.[app]).map((item) => item.id);
+  const ordered = (state.providersData?.appOrder?.[app] ?? []).filter((providerId) => eligible.includes(providerId));
+  for (const providerId of eligible) if (!ordered.includes(providerId)) ordered.push(providerId);
+  const index = ordered.indexOf(id);
+  const target = index + direction;
+  if (index === -1 || target < 0 || target >= ordered.length) return;
+  [ordered[index], ordered[target]] = [ordered[target], ordered[index]];
+  try {
+    await request(API.providerSort, { method: "POST", body: { app, orderedIds: ordered } });
+    await loadProviders({ fresh: true });
+  } catch (error) {
+    toast(`排序失败：${error.message}`, "error");
+  }
+}
+
+async function failoverSetMembership(app, id, inQueue) {
+  const queue = [...(state.providersData?.failoverQueue?.[app] ?? [])];
+  const next = inQueue ? [...queue, id] : queue.filter((qid) => qid !== id);
+  try {
+    await request(API.providerFailover(app), { method: "PUT", body: { queue: next } });
+    await loadProviders({ fresh: true });
+  } catch (error) {
+    toast(`故障转移队列更新失败：${error.message}`, "error");
+  }
+}
+
+async function failoverToggleAuto(app, enabled) {
+  try {
+    await request(API.providerFailover(app), { method: "PUT", body: { autoFailover: enabled } });
+    await loadProviders({ fresh: true });
+    toast(enabled ? "自动故障转移已开启——当前供应商不可达时自动切下一队列项" : "自动故障转移已关闭（队列保留）", "success");
+  } catch (error) {
+    toast(`开关失败：${error.message}`, "error");
+    renderProviders(); // 回弹开关态
+  }
+}
+
+async function exportProviders() {
+  try {
+    const payload = await request(API.providerExport);
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const anchor = document.createElement("a");
+    anchor.href = URL.createObjectURL(blob);
+    anchor.download = `514forge-providers-${new Date().toISOString().slice(0, 10)}.json`;
+    anchor.click();
+    URL.revokeObjectURL(anchor.href);
+    toast("已导出（Key 默认掩码——明文备份请用数据目录 backups/）", "success");
+  } catch (error) {
+    toast(`导出失败：${error.message}`, "error");
+  }
+}
+
+function importProvidersFromFile() {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = "application/json,.json";
+  input.addEventListener("change", async () => {
+    const file = input.files?.[0];
+    if (!file) return;
+    try {
+      const payload = JSON.parse(await file.text());
+      const replace = await confirmAction({
+        eyebrow: "导入供应商配置",
+        title: `导入 ${payload.providers?.length ?? 0} 个供应商档案？`,
+        rows: [
+          ["合并", "同名同 id 更新、新档案追加（推荐）"],
+          ["替换", "清空现有档案后全量重建（危险）"],
+        ],
+        warning: "点「确定」走合并导入；要全量替换请在下个确认里再选。",
+        confirmLabel: "合并导入",
+      });
+      if (!replace) return;
+      const modeReplace = await confirmAction({
+        eyebrow: "导入模式",
+        title: "合并还是替换？",
+        rows: [["合并", "保留现有 + 导入增量"], ["替换", "清空后全量重建"]],
+        warning: "选择「替换」将删除全部现有供应商档案（Key 一并销毁）。",
+        confirmLabel: "替换全部",
+        danger: true,
+        cancelLabel: "合并",
+      });
+      const result = await request(API.providerImport, { method: "POST", body: { ...payload, mode: modeReplace ? "replace" : "merge" } });
+      toast(`导入完成：新增 ${result.added}、更新 ${result.updated}（共 ${result.total}）`, "success");
+      await loadProviders({ fresh: true });
+    } catch (error) {
+      toast(`导入失败：${error.message}`, "error", 6000);
+    }
+  });
+  input.click();
+}
+
+async function openProviderDeeplink(url = "") {
+  state.providerDeeplinkPreview = null;
+  elements["provider-deeplink-input"].value = String(url ?? "").trim();
+  elements["provider-deeplink-preview"].textContent = "输入链接后先预览；不会自动导入。";
+  elements["provider-deeplink-import-button"].disabled = true;
+  const dialog = elements["provider-deeplink-dialog"];
+  if (typeof dialog.showModal === "function" && !dialog.open) dialog.showModal();
+  if (url) await previewProviderDeeplink();
+}
+
+let ccSwitchDeeplinkQueue = Promise.resolve();
+function enqueueCcSwitchDeeplink(url) {
+  const normalizedUrl = String(url ?? "").trim();
+  if (!normalizedUrl) return ccSwitchDeeplinkQueue;
+  ccSwitchDeeplinkQueue = ccSwitchDeeplinkQueue.then(async () => {
+    try {
+      setView("config", { configSurface: "providers", focus: false });
+      if (window.__forgeCcSwitchPanel?.openDeeplink) await window.__forgeCcSwitchPanel.openDeeplink(normalizedUrl);
+      else await openProviderDeeplink(normalizedUrl);
+    } catch (error) {
+      toast(`深链接打开失败：${error.message}`, "error", 6000);
+      appendDiagnostic(`ccswitch:// 深链接打开失败：${error.message}`, "error");
+    }
+  });
+  return ccSwitchDeeplinkQueue;
+}
+
+async function previewProviderDeeplink() {
+  const url = elements["provider-deeplink-input"].value.trim();
+  if (!url) return;
+  elements["provider-deeplink-preview"].textContent = "正在解析…";
+  elements["provider-deeplink-import-button"].disabled = true;
+  state.providerDeeplinkPreview = null;
+  try {
+    const parsed = await request(API.providerParseDeeplink, { method: "POST", body: { url } });
+    state.providerDeeplinkPreview = { url, parsed };
+    const preview = parsed.preview ?? {};
+    const apps = Object.entries(preview.apps ?? {}).filter(([, enabled]) => enabled).map(([app]) => app).join("、") || "未声明";
+    elements["provider-deeplink-preview"].innerHTML = `<dl>
+      <div><dt>资源</dt><dd>${escapeHtml(parsed.resource ?? "provider")}</dd></div>
+      <div><dt>名称</dt><dd>${escapeHtml(preview.name ?? "未命名")}</dd></div>
+      <div><dt>应用</dt><dd>${escapeHtml(apps)}</dd></div>
+      <div><dt>Base URL</dt><dd>${escapeHtml(preview.baseUrl ?? "官方默认")}</dd></div>
+      <div><dt>凭据</dt><dd>${escapeHtml(preview.apiKey ?? "未携带")}</dd></div>
+    </dl><pre>${escapeHtml(JSON.stringify(preview, null, 2))}</pre>`;
+    elements["provider-deeplink-import-button"].disabled = false;
+  } catch (error) {
+    elements["provider-deeplink-preview"].textContent = `解析失败：${error.message}`;
+  }
+}
+
+async function importProviderDeeplink(event) {
+  event?.preventDefault();
+  const url = elements["provider-deeplink-input"].value.trim();
+  if (!state.providerDeeplinkPreview || state.providerDeeplinkPreview.url !== url) {
+    await previewProviderDeeplink();
+    return;
+  }
+  try {
+    elements["provider-deeplink-import-button"].disabled = true;
+    const created = await request(API.providerImportDeeplink, { method: "POST", body: { url } });
+    toast(`已从深链接导入「${created.name}」`, "success");
+    elements["provider-deeplink-dialog"].close();
+    await loadProviders({ fresh: true });
+  } catch (error) {
+    toast(`深链接导入失败：${error.message}`, "error", 6000);
+  } finally {
+    elements["provider-deeplink-import-button"].disabled = false;
+  }
+}
+
+/**
+ * 环境变量冲突检查：本页头动作只负责「带你到唯一那份实现」——工作台「同步」面的冲突清单
+ * 既能列出也能勾选删除并备份。原先页头还有一份只发 toast 的弱化副本，两份实现同名不同能力，
+ * 用户点哪个结果不一样，已删除（LO 要求 3：去重且保功能完整——保留能力强的那一份）。
+ */
+async function checkProviderEnvConflicts() {
+  const panel = window.__forgeCcSwitchPanel;
+  if (typeof panel?.openTab === "function" && await panel.openTab("sync", { run: "env-check" })) return;
+  // 工作台未挂载（极早期/降级）时如实回退到只读报告，不假装能删
+  try {
+    const { conflicts } = await request(API.providerEnvConflicts);
+    toast(conflicts.length
+      ? `发现 ${conflicts.length} 处环境变量冲突：${conflicts.map((item) => `${item.app} 的 ${item.key}`).join("、")}——系统环境变量会覆盖 live 配置`
+      : "环境变量无冲突——系统环境与 live 配置不撞车", conflicts.length ? "warning" : "success", conflicts.length ? 9000 : 4000);
+  } catch (error) {
+    toast(`环境检查失败：${error.message}`, "error");
+  }
+}
+
+// ── 对话框内动作：端点增删/测速/设主、模板联动、脚本测试 ──
+
+function addProviderEndpoint() {
+  const input = elements["provider-endpoint-input"];
+  const url = input.value.trim().replace(/\/+$/, "");
+  if (!url) return;
+  if (!/^https?:\/\//i.test(url)) {
+    toast("端点必须是 http(s) URL", "error");
+    return;
+  }
+  if (state.providerDialogEndpoints.some((entry) => entry.url === url)) {
+    toast("端点已存在", "warning");
+    return;
+  }
+  state.providerDialogEndpoints.push({ url, addedAt: new Date().toISOString(), lastUsed: null });
+  input.value = "";
+  renderProviderEndpoints();
+}
+
+async function testProviderEndpoints() {
+  const urls = [elements["provider-baseurl-input"].value.trim(), ...state.providerDialogEndpoints.map((entry) => entry.url)].filter(Boolean);
+  if (!urls.length) {
+    toast("先填 Base URL 或备选端点", "warning");
+    return;
+  }
+  elements["provider-endpoint-test-button"].disabled = true;
+  try {
+    const { results } = await request(API.providerTestEndpoints, { method: "POST", body: { urls } });
+    let fastest = null;
+    for (const result of results ?? []) {
+      state.providerLatency[result.url] = result;
+      if (result.latency != null && (!fastest || result.latency < fastest.latency)) fastest = result;
+    }
+    renderProviderEndpoints();
+    // endpointAutoSelect：最快端点与主 Base URL 不同则自动换主（cc-switch 同款）
+    if (elements["provider-endpoint-autoselect"].checked && fastest && fastest.url !== elements["provider-baseurl-input"].value.trim()) {
+      const previous = elements["provider-baseurl-input"].value.trim();
+      elements["provider-baseurl-input"].value = fastest.url;
+      if (previous && !state.providerDialogEndpoints.some((entry) => entry.url === previous)) {
+        state.providerDialogEndpoints.push({ url: previous, addedAt: new Date().toISOString(), lastUsed: null });
+      }
+      state.providerDialogEndpoints = state.providerDialogEndpoints.filter((entry) => entry.url !== fastest.url);
+      renderProviderEndpoints();
+      toast(`已自动选用最快端点（${fastest.latency}ms）`, "success");
+    } else {
+      toast(fastest ? `最快：${fastest.url}（${fastest.latency}ms）` : "全部不可达", fastest ? "success" : "warning");
+    }
+  } catch (error) {
+    toast(`测速失败：${error.message}`, "error");
+  } finally {
+    elements["provider-endpoint-test-button"].disabled = false;
+  }
+}
+
+async function ensureUsageTemplates() {
+  if (state.usageTemplates) return state.usageTemplates;
+  const { templates } = await request(API.providerUsageTemplates);
+  state.usageTemplates = templates ?? {};
+  return state.usageTemplates;
+}
+
+// ── cc-switch 3.18 预设供应商目录：搜索 + 网格 + 一键自动填充 ──
+async function ensureProviderPresets() {
+  if (state.providerPresets) return state.providerPresets;
+  const catalog = await request(API.providerPresets);
+  state.providerPresets = catalog ?? Object.fromEntries(PROVIDER_APPS.map((app) => [app, []]));
+  return state.providerPresets;
+}
+
+const PRESET_CATEGORY_LABELS = Object.freeze({
+  official: "官方",
+  cn_official: "国产官方",
+  cloud_provider: "云平台",
+  aggregator: "聚合",
+  third_party: "第三方",
+  custom: "自定义",
+  omo: "OMO",
+  "omo-slim": "OMO Slim",
+});
+
+/** 网格过滤：目标应用 ∩ 搜索词（name/websiteUrl）；官方置顶、primePartner 次之。 */
+function presetGridEntries() {
+  const catalog = state.providerPresets ?? Object.fromEntries(PROVIDER_APPS.map((app) => [app, []]));
+  const query = state.providerPresetQuery.trim().toLowerCase();
+  const entries = [];
+  for (const { app, label } of PROVIDER_APP_META) {
+    if (!state.providerDialogApps?.[app]) continue;
+    for (const preset of catalog[app] ?? []) {
+      if (query && !`${preset.name} ${preset.websiteUrl ?? ""}`.toLowerCase().includes(query)) continue;
+      entries.push({ app, appLabel: label, preset });
+    }
+  }
+  const rank = (e) => (e.preset.isOfficial ? 0 : e.preset.primePartner ? 1 : e.preset.isPartner ? 2 : 3);
+  return entries.sort((a, b) => rank(a) - rank(b) || a.preset.name.localeCompare(b.preset.name));
+}
+
+function renderProviderPresetGrid() {
+  const grid = elements["provider-preset-grid"];
+  if (!grid) return;
+  const entries = presetGridEntries();
+  if (!state.providerPresets) {
+    grid.innerHTML = '<p class="subtle provider-deck-placeholder">预设目录加载中…</p>';
+    return;
+  }
+  if (!entries.length) {
+    grid.innerHTML = '<p class="subtle provider-deck-placeholder">当前应用没有匹配预设——请更换关键词</p>';
+    return;
+  }
+  grid.innerHTML = entries.map(({ app, appLabel, preset }, index) => {
+    const key = `${app}:${preset.name}`;
+    const active = state.providerPresetSelected?.key === key ? " is-active" : "";
+    return `<button class="provider-preset-card${active}" type="button" role="option" aria-selected="${active ? "true" : "false"}" data-preset-key="${escapeHtml(key)}" title="${escapeHtml(preset.websiteUrl ?? preset.name)}">
+      <span class="provider-preset-dot" data-preset-dot="${index}"></span>
+      <span class="provider-preset-name">${escapeHtml(preset.name)}</span>
+      <span class="provider-preset-meta">${appLabel} · ${PRESET_CATEGORY_LABELS[preset.category] ?? preset.category ?? "第三方"}</span>
+    </button>`;
+  }).join("");
+  // 图标色点走 CSSOM（不落内联 style 属性）
+  for (const dot of grid.querySelectorAll("[data-preset-dot]")) {
+    const entry = entries[Number(dot.dataset.presetDot)];
+    const color = /^#[0-9a-fA-F]{6}$/.test(entry?.preset.iconColor ?? "") ? entry.preset.iconColor : null;
+    if (color) dot.style.setProperty("--preset-dot", color);
+  }
+}
+
+/** 预设一键填充：基本字段 + 模型 + 附加 meta 暂存（保存时并入 payload），只留 API Key 给用户。 */
+function applyProviderPreset(app, preset) {
+  state.providerPresetSelected = {
+    key: `${app}:${preset.name}`,
+    apiFormat: preset.apiFormat,
+    extraEnv: preset.extraEnv,
+    extraSettings: preset.extraSettings,
+    codexTop: preset.codexTop,
+    codexProviderExtra: preset.codexProviderExtra,
+    modelCatalog: preset.modelCatalog,
+    icon: preset.icon,
+    iconColor: preset.iconColor,
+    appConfig: preset.appConfig ? { [app]: preset.appConfig } : undefined,
+  };
+  elements["provider-name-input"].value = preset.name;
+  elements["provider-baseurl-input"].value = preset.baseUrl ?? "";
+  elements["provider-website-input"].value = preset.websiteUrl ?? "";
+  if (preset.category && elements["provider-category"].querySelector(`option[value="${preset.category}"]`)) {
+    elements["provider-category"].value = preset.category;
+  }
+  if (preset.apiKeyField) elements["provider-apikey-field"].value = preset.apiKeyField;
+  elements["provider-api-format"].value = preset.apiFormat ?? "anthropic";
+  state.providerDialogTargetApp = app;
+  state.providerDialogApps = Object.fromEntries(PROVIDER_STORAGE_APPS.map((candidate) => [candidate, candidate === app]));
+  for (const { app: candidate } of PROVIDER_APP_META) elements[`provider-models-${candidate}`].hidden = candidate !== app;
+  const models = preset.models ?? {};
+  if (app === "claude") {
+    elements["provider-claude-model"].value = models.model ?? "";
+    elements["provider-claude-haiku"].value = models.haikuModel ?? "";
+    elements["provider-claude-sonnet"].value = models.sonnetModel ?? "";
+    elements["provider-claude-opus"].value = models.opusModel ?? "";
+  } else if (app === "codex") {
+    elements["provider-codex-model"].value = models.model ?? "";
+    if (models.reasoningEffort) elements["provider-codex-effort"].value = models.reasoningEffort;
+  } else if (app === "gemini") {
+    elements["provider-gemini-model"].value = models.model ?? "";
+  } else {
+    elements[`provider-${app}-model`].value = models.model ?? "";
+  }
+  // 模型目录 → datalist 候选
+  const catalogList = elements["provider-catalog-list"];
+  if (catalogList) {
+    catalogList.innerHTML = (preset.modelCatalog ?? [])
+      .map((entry) => `<option value="${escapeHtml(entry.model)}">${escapeHtml(entry.displayName ?? entry.model)}</option>`)
+      .join("");
+  }
+  // endpointCandidates（除主 baseUrl）→ 备选端点
+  const candidates = (preset.endpointCandidates ?? []).filter((url) => url && url !== preset.baseUrl);
+  const existing = new Set(state.providerDialogEndpoints.map((entry) => entry.url));
+  for (const url of candidates) {
+    if (existing.has(url)) continue;
+    state.providerDialogEndpoints.push({ url, addedAt: new Date().toISOString(), lastUsed: null });
+  }
+  renderProviderEndpoints();
+  // 提示行：获取 Key 链接 + 只欠 Key 的事实
+  const hint = elements["provider-preset-hint"];
+  if (hint) {
+    hint.hidden = false;
+    const keyLink = preset.apiKeyUrl
+      ? ` <a href="${escapeHtml(preset.apiKeyUrl)}" target="_blank" rel="noreferrer noopener">获取 API Key</a>`
+      : "";
+    hint.innerHTML = `已按「${escapeHtml(preset.name)}」预设填充——只需填写 API Key。${keyLink}再点这张卡片可取消预设。`;
+  }
+  const presetClear = elements["provider-preset-clear-button"];
+  if (presetClear) presetClear.hidden = false;
+  elements["provider-key-input"].focus();
+  renderProviderPresetGrid();
+}
+
+/**
+ * 取消预设：只解绑预设带来的**附加 meta**（extraEnv/extraSettings/codexTop/modelCatalog/图标…），
+ * 不擦用户已填/已改的字段——选错预设时可以退回「自定义」而不必关窗重开丢掉全部输入。
+ */
+function clearProviderPreset({ silent = false } = {}) {
+  if (!state.providerPresetSelected) return;
+  state.providerPresetSelected = null;
+  const catalogList = elements["provider-catalog-list"];
+  if (catalogList) catalogList.innerHTML = "";
+  const presetClear = elements["provider-preset-clear-button"];
+  if (presetClear) presetClear.hidden = true;
+  const hint = elements["provider-preset-hint"];
+  if (hint) {
+    hint.hidden = false;
+    hint.textContent = "已取消预设：预设附带的额外配置不再随档案保存；表单里已填的内容保留，可继续手改。";
+  }
+  renderProviderPresetGrid();
+  refreshProviderConfigPreview();
+  if (!silent) toast("已取消预设——已填内容保留", "success", 4000);
+}
+
+/** 重置：回到打开对话框那一刻（编辑=已存档案原值，新增=空白/预填），不必关窗重开。 */
+function resetProviderDialog() {
+  const snapshot = state.providerDialogSnapshot;
+  if (!snapshot) return;
+  fillProviderDialog(snapshot.provider, snapshot.options ?? {});
+  if (!snapshot.provider) renderProviderPresetGrid();
+  toast(snapshot.provider ? "已回到档案保存时的内容" : "表单已清空回初始状态", "success", 4000);
+}
+
+// ── 应用通用配置对话框（cc-switch CommonConfigEditor 对齐）──
+const COMMON_TOGGLE_DEFS = Object.freeze([
+  {
+    id: "common-toggle-attribution",
+    read: (obj) => obj.attribution != null && typeof obj.attribution === "object" && obj.attribution.commit === "" && obj.attribution.pr === "",
+    apply: (obj, on) => {
+      if (on) obj.attribution = { commit: "", pr: "" };
+      else delete obj.attribution;
+    },
+  },
+  ...[
+    ["common-toggle-teams", "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1"],
+    ["common-toggle-toolsearch", "ENABLE_TOOL_SEARCH", "true"],
+    ["common-toggle-effort", "CLAUDE_CODE_EFFORT_LEVEL", "max"],
+    ["common-toggle-autoupdate", "DISABLE_AUTOUPDATER", "1"],
+  ].map(([id, key, value]) => ({
+    id,
+    read: (obj) => obj.env?.[key] === value,
+    apply: (obj, on) => {
+      if (on) {
+        if (typeof obj.env !== "object" || obj.env === null || Array.isArray(obj.env)) obj.env = {};
+        obj.env[key] = value;
+      } else if (obj.env && typeof obj.env === "object") {
+        delete obj.env[key];
+        if (Object.keys(obj.env).length === 0) delete obj.env; // env 空了连 env 一起删（cc-switch 同款）
+      }
+    },
+  })),
+]);
+
+function parseJsonObjectText(text) {
+  const trimmed = String(text ?? "").trim();
+  if (!trimmed) return {};
+  const parsed = JSON.parse(trimmed);
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new Error("not an object");
+  return parsed;
+}
+
+/** JSON → 开关回读（通用配置对话框与供应商对话框「配置 JSON」区块共用）；JSON 非法时开关置灰只读（cc-switch 同款降级）。 */
+function syncTogglesFromJson(textarea, toggleElements) {
+  let obj = null;
+  try {
+    obj = parseJsonObjectText(textarea.value);
+  } catch {
+    obj = null;
+  }
+  COMMON_TOGGLE_DEFS.forEach((def, index) => {
+    const toggle = toggleElements[index];
+    if (!toggle) return;
+    toggle.disabled = obj === null;
+    if (obj !== null) toggle.checked = Boolean(def.read(obj));
+  });
+}
+
+/** 开关 → JSON 落笔（JSON 非法时不写文本，等用户修 JSON）。 */
+function applyToggleToJson(textarea, def, on) {
+  let obj;
+  try {
+    obj = parseJsonObjectText(textarea.value);
+  } catch {
+    return;
+  }
+  def.apply(obj, on);
+  textarea.value = Object.keys(obj).length ? JSON.stringify(obj, null, 2) : "";
+  textarea.dispatchEvent(new Event("input", { bubbles: true })); // 程序化落笔也要刷新行号 gutter 与开关回读
+}
+
+function syncCommonTogglesFromJson() {
+  syncTogglesFromJson(elements["common-config-claude"], COMMON_TOGGLE_DEFS.map((def) => elements[def.id]));
+}
+
+function applyCommonToggleToJson(def) {
+  applyToggleToJson(elements["common-config-claude"], def, elements[def.id].checked);
+}
+
+let providerCommonJsonEditorHandle = null;
+let commonClaudeJsonEditorHandle = null;
+
+// ── 配置预览（服务端干跑）：表单草稿 → /api/providers/preview → 回显启用后该应用的完整 live 文件 ──
+// 可编辑：聚焦文本区取明文（显式 opt-in）→ 手改进 edits（原文覆盖，随保存落档案 meta.rawConfig）；
+// 重置进 resets（保存后回到投影）。预览请求始终携带手改补丁，服务端补丁合并后干跑。
+let providerPreviewSeq = 0;
+let providerPreviewTimer = null;
+const providerPreviewState = {
+  files: [],
+  active: 0,
+  note: "",
+  edits: {},      // path → 明文原文（用户手改）
+  revealed: {},   // path → 明文原文（聚焦时取回，未改）
+  resets: new Set(), // path → 保存后删除覆盖、回到投影
+  rawDirty: false,
+  revealing: false,
+};
+
+/** 表单任一字段变化：防抖 350ms 后向内核请求干跑预览。 */
+function refreshProviderConfigPreview() {
+  clearTimeout(providerPreviewTimer);
+  providerPreviewTimer = setTimeout(() => void loadProviderConfigPreview(), 350);
+}
+
+function providerPreviewApp() {
+  const app = elements["provider-config-json-block"]?.dataset.previewApp;
+  return PROVIDER_APPS.includes(app) ? app : "claude";
+}
+
+function providerPreviewCurrent() {
+  const { files, active } = providerPreviewState;
+  if (!files.length) return null;
+  return files[Math.min(active, files.length - 1)] ?? files[0];
+}
+
+/** 当前生效的手改文件集合：已存覆盖（rawConfigPaths）− 重置 + 本轮编辑。 */
+function providerPreviewRawPaths() {
+  const stored = providerById(state.editingProviderId)?.meta?.rawConfigPaths?.[providerPreviewApp()] ?? [];
+  const set = new Set(stored);
+  for (const path of providerPreviewState.resets) set.delete(path);
+  for (const path of Object.keys(providerPreviewState.edits)) set.add(path);
+  return set;
+}
+
+/** 手改补丁：编辑=明文覆盖，重置=null 删除；服务端 mergeRawConfigPatch 同律。 */
+function collectRawConfigPatch() {
+  const files = {};
+  for (const [path, text] of Object.entries(providerPreviewState.edits)) files[path] = text;
+  for (const path of providerPreviewState.resets) files[path] = null;
+  return Object.keys(files).length ? { [providerPreviewApp()]: files } : undefined;
+}
+
+function providerPreviewPayload() {
+  const payload = { ...collectProviderForm(), id: state.editingProviderId ?? undefined };
+  const patch = collectRawConfigPatch();
+  if (patch) payload.meta = { ...payload.meta, rawConfig: patch };
+  return payload;
+}
+
+/** 预览渲染：多文件页签（✎=原文覆盖）+ 行号编辑器；显示优先级 手改 > 已取明文 > 掩码投影。 */
+function renderProviderPreview() {
+  const textarea = elements["provider-common-json"];
+  const tabs = elements["provider-preview-tabs"];
+  if (!textarea || !tabs) return;
+  const { files, active, note, edits, revealed } = providerPreviewState;
+  const rawPaths = providerPreviewRawPaths();
+  if (!files.length) {
+    tabs.hidden = true;
+    tabs.innerHTML = "";
+    textarea.readOnly = true;
+    const text = note || "（填写表单后自动生成预览）";
+    if (textarea.value !== text) textarea.value = text;
+  } else {
+    const current = files[Math.min(active, files.length - 1)] ?? files[0];
+    const currentIndex = files.indexOf(current);
+    tabs.hidden = false;
+    tabs.innerHTML = files.map((file, index) => {
+      const raw = rawPaths.has(file.path);
+      return `<button class="provider-preview-tab${index === currentIndex ? " is-active" : ""}${raw ? " is-raw" : ""}" type="button" data-preview-tab="${index}" title="${raw ? "已手改——启用时按原文写入" : "投影生成"}">${escapeHtml(file.path)}${raw ? " ✎" : ""}</button>`;
+    }).join("");
+    const display = current.removed
+      ? `（启用后此文件将被移除：${current.path}）`
+      : edits[current.path] ?? revealed[current.path] ?? current.content ?? "";
+    if (textarea.value !== display) textarea.value = display; // 等值跳过赋值，保光标
+    textarea.readOnly = Boolean(current.removed) || (edits[current.path] === undefined && revealed[current.path] === undefined);
+  }
+  const resetButton = elements["provider-preview-reset-button"];
+  if (resetButton) {
+    const current = providerPreviewCurrent();
+    resetButton.hidden = !current || !rawPaths.has(current.path);
+  }
+  providerCommonJsonEditorHandle?.sync();
+}
+
+async function loadProviderConfigPreview() {
+  const block = elements["provider-config-json-block"];
+  if (!block) return;
+  const app = providerPreviewApp();
+  const seq = ++providerPreviewSeq;
+  const label = PROVIDER_APP_META.find((entry) => entry.app === app)?.label ?? app;
+  if (!state.providerDialogApps?.[app]) {
+    providerPreviewState.files = [];
+    providerPreviewState.active = 0;
+    providerPreviewState.note = `「${label}」不在此档案的应用范围内`;
+    renderProviderPreview();
+    return;
+  }
+  const provider = providerPreviewPayload();
+  if (!String(provider.name || "").trim()) {
+    providerPreviewState.files = [];
+    providerPreviewState.active = 0;
+    providerPreviewState.note = "填写供应商名称后生成配置预览";
+    renderProviderPreview();
+    return;
+  }
+  try {
+    const result = await request(API.providerPreview, { method: "POST", body: { app, provider } });
+    if (seq !== providerPreviewSeq) return; // 过期响应丢弃
+    providerPreviewState.files = result.files ?? [];
+    // 默认页签 = 内容最长的文件（例如 codex 的 config.toml 主配置，而非 3 行 auth.json）
+    providerPreviewState.active = providerPreviewState.files.reduce((best, file, index, list) => (
+      (file.content?.length ?? 0) > (list[best]?.content?.length ?? 0) ? index : best
+    ), 0);
+    providerPreviewState.note = "";
+  } catch (error) {
+    if (seq !== providerPreviewSeq) return;
+    providerPreviewState.files = [];
+    providerPreviewState.active = 0;
+    providerPreviewState.note = `预览生成失败：${error.message}`;
+  }
+  renderProviderPreview();
+}
+
+/** 聚焦文本区：还是掩码投影时向内核取明文换上再放开编辑（密钥面 opt-in，同导出 includeSecrets 规则）。 */
+async function maybeRevealProviderPreview() {
+  const current = providerPreviewCurrent();
+  if (!current || current.removed || providerPreviewState.revealing) return;
+  const path = current.path;
+  if (providerPreviewState.revealed[path] !== undefined || providerPreviewState.edits[path] !== undefined) return;
+  providerPreviewState.revealing = true;
+  try {
+    const result = await request(API.providerPreview, {
+      method: "POST",
+      body: { app: providerPreviewApp(), provider: providerPreviewPayload(), reveal: true },
+    });
+    const file = (result.files ?? []).find((entry) => entry.path === path);
+    if (file?.content !== undefined) {
+      providerPreviewState.revealed[path] = file.content;
+      renderProviderPreview();
+      elements["provider-common-json"]?.focus();
+      toast("已载入明文——手改随「保存」存为原文覆盖", "info", 3000);
+    }
+  } catch (error) {
+    toast(`明文载入失败：${error.message}`, "error", 5000);
+  } finally {
+    providerPreviewState.revealing = false;
+  }
+}
+
+function setCommonConfigTab(tab) {
+  const dialog = elements["common-config-dialog"];
+  for (const button of dialog.querySelectorAll("[data-common-tab]")) {
+    const active = button.dataset.commonTab === tab;
+    button.classList.toggle("is-active", active);
+    button.setAttribute("aria-selected", String(active));
+  }
+  for (const panel of dialog.querySelectorAll("[data-common-panel]")) {
+    panel.hidden = panel.dataset.commonPanel !== tab;
+  }
+}
+
+let commonConfigRevealSeq = 0;
+
+async function openCommonConfigDialog() {
+  const seq = ++commonConfigRevealSeq;
+  let result;
+  try {
+    result = await request(`${API.providerCommonConfig}?includeSecrets=1`);
+  } catch (error) {
+    if (seq === commonConfigRevealSeq) toast(`通用配置载入失败：${error.message}`, "error", 5000);
+    return;
+  }
+  if (seq !== commonConfigRevealSeq) return;
+  const common = result?.commonConfig ?? {};
+  for (const app of PROVIDER_APPS) elements[`common-config-${app}`].value = common[app] ?? "";
+  syncCommonTogglesFromJson();
+  commonClaudeJsonEditorHandle?.sync();
+  setCommonConfigTab("claude");
+  const dialog = elements["common-config-dialog"];
+  if (typeof dialog.showModal === "function" && !dialog.open) dialog.showModal();
+}
+
+async function saveCommonConfigForm(event) {
+  event.preventDefault();
+  if (elements["common-config-save-button"].disabled) return;
+  const claudeText = elements["common-config-claude"].value.trim();
+  if (claudeText) {
+    try {
+      parseJsonObjectText(claudeText);
+    } catch {
+      toast("Claude 通用配置不是合法 JSON 对象", "error");
+      setCommonConfigTab("claude");
+      return;
+    }
+  }
+  elements["common-config-save-button"].disabled = true;
+  try {
+    for (const app of PROVIDER_APPS) {
+      await request(API.providerCommonConfig, { method: "PUT", body: { app, commonConfig: elements[`common-config-${app}`].value } });
+    }
+    toast("通用配置已保存——下次切换供应商时并入", "success");
+    elements["common-config-dialog"].close();
+    await loadProviders({ fresh: true }); // 刷新 state.providersData.commonConfig
+  } catch (error) {
+    toast(`保存失败：${error.message}`, "error", 6000);
+  } finally {
+    elements["common-config-save-button"].disabled = false;
+  }
+}
+
+
+async function applyUsageTemplate() {
+  const type = elements["provider-usage-template"].value;
+  const templates = await ensureUsageTemplates();
+  const current = elements["provider-usage-code"].value.trim();
+  // 只在空白或与某模板一致时才覆盖——用户手写脚本绝不静默 clobber
+  const isTemplateText = Object.values(templates).some((text) => text.trim() === current);
+  if (!current || isTemplateText) {
+    elements["provider-usage-code"].value = templates[type] ?? "";
+  }
+}
+
+async function testUsageScriptNow() {
+  const resultEl = elements["provider-usage-test-result"];
+  resultEl.textContent = "测试请求发出…";
+  elements["provider-usage-test-button"].disabled = true;
+  try {
+    const result = await request(API.providerUsageTest, {
+      method: "POST",
+      body: {
+        providerId: state.editingProviderId ?? undefined,
+        code: elements["provider-usage-code"].value,
+        templateType: elements["provider-usage-template"].value,
+        timeout: Number(elements["provider-usage-timeout"].value) || 10,
+        apiKey: elements["provider-usage-apikey"].value,
+        baseUrl: elements["provider-usage-baseurl"].value.trim(),
+        accessToken: elements["provider-usage-token"].value,
+        userId: elements["provider-usage-userid"].value.trim(),
+      },
+    });
+    if (result.success) {
+      const first = result.data?.[0] ?? {};
+      resultEl.textContent = `成功：${first.planName ? `${first.planName} ` : ""}${first.remaining != null ? `余 ${first.remaining}${first.unit ?? ""}` : first.extra ?? "已返回"}`;
+      resultEl.classList.remove("is-error");
+    } else {
+      resultEl.textContent = `失败：${(result.error ?? "").slice(0, 80)}`;
+      resultEl.classList.add("is-error");
+    }
+  } catch (error) {
+    resultEl.textContent = `失败：${error.message}`;
+    resultEl.classList.add("is-error");
+  } finally {
+    elements["provider-usage-test-button"].disabled = false;
+  }
+}
+
+async function testProviderModelNow() {
+  const resultEl = elements["provider-model-test-result"];
+  if (!state.editingProviderId) {
+    resultEl.textContent = "请先保存档案，再发起真实模型请求。";
+    resultEl.classList.add("is-error");
+    return;
+  }
+  const app = state.providerDialogTargetApp;
+  if (!app) {
+    resultEl.textContent = "未找到目标应用。";
+    resultEl.classList.add("is-error");
+    return;
+  }
+  resultEl.textContent = "正在请求模型…";
+  resultEl.classList.remove("is-error");
+  elements["provider-model-test-button"].disabled = true;
+  try {
+    const result = await request(API.providerModelTest(state.editingProviderId), {
+      method: "POST",
+      body: {
+        app,
+        testConfig: {
+          testModel: elements["provider-test-model"].value.trim(),
+          testPrompt: elements["provider-test-prompt"].value.trim(),
+          timeoutSecs: Number(elements["provider-test-timeout"].value) || 8,
+        },
+      },
+    });
+    resultEl.textContent = result.success
+      ? `可用：HTTP ${result.httpStatus} · ${result.responseTimeMs}ms`
+      : `失败：${result.message}`;
+    resultEl.classList.toggle("is-error", !result.success);
+  } catch (error) {
+    resultEl.textContent = `失败：${error.message}`;
+    resultEl.classList.add("is-error");
+  } finally {
+    elements["provider-model-test-button"].disabled = false;
+  }
+}
+
 
 async function clearFinishedRuns() {
   const finished = state.runs.filter((run) => FINISHED_RUN_STATES.has(run.status));
@@ -1756,24 +9764,68 @@ async function clearFinishedRuns() {
       state.selectedRunId = null;
     }
     await loadRuns();
-    renderRuns();
     toast(`已清除 ${result.cleared} 条已结束任务`, "success");
   } catch (error) {
     toast(`清除失败：${error.message}`, "error");
   }
 }
 
-async function loadProjects() {
-  // 请求序号防乱序倒灌（烛 R6 致命2）：快速开→关摘要时，慢的 summaries=1 响应不得覆盖已关闭状态
-  if (!state.projectPrefsLoaded) {
-    state.projectPrefsLoaded = true;
-    await loadProjectPrefs(); // 侧栏偏好先于首次渲染（置顶/改名/隐藏立即生效）
+function exposeProjectForLocation(project) {
+  const pref = projectPrefOf(project);
+  if (pref.hidden && !state.showHiddenProjects) {
+    state.showHiddenProjects = true;
+    sessionStorage.setItem(SHOW_HIDDEN_KEY, "1");
+    if (elements["show-hidden-toggle"]) elements["show-hidden-toggle"].checked = true;
   }
+  if (state.recentOnly && !projectRecent(project)) {
+    state.recentOnly = false;
+    sessionStorage.setItem(RECENT_ONLY_KEY, "0");
+    if (elements["recent-only-toggle"]) elements["recent-only-toggle"].checked = false;
+  }
+  state.expandedTeams.add(pref.teamId || effectiveProjectTeamId(project));
+  if (pref.pinned && !pref.hidden) state.expandedPinnedProjects.add(project.id);
+  else state.expandedProjects.add(project.id);
+}
+
+function consumeProjectDeepLink({ final = false } = {}) {
+  const projectId = state.deepLinkProjectId;
+  if (!projectId) return false;
+  const project = findProjectById(projectId);
+  if (!project) {
+    if (final) {
+      toast("深度链接指向的项目不存在（可能已清理）", "warning");
+      state.deepLinkProjectId = null;
+    }
+    return false;
+  }
+  state.deepLinkProjectId = null;
+  exposeProjectForLocation(project);
+  renderProjects();
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    const pref = projectPrefOf(project);
+    const selector = pref.pinned && !pref.hidden
+      ? `[data-pinned-project="${CSS.escape(project.id)}"]`
+      : `[data-project-toggle="${CSS.escape(project.id)}"]`;
+    const target = document.querySelector(selector);
+    target?.scrollIntoView?.({ block: "nearest" });
+    target?.focus?.({ preventScroll: true });
+  }));
+  return true;
+}
+
+async function loadProjects({ refresh = false } = {}) {
+  // 请求序号防乱序倒灌（烛 R6 致命2）：快速开→关摘要时，慢的 summaries=1 响应不得覆盖已关闭状态
+  // 偏好加载失败时仍允许项目扫描，但 status 保持 error；下一次刷新/修改会真实重试，
+  // 在成功 GET 前所有覆盖式 PUT 都 fail-closed。
+  if (state.projectPrefsStatus !== "ready") await loadProjectPrefs();
   const seq = ++state.projectsSeq;
   let data;
   try {
     // 摘要严格 opt-in（烛 R5 致命1）：默认只回元数据；用户勾选后才请求脱敏摘要
-    data = await request(`${API.sessionProjects}${state.projectSummaries ? "?summaries=1" : ""}`);
+    const query = new URLSearchParams();
+    if (state.projectSummaries) query.set("summaries", "1");
+    if (refresh) query.set("refresh", "1");
+    data = await request(`${API.sessionProjects}${query.size ? `?${query}` : ""}`);
   } catch (error) {
     if (seq !== state.projectsSeq) return;
     state.projectsData = { available: false, error: error.message, projects: [] };
@@ -1783,7 +9835,69 @@ async function loadProjects() {
   }
   if (seq !== state.projectsSeq) return; // 已有更新的请求在途/完成
   state.projectsData = data;
+  // 远程项目台账并入（独立 try：台账故障不拖垮本地扫描，如实记 state 供 UI 降级）
+  try {
+    state.remoteProjects = (await request("/api/remote-projects"))?.projects ?? [];
+    state.remoteProjectsError = null;
+  } catch (error) {
+    state.remoteProjects = [];
+    // 与 loadConfigHosts 同一形状：目标栏按 gated/error 分开呈现，不能在这里退回裸字符串
+    state.remoteProjectsError = configTargetLoadIssue(error, "远程项目台账不可用");
+  }
   renderProjects();
+  consumeProjectDeepLink({ final: true });
+  if (state.deepLinkSession) {
+    // 会话深度链接一次性消费：项目树就绪后打开对应历史会话预览（scope 从扫描数据回填）
+    const { cli, projectId, sessionId } = state.deepLinkSession;
+    const project = (data.projects ?? []).find((item) => item.id === projectId);
+    const session = project?.sessions?.find((item) => item.id === sessionId && (item.cli ?? "claude") === cli);
+    if (session) {
+      exposeProjectForLocation(project);
+      renderProjects();
+      void openSessionPreview(projectId, sessionId, cli, session.scope ?? "");
+    }
+    else toast("深度链接指向的会话不存在（可能已清理）", "warning");
+    state.deepLinkSession = null;
+  }
+}
+
+function initRecentOnlyToggle() {
+  // 「近期」过滤默认开启：30 天无对话的会话/项目隐藏；关闭即全量显示
+  state.recentOnly = sessionStorage.getItem(RECENT_ONLY_KEY) !== "0";
+  const toggle = elements["recent-only-toggle"];
+  if (!toggle) return;
+  toggle.checked = state.recentOnly;
+  toggle.addEventListener("change", () => {
+    state.recentOnly = toggle.checked;
+    sessionStorage.setItem(RECENT_ONLY_KEY, state.recentOnly ? "1" : "0");
+    renderProjects();
+  });
+}
+
+// 「已隐藏」开关：显示被移除（hidden）的项目——压暗标注，右键可取消隐藏；默认关（隐藏即不见）
+function initShowHiddenToggle() {
+  state.showHiddenProjects = sessionStorage.getItem(SHOW_HIDDEN_KEY) === "1";
+  const toggle = elements["show-hidden-toggle"];
+  if (!toggle) return;
+  toggle.checked = state.showHiddenProjects;
+  toggle.addEventListener("change", () => {
+    state.showHiddenProjects = toggle.checked;
+    sessionStorage.setItem(SHOW_HIDDEN_KEY, state.showHiddenProjects ? "1" : "0");
+    renderProjects();
+  });
+}
+
+function initSubagentsToggle() {
+  // 子代理会话默认隐藏（只留主对话）；opt-in 显示——纯客户端过滤，不重取数据
+  state.showSubagents = sessionStorage.getItem(SHOW_SUBAGENTS_KEY) === "1";
+  const toggle = elements["subagents-toggle"];
+  if (!toggle) return;
+  toggle.checked = state.showSubagents;
+  toggle.addEventListener("change", () => {
+    state.showSubagents = toggle.checked;
+    sessionStorage.setItem(SHOW_SUBAGENTS_KEY, state.showSubagents ? "1" : "0");
+    renderProjects();
+  });
 }
 
 function initProjectSummariesToggle() {
@@ -1805,8 +9919,148 @@ function initProjectSummariesToggle() {
   });
 }
 
+// CLI 源标签：项目树内会话按 CLI 分组展示（Claude/Codex…）
+const CLI_LABELS = { claude: "Claude", codex: "Codex", kimi: "Kimi", pi: "Pi", cursor: "Cursor", opencode: "OpenCode" };
+// 官方徽标（index.html sprite 内 fill 型 symbol）：Claude 星芒 / OpenAI knot
+const CLI_ICONS = {
+  claude: "icon-cli-claude",
+  codex: "icon-cli-codex",
+  grok: "icon-cli-grok",
+  kimi: "icon-cli-kimi",
+  pi: "icon-cli-pi",
+  gemini: "icon-cli-gemini",
+  opencode: "icon-cli-opencode",
+};
+// agent → 厂商官方徽标（LO 铁律：系统内此类图标一律官方标志，不主观臆造——
+// 出处：Anthropic/OpenAI 官方徽标（既有 sprite）、simple-icons 官方收录（KIMI= kimi.com、
+// Google Gemini=gemini.google.com、Pi 与 pi.dev/favicon.svg 同形实证）、xAI=Wikimedia File:XAI Logo.svg、
+// OpenCode=opencode.ai/favicon.svg 同形）
+const AGENT_CLI = {
+  "claude-fable": "claude",
+  "codex-technical": "codex",
+  "grok-search": "grok",
+  "grok-build": "grok",
+  "kimi-frontend": "kimi",
+  "pi-resident": "pi",
+  "gemini-research": "gemini",
+};
+
+function agentCli(agentId) {
+  return AGENT_CLI[String(agentId ?? "")] ?? null;
+}
+
+function cliLabel(cli) {
+  return CLI_LABELS[cli] ?? String(cli ?? "claude");
+}
+
+function cliIconMarkup(cli, className = "cli-logo") {
+  const icon = CLI_ICONS[cli];
+  return icon ? `<svg class="${className}" aria-hidden="true"><use href="#${icon}"></use></svg>` : "";
+}
+
+// 树内可见会话：未归档；子代理（编排派生）默认隐藏，由「子代理」开关 opt-in
+// 跨团队从属的会话迁往目标团队；「近期」开启时只留 30 天内有对话的
+function sessionRecent(session) {
+  if (!state.recentOnly) return true;
+  const ms = new Date(session.modifiedAt ?? 0).getTime();
+  return Number.isFinite(ms) && Date.now() - ms < RECENT_WINDOW_MS;
+}
+
+function projectRecent(project) {
+  if (!state.recentOnly) return true;
+  if (project.pending) return true; // 乐观项目刚选定，天然"近期"（0 会话会被过滤误杀）
+  if (project.remoteProject) return true; // 远程项目无本地会话时间线，按会话过滤是误杀
+  return (project.sessions ?? []).some((session) => sessionRecent(session));
+}
+
+function visibleTreeSessions(project) {
+  const projectTeam = effectiveProjectTeamId(project);
+  return (project.sessions ?? []).filter(
+    (session) =>
+      sessionRecent(session)
+      && !sessionPrefOf(session.cli ?? "claude", project.id, session.id).archived
+      && (state.showSubagents || !session.subagent)
+      && effectiveSessionTeamId(project, session) === projectTeam, // 跨团队从属的会话迁往目标团队
+  );
+}
+
+// 远程项目 → 树节点：path 必须 null（避免污染本地 cwd 语义：datalist/归属匹配/reveal），
+// 远程信息全部挂 remote 子对象；remoteId 是台账真 id（删除用），节点 id 加前缀防撞扫描投影。
+function remoteProjectTreeNode(record) {
+  const host = record.host ?? null;
+  return {
+    id: `remote-${record.id}`,
+    remoteId: record.id,
+    label: record.name,
+    path: null,
+    sessionCount: 0,
+    sessions: [],
+    remoteProject: true,
+    remote: {
+      hostId: record.hostId,
+      path: record.path,
+      hostName: host?.name ?? record.hostId,
+      addr: host ? `${host.user}@${host.host}:${host.port}` : "",
+      enabled: host?.enabled !== false,
+      trusted: Boolean(host?.trusted),
+      hostMissing: Boolean(record.hostMissing) || !host,
+    },
+  };
+}
+
+function remoteTreeNodes() {
+  return (state.remoteProjects ?? []).map(remoteProjectTreeNode);
+}
+
+function visibleTreeProjects() {
+  return [...state.pendingProjects, ...(state.projectsData?.projects ?? []), ...remoteTreeNodes()].filter((project) => {
+    const pref = projectPrefOf(project);
+    if (pref.hidden) return state.showHiddenProjects;
+    return !pref.pinned && projectRecent(project);
+  });
+}
+
+function projectTreeModel(projects = visibleTreeProjects()) {
+  const allTeams = state.teams.length ? state.teams : [{ id: defaultTeamId(), name: "默认团队", builtin: true, members: [] }];
+  // LO 2026-08-04：侧栏=团队工作区，只渲染当前选中团队；缺选/失效时回退内置/首个团队
+  const selected = allTeams.find((team) => team.id === state.selectedTeamId) ?? allTeams.find((team) => team.builtin) ?? allTeams[0];
+  const teams = [selected];
+  const knownTeamIds = new Set(allTeams.map((team) => team.id));
+  const projectsByTeam = new Map([[selected.id, []]]);
+  const looseByTeam = new Map();
+  const unassignedProjects = [];
+  for (const project of projects) {
+    const teamId = effectiveProjectTeamId(project);
+    const explicitTeamId = explicitProjectTeamId(project);
+    // 严格归属（LO 2026-08-10）：团队树下只挂显式归属本团队的项目；未归属（null）与归属
+    // 已失效团队（旧数据）的进「未归属」虚拟组兜底——不消失（08-08 整片吃掉的教训），也不混显。
+    if (explicitTeamId === selected.id) {
+      projectsByTeam.get(selected.id).push(project);
+    } else if (explicitTeamId === null || !knownTeamIds.has(explicitTeamId)) {
+      unassignedProjects.push(project);
+    }
+    for (const session of project.sessions ?? []) {
+      const pref = sessionPrefOf(session.cli ?? "claude", project.id, session.id);
+      const sessionTeam = pref.teamId && teamById(pref.teamId) ? pref.teamId : null;
+      if (sessionTeam && sessionTeam !== teamId && sessionRecent(session) && (state.showSubagents || !session.subagent) && !pref.archived) {
+        if (!looseByTeam.has(sessionTeam)) looseByTeam.set(sessionTeam, []);
+        looseByTeam.get(sessionTeam).push({ project, session });
+      }
+    }
+  }
+  return { teams, projectsByTeam, looseByTeam, unassignedProjects };
+}
+
+function teamChildrenMarkup(team, index, projects, looseSessions) {
+  return [
+    ...projects.map((project, itemIndex) => projectNodeMarkup(project, `${index}-${itemIndex}`)),
+    ...looseSessions.map(({ project, session }) => `<li class="team-loose-session">${sessionLinkMarkup(project, session)}</li>`),
+  ].join("") || `<li class="project-empty">本团队还没有归属项目——「未归属」组里的项目右键可归属进来</li>`;
+}
+
 function sessionDisplayTitle(session) {
-  return session.summary || `会话 ${String(session.id).slice(0, 8)}`;
+  const label = session.nickname ? `${session.nickname} · ${session.label ?? ""}`.trim() : session.label;
+  return session.summary || label || `会话 ${String(session.id).slice(0, 8)}`;
 }
 
 /** 侧栏用短时间：今天显示 HH:mm，更早显示 MM/DD。 */
@@ -1823,55 +10077,363 @@ function shortDate(value) {
 function renderProjects() {
   const container = elements["workbench-project-tree"];
   const data = state.projectsData;
+  renderRailMetaSections(); // 置顶/已归档区随项目数据与偏好联动（含 run，早退路径也要刷）
   if (!container) return;
+  if (state.view !== "workbench") return;
   if (!data) {
-    container.innerHTML = `<div class="empty-state compact-empty"><span>正在扫描本地项目…</span></div>`;
+    commitMarkup(container, `<div class="empty-state compact-empty"><span>正在扫描本地项目…</span></div>`);
     return;
   }
-  // 侧栏偏好：隐藏被移除的、置顶排前（稳定排序保原序）、显示自定义名
-  const projects = (data.projects ?? [])
-    .filter((project) => !projectPrefOf(project).hidden)
-    .sort((a, b) => (projectPrefOf(b).pinned ? 1 : 0) - (projectPrefOf(a).pinned ? 1 : 0));
-  elements["project-count"].textContent = String(projects.length);
+  // 侧栏偏好：隐藏被移除的（「已隐藏」开关开启时仍显示但压暗标注）；置顶项目不进树（迁往置顶区）；「近期」开启时 30 天无对话的项目也不进树
+  // 乐观项目并入：扫描列表尚无同路径的 pending 项目也进树（出现真项目即让位）
+  const scanned = data.projects ?? [];
+  const scannedKeys = new Set(scanned.map((project) => normalizePathKey(project.path ?? project.id)));
+  const beforeTakeover = state.pendingProjects.length;
+  state.pendingProjects = state.pendingProjects.filter((project) => !scannedKeys.has(normalizePathKey(project.path)));
+  if (state.pendingProjects.length !== beforeTakeover) persistPendingProjects(); // 真项目让位后同步持久层
+  const projects = visibleTreeProjects();
+  // 团队层级树拍平（LO 2026-08-11）：分区头已是「⌄ 团队名 + 计数 + 折叠」，树内再挂同名团队节点
+  // 就是两个一样的折叠控件叠着——当前团队的项目直接平铺进树，头标签同步为当前团队名；
+  // 未归属/失效归属的项目仍进「未归属」虚拟组（严格归属制，兜底不消失）
+  const { teams, projectsByTeam, looseByTeam, unassignedProjects } = projectTreeModel(projects);
+  const currentTeam = teams[0];
+  elements["project-count"].textContent = String((projectsByTeam.get(currentTeam?.id) ?? []).length);
+  if (elements["team-rail-title"]) elements["team-rail-title"].textContent = currentTeam?.name ?? "团队";
   if (!data.available) {
-    container.innerHTML = emptyMarkup("项目扫描不可用", data.error ?? "未知原因");
+    commitMarkup(container, emptyMarkup("项目扫描不可用", data.error ?? "未知原因"));
     return;
   }
-  if (!projects.length) {
-    container.innerHTML = emptyMarkup("暂无本地项目", "~/.claude/projects 目录为空");
-    return;
+  if (!state.expandedTeamsInitialized) {
+    state.expandedTeamsInitialized = true;
+    if (!state.expandedTeams.size) {
+      state.expandedTeams.add(UNASSIGNED_TEAM_NODE_ID); // 未归属组默认展开：严格归属制下它是唯一兜底，收起等于隐身
+    }
   }
-  container.innerHTML = projects
-    .map((project, index) => {
-      const pref = projectPrefOf(project);
-      const expanded = state.expandedProjects.has(project.id);
-      const sessionItems = (project.sessions ?? [])
-        .map((session) => {
-          const selected = state.sessionPreview?.projectId === project.id && state.sessionPreview?.sessionId === session.id;
-          return `<li>
-            <button class="session-link${selected ? " is-selected" : ""}" type="button"
-              data-session-project="${escapeHtml(project.id)}" data-session-id="${escapeHtml(session.id)}"
-              title="${escapeHtml(sessionDisplayTitle(session))}">
-              <span class="session-title">${escapeHtml(sessionDisplayTitle(session))}</span>
-              <span class="session-time">${escapeHtml(shortDate(session.modifiedAt))}</span>
-            </button>
-          </li>`;
-        })
-        .join("");
-      return `<div class="project-node">
-        <button class="project-toggle" type="button" data-project-toggle="${escapeHtml(project.id)}"
-          aria-expanded="${expanded}" aria-controls="project-sessions-${index}"
-          title="${escapeHtml(project.path ?? project.id)}">
-          <svg class="icon chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
-          <span class="project-name">${pref.pinned ? pinMarkup() : ""}${escapeHtml(pref.name || project.label)}</span>
-          <span class="project-badge">${Number(project.sessionCount) || 0}</span>
-        </button>
-        <ul class="project-sessions" id="project-sessions-${index}"${expanded ? "" : " hidden"}>
-          ${sessionItems || `<li class="project-empty">无历史对话</li>`}
-        </ul>
-      </div>`;
+  commitMarkup(container, [
+    ...teams.map((team, index) => `<ul class="project-sessions team-projects team-projects-flat">${teamChildrenMarkup(team, index, projectsByTeam.get(team.id) ?? [], looseByTeam.get(team.id) ?? [])}</ul>`),
+    unassignedNodeMarkup(unassignedProjects),
+  ].join(""));
+}
+
+// 「未归属」虚拟组（严格归属制的兜底）：未归属任何团队的项目都躺在这里——
+// 右键「从属团队」归属后立即迁往目标团队节点；组为空时不渲染，不占侧栏
+const UNASSIGNED_TEAM_NODE_ID = "__unassigned__";
+
+function unassignedNodeMarkup(projects) {
+  if (!projects.length) return "";
+  const expanded = state.expandedTeams.has(UNASSIGNED_TEAM_NODE_ID);
+  const items = expanded
+    ? projects.map((project, itemIndex) => projectNodeMarkup(project, `u-${itemIndex}`)).join("")
+    : "";
+  return `<div class="project-node team-node is-unassigned-team">
+    <div class="project-row">
+      <button class="project-toggle team-toggle" type="button" data-team-toggle="${UNASSIGNED_TEAM_NODE_ID}"
+        aria-expanded="${expanded}" aria-controls="team-projects-unassigned"
+        title="未归属任何团队的项目；右键项目可归属到团队">
+        <svg class="icon chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+        <svg class="icon lucide project-folder" aria-hidden="true"><use href="#lucide-folder"></use></svg>
+        <span class="project-name">未归属</span>
+        <span class="project-badge">${projects.length}</span>
+      </button>
+    </div>
+    <ul class="project-sessions team-projects" id="team-projects-unassigned"${expanded ? "" : " hidden"}>
+      ${items}
+    </ul>
+  </div>`;
+}
+
+// 远程项目展开空态（行内展开与点击展开共用一句话）
+const REMOTE_PROJECT_EMPTY_HINT = "该远程项目暂无协作会话——行尾「写」在远端目录新建（SSH 桥执行）";
+
+// v41 波三（§3.5）：远程项目下聚合 514cc run 台账——原生 CLI 会话文件在远端（本地扫描投影
+// 看不到），run 台账含持久化远端 sessionId，resume 照常（--resume/thread/resume 经 SSH 桥）。
+function remoteProjectRuns(project) {
+  const remote = project.remote;
+  return state.runs
+    .filter((run) => run.remote && !run.archived
+      && run.remote.hostId === remote.hostId && run.remote.path === remote.path) // 归档 run 不进树（与本地同纪律）
+    .sort((a, b) => new Date(b.updatedAt ?? b.createdAt ?? 0) - new Date(a.updatedAt ?? a.createdAt ?? 0));
+}
+
+// 成员行用合成条目：远端原生会话不在本地投影，sessionId 来自 run 台账持久化、时间取 run 的
+function remoteRunEntries(run) {
+  return Object.entries(runSessionsMap(run)).map(([memberId, sessionId]) => ({
+    memberId,
+    session: {
+      id: sessionId,
+      cli: String(run.teamRoster?.find((member) => member?.id === memberId)?.runtimeProfileId || memberId).split("-")[0],
+      modifiedAt: run.updatedAt ?? run.createdAt,
+    },
+  }));
+}
+
+// 远程项目 run 列表项（节点展开态与「展开显示」整列重渲共用）：
+// Codex 式截断与本地同律（TREE_SESSIONS_CAP），超出折叠为「展开显示」行
+function remoteProjectSessionItems(project) {
+  const runs = remoteProjectRuns(project);
+  const cap = state.showAllSessions.has(project.id) ? runs.length : TREE_SESSIONS_CAP;
+  const shown = runs.slice(0, cap);
+  return shown.map((run) => runConversationGroupMarkup(project, run, remoteRunEntries(run))).join("")
+    + (runs.length > shown.length
+      ? `<li class="sessions-showmore"><button class="sessions-showmore-button" type="button" data-sessions-showmore="${escapeHtml(project.id)}">展开显示（还有 ${runs.length - shown.length} 条）</button></li>`
+      : "");
+}
+
+// 远程项目节点：globe 图标 + 主机徽标（状态点如实：已连接=台账 trusted，已停用/主机缺失压暗）+ run 台账聚合
+function remoteProjectNodeMarkup(project, idSuffix, { pinned = false } = {}) {
+  const pref = projectPrefOf(project);
+  const remote = project.remote;
+  const expanded = pinned ? state.expandedPinnedProjects.has(project.id) : state.expandedProjects.has(project.id);
+  const runs = remoteProjectRuns(project);
+  const sessionItems = expanded ? remoteProjectSessionItems(project) : "";
+  const status = remote.hostMissing
+    ? { cls: "is-off", text: "主机已移除" }
+    : !remote.enabled
+      ? { cls: "is-off", text: "已停用" }
+      : remote.trusted
+        ? { cls: "is-ok", text: "已连接" }
+        : { cls: "", text: "待确认指纹" };
+  const toggleAttr = pinned ? `data-pinned-project="${escapeHtml(project.id)}"` : `data-project-toggle="${escapeHtml(project.id)}"`;
+  const listId = pinned ? `pinned-project-sessions-${idSuffix}` : `project-sessions-${idSuffix}`;
+  return `<div class="project-node is-remote-project${pref.hidden ? " is-hidden-project" : ""}${pinned ? " pinned-project" : ""}">
+    <div class="project-row">
+      <button class="project-toggle" type="button" ${toggleAttr}
+        aria-expanded="${expanded}" aria-controls="${listId}"
+        title="${escapeHtml(`${remote.hostName}${remote.addr ? ` · ${remote.addr}` : ""}\n${remote.path}`)}">
+        <svg class="icon chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+        <svg class="icon lucide project-folder" aria-hidden="true"><use href="#lucide-globe"></use></svg>
+        <span class="project-name">${escapeHtml(pref.name || project.label)}</span>
+        ${pref.hidden ? '<span class="hidden-badge">已隐藏</span>' : ""}
+        <span class="remote-badge" title="${escapeHtml(remote.path)}"><i class="remote-dot ${status.cls}"></i>${escapeHtml(remote.hostName)} · ${escapeHtml(status.text)}</span>
+        <span class="project-badge" title="协作会话数（514cc run 台账）">${runs.length}</span>
+      </button>
+      <button class="row-action" type="button" data-project-newsession="${escapeHtml(project.id)}"
+        title="在该远程目录新建会话（远端 agent 执行）" aria-label="在「${escapeHtml(pref.name || project.label)}」的远程目录新建会话"${remote.hostMissing || !remote.enabled ? " disabled" : ""}>
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="${MENU_ICONS.rename}" /></svg>
+      </button>
+      ${menuTriggerMarkup("project", project.id, `打开「${pref.name || project.label}」项目菜单`)}
+    </div>
+    <ul class="project-sessions" id="${listId}"${expanded ? "" : " hidden"}>
+      ${expanded ? (sessionItems || `<li class="project-empty">${REMOTE_PROJECT_EMPTY_HINT}</li>`) : ""}
+    </ul>
+  </div>`;
+}
+
+// 项目节点（团队树下）：行尾「写」图标=在此项目下新建会话
+function projectNodeMarkup(project, idSuffix) {
+  if (project.remoteProject) return remoteProjectNodeMarkup(project, idSuffix);
+  const pref = projectPrefOf(project);
+  const expanded = state.expandedProjects.has(project.id);
+  const sessionItems = expanded ? sessionGroupsMarkup(project, visibleTreeSessions(project)) : "";
+  return `<div class="project-node${pref.hidden ? " is-hidden-project" : ""}">
+    <div class="project-row">
+      <button class="project-toggle" type="button" data-project-toggle="${escapeHtml(project.id)}"
+        aria-expanded="${expanded}" aria-controls="project-sessions-${idSuffix}"
+        title="${escapeHtml(project.path ?? project.id)}">
+        <svg class="icon chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+        <svg class="icon lucide project-folder" aria-hidden="true"><use href="#lucide-folder"></use></svg>
+        <span class="project-name">${escapeHtml(pref.name || project.label)}</span>
+        ${pref.hidden ? '<span class="hidden-badge">已隐藏</span>' : ""}
+        ${project.pending ? '<span class="pending-badge" title="新项目：首段对话落盘后转为正式项目">新</span>' : ""}
+        <span class="project-badge">${Number(project.sessionCount) || 0}</span>
+      </button>
+      <button class="row-action" type="button" data-project-newsession="${escapeHtml(project.id)}"
+        title="在此项目下新建会话" aria-label="在「${escapeHtml(pref.name || project.label)}」下新建会话"${project.path ? "" : " disabled"}>
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="${MENU_ICONS.rename}" /></svg>
+      </button>
+      ${menuTriggerMarkup("project", project.id, `打开「${pref.name || project.label}」项目菜单`)}
+    </div>
+    <ul class="project-sessions" id="project-sessions-${idSuffix}"${expanded ? "" : " hidden"}>
+      ${expanded ? (sessionItems || `<li class="project-empty">无历史对话</li>`) : ""}
+    </ul>
+  </div>`;
+}
+
+// 原生历史会话的默认 label 常是时间戳（"08-08 16:49"/"07/17"/"2026-08-08 16:49"）——
+// 标题已是日期时右侧时间纯属重复，行级去重（2026-08-09 侧栏工程波）
+const DATE_TITLE_RE = /^(?:\d{4}[-/]\d{1,2}[-/]\d{1,2}|\d{1,2}[-/]\d{1,2})(?:[ T]\d{1,2}:\d{2}(?::\d{2})?)?/;
+
+// 原生历史会话行（项目树/置顶区/已归档区共用）：别名 > 原标题；未读点；选中态；带 CLI 源
+function sessionLinkMarkup(project, session) {
+  const cli = session.cli ?? "claude";
+  const pref = sessionPrefOf(cli, project.id, session.id);
+  const selected = state.sessionPreview?.projectId === project.id && state.sessionPreview?.sessionId === session.id;
+  const title = pref.alias || sessionDisplayTitle(session);
+  const dateTitle = DATE_TITLE_RE.test(title.trim()) && !pref.alias; // 用户改过的别名不按日期处理
+  const active = session.modifiedAt && Date.now() - new Date(session.modifiedAt).getTime() < 15 * 60 * 1000;
+  return `<button class="session-link${selected ? " is-selected" : ""}${session.subagent ? " is-subagent" : ""}${dateTitle ? " is-date-title" : ""}" type="button"
+    data-session-project="${escapeHtml(project.id)}" data-session-id="${escapeHtml(session.id)}"
+    data-session-cli="${escapeHtml(cli)}" data-session-scope="${escapeHtml(session.scope ?? "")}"
+    data-has-summary="${session.summary ? 1 : 0}"
+    title="${escapeHtml(sessionDisplayTitle(session))}">
+    <span class="session-title">${pref.unread ? `<span class="unread-dot" aria-label="未读"></span>` : ""}${session.subagent ? `<span class="subagent-mark" title="子代理（编排派生）会话">子</span>` : ""}${escapeHtml(title)}${active ? `<span class="live-dot" title="15 分钟内有更新"></span>` : ""}</span>
+    ${dateTitle ? "" : `<span class="session-time">${escapeHtml(shortDate(session.modifiedAt))}</span>`}
+  </button>`;
+}
+
+// 项目下会话分组：协作会话（Console run 硬关联）优先，未关联的按 CLI 分组
+// Codex 式截断阈值：项目下会话超过 6 条时尾部块折叠为「展开显示」行
+const TREE_SESSIONS_CAP = 6;
+
+function sessionGroupsMarkup(project, sessions) {
+  const linkIndex = runSessionLinkIndex();
+  const linked = new Map(); // runId → { run, entries: [{ session, memberId }] }
+  const unlinked = [];
+  for (const session of sessions) {
+    const link = findRunSessionLink(linkIndex, session.id);
+    if (!link) {
+      unlinked.push(session);
+      continue;
+    }
+    if (!linked.has(link.run.id)) linked.set(link.run.id, { run: link.run, entries: [] });
+    linked.get(link.run.id).entries.push({ session, memberId: link.memberId });
+  }
+  // 块级合成（协作组块 + CLI 组块）：截断只整块收编，不拆组内成员——
+  // 归档 run 不进树（LO 2026-08-11），成员会话留在 linked 消费链里不散回未关联区
+  const blocks = [...linked.values()]
+    .filter(({ run }) => !run.archived)
+    .sort((a, b) => runGroupLatestMs(b) - runGroupLatestMs(a))
+    .map(({ run, entries }) => ({ count: entries.length, html: runConversationGroupMarkup(project, run, entries) }));
+  blocks.push(...cliSessionGroupBlocks(project, unlinked));
+  if (state.showAllSessions.has(project.id)) return blocks.map((block) => block.html).join("");
+  // Codex 式截断（LO 2026-08-11）：超出 TREE_SESSIONS_CAP 的块折叠为一行「展开显示」，点击展开全部
+  const parts = [];
+  let used = 0;
+  let remaining = 0;
+  for (const block of blocks) {
+    if (parts.length && used + block.count > TREE_SESSIONS_CAP) {
+      remaining += block.count;
+      continue;
+    }
+    parts.push(block.html);
+    used += block.count;
+  }
+  if (remaining > 0) {
+    parts.push(`<li class="sessions-showmore"><button class="sessions-showmore-button" type="button" data-sessions-showmore="${escapeHtml(project.id)}">展开显示（还有 ${remaining} 条）</button></li>`);
+  }
+  return parts.join("");
+}
+
+// run.sessions 归一（成员→原生会话 id）：数组形态（agentId/sessionId）与对象形态都接
+function runSessionsMap(run) {
+  return Array.isArray(run.sessions)
+    ? Object.fromEntries(run.sessions.map((item) => [item.agentId || item.name, item.sessionId || item.id]).filter(([key, value]) => key && value))
+    : (run.sessions || {});
+}
+
+// 协作会话聚合（LO 2026-08-10）：run 的 sessions 映射是"哪些原生会话属于同一逻辑会话"的
+// 唯一硬关联——裸 CLI 会话没有这份记录，不猜不并（时间邻近聚类是另一个功能，需另行拍板）。
+function runSessionLinkIndex() {
+  const index = new Map(); // nativeSessionId → { run, memberId }
+  for (const run of state.runs) {
+    for (const [memberId, sessionId] of Object.entries(runSessionsMap(run))) {
+      const id = String(sessionId || "");
+      if (id.length >= 8 && !index.has(id)) index.set(id, { run, memberId });
+    }
+  }
+  return index;
+}
+
+function findRunSessionLink(index, scanId) {
+  const id = String(scanId || "");
+  if (!id) return null;
+  const exact = index.get(id);
+  if (exact) return exact;
+  // codex 扫描 id 是 rollout 文件名（rollout-…-<uuid>），run 里存的是 thread uuid——后缀对齐
+  for (const [rid, link] of index) {
+    if (id.endsWith(rid)) return link;
+  }
+  return null;
+}
+
+function runGroupLatestMs(group) {
+  return Math.max(0, ...group.entries.map((entry) => new Date(entry.session.modifiedAt ?? 0).getTime() || 0));
+}
+
+function runMemberLabel(run, memberId) {
+  return run.teamRoster?.find((member) => member?.id === memberId)?.label
+    ?? (state.memberCatalog || []).find((member) => member.id === memberId)?.label
+    ?? memberId;
+}
+
+// 协作会话分组（LO 2026-08-10 一致化）：组头与成员行点击都与会话列表点 run 一致——
+// 直接 selectRun 打开 run 完整视图（轮次/工具卡/失败卡），不再落原生只读预览；
+// 仅独立 chevron 按钮折叠/展开成员列表（默认展开，收起态存 collapsedRunGroups）。
+function runConversationGroupMarkup(project, run, entries) {
+  const title = String(run.title || run.prompt || "未命名任务").trim() || "未命名任务";
+  const collapsed = state.collapsedRunGroups.has(run.id);
+  const selected = run.id === state.selectedRunId;
+  const membersId = `run-group-members-${project.id}-${run.id}`;
+  const rows = entries
+    .slice()
+    .sort((a, b) => new Date(b.session.modifiedAt ?? 0) - new Date(a.session.modifiedAt ?? 0))
+    .map(({ session, memberId }) => {
+      const pref = sessionPrefOf(session.cli ?? "claude", project.id, session.id);
+      const memberLabel = runMemberLabel(run, memberId);
+      return `<li class="run-session-row">
+      <span class="run-member-chip" title="${escapeHtml(memberId)}">${escapeHtml(memberLabel)}</span><button class="session-link run-member-link" type="button"
+        data-run-select="${escapeHtml(run.id)}"
+        title="${escapeHtml(`${memberLabel} · ${sessionDisplayTitle(session)}`)}（点击打开协作会话）">
+        <span class="session-title">${escapeHtml(pref.alias || sessionDisplayTitle(session))}</span>
+        <span class="session-time">${escapeHtml(shortDate(session.modifiedAt))}</span>
+      </button>
+    </li>`;
     })
     .join("");
+  const latest = runGroupLatestMs({ entries });
+  return `<li class="run-group">
+    <div class="run-group-row">
+      <button class="run-group-toggle" type="button" data-run-group-toggle="${escapeHtml(run.id)}"
+        aria-expanded="${!collapsed}" aria-controls="${escapeHtml(membersId)}"
+        title="${collapsed ? "展开成员对话" : "折叠成员对话"}" aria-label="${collapsed ? "展开" : "折叠"}协作会话「${escapeHtml(title)}」的成员列表">
+        <svg class="icon chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+      </button>
+      <button class="run-group-head${selected ? " is-selected" : ""}" type="button" data-run-select="${escapeHtml(run.id)}"
+        title="打开协作会话「${escapeHtml(title)}」· ${entries.length} 个成员对话">
+        <span class="run-group-tag">协作</span>
+        <span class="run-group-title">${escapeHtml(title)}</span>
+        <span class="session-time">${latest ? escapeHtml(shortDate(new Date(latest).toISOString())) : ""}</span>
+      </button>
+    </div>
+    <ul class="run-group-members" id="${escapeHtml(membersId)}"${collapsed ? " hidden" : ""}>
+      ${rows}
+    </ul>
+  </li>`;
+}
+
+// 项目下未关联会话按 CLI 分组（LO 2026-07-19：一个项目下分 Claude 会话 / Codex 会话…），Claude 组优先
+// 分组头可折叠（LO 2026-08-11）：与协作组同一纪律——独立 toggle 按钮 + hidden 切换，
+// 收起态存 collapsedCliGroups（键 `${projectId}:${cli}`），不做全量重渲染，保焦点。
+// 块接口（cliSessionGroupBlocks）：供 sessionGroupsMarkup 的 Codex 式截断整块收编——count 用于预算，html 原样落位。
+function cliSessionGroupBlocks(project, sessions) {
+  const groups = new Map();
+  for (const session of sessions) {
+    const cli = session.cli ?? "claude";
+    if (!groups.has(cli)) groups.set(cli, []);
+    groups.get(cli).push(session);
+  }
+  const ordered = [...groups.entries()].sort((a, b) => (a[0] === "claude" ? -1 : b[0] === "claude" ? 1 : a[0].localeCompare(b[0])));
+  return ordered.map(([cli, list]) => {
+    const rows = list.map((session) => `<li>${sessionLinkMarkup(project, session)}</li>`).join("");
+    if (ordered.length <= 1) return { count: list.length, html: rows }; // 单 CLI 项目不出分组头，项目行自身即可折叠
+    const key = `${project.id}:${cli}`;
+    const collapsed = state.collapsedCliGroups.has(key);
+    const membersId = `cli-group-members-${project.id}-${cli}`;
+    const label = `${cliLabel(cli)} · ${list.length}`;
+    return { count: list.length, html: `<li class="cli-group">
+      <button class="cli-group-toggle" type="button" data-cli-group-toggle="${escapeHtml(key)}"
+        aria-expanded="${!collapsed}" aria-controls="${escapeHtml(membersId)}"
+        title="${collapsed ? "展开" : "折叠"}${escapeHtml(cliLabel(cli))}会话分组"
+        aria-label="${collapsed ? "展开" : "折叠"}${escapeHtml(label)}会话分组">
+        <svg class="icon chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>${cliIconMarkup(cli)}${escapeHtml(label)}
+      </button>
+      <ul class="cli-group-members" id="${escapeHtml(membersId)}"${collapsed ? " hidden" : ""}>${rows}</ul>
+    </li>` };
+  });
+}
+
+function cliSessionGroupsMarkup(project, sessions) {
+  return cliSessionGroupBlocks(project, sessions).map((block) => block.html).join("");
 }
 
 // 展开/收起用 DOM 手术而非全量重渲染——保住 toggle 按钮上的键盘焦点（烛 R3 焦点纪律）
@@ -1881,7 +10443,19 @@ function toggleProject(id, button) {
   else state.expandedProjects.add(id);
   button.setAttribute("aria-expanded", String(!wasExpanded));
   const list = byId(button.getAttribute("aria-controls"));
-  if (list) list.hidden = wasExpanded;
+  if (!list) return;
+  if (wasExpanded) list.replaceChildren();
+  else {
+    const project = findProjectById(id);
+    // 远程项目没有本地原生会话，展开必须走 run 台账聚合（否则永远落空态提示）
+    const items = project
+      ? (project.remoteProject ? remoteProjectSessionItems(project) : sessionGroupsMarkup(project, visibleTreeSessions(project)))
+      : "";
+    list.innerHTML = items || (project?.remoteProject
+      ? `<li class="project-empty">${REMOTE_PROJECT_EMPTY_HINT}</li>`
+      : `<li class="project-empty">无历史对话</li>`);
+  }
+  list.hidden = wasExpanded;
 }
 
 function markSelectedSessionLink(projectId, sessionId) {
@@ -1892,26 +10466,39 @@ function markSelectedSessionLink(projectId, sessionId) {
     ?.classList.add("is-selected");
 }
 
-async function openSessionPreview(projectId, sessionId) {
+function syncConversationLiveContext(renderContext) {
+  const liveStatus = elements["conversation-live-status"];
+  if (!liveStatus || liveStatus.dataset.renderContext === renderContext) return;
+  liveStatus.dataset.renderContext = renderContext;
+  liveStatus.textContent = "";
+}
+
+async function openSessionPreview(projectId, sessionId, cli = "claude", scope = "") {
   const project = state.projectsData?.projects?.find((item) => item.id === projectId);
-  const session = project?.sessions?.find((item) => item.id === sessionId);
-  const key = `${projectId}::${sessionId}`;
+  const session = project?.sessions?.find((item) => item.id === sessionId && (item.cli ?? "claude") === cli);
+  const key = `${cli}::${projectId}::${sessionId}`;
   const seq = ++state.previewSeq; // key 相同的关闭-重开竞态用递增序号区分（烛 R5 建议）
   state.sessionPreview = {
     key,
     seq,
     projectId,
     sessionId,
+    cli,
+    scope,
     projectLabel: project?.label ?? projectId,
-    title: session ? sessionDisplayTitle(session) : `会话 ${String(sessionId).slice(0, 8)}`,
+    title: session ? (sessionPrefOf(cli, projectId, sessionId).alias || sessionDisplayTitle(session)) : `会话 ${String(sessionId).slice(0, 8)}`,
     loading: true,
     error: null,
     data: null,
   };
+  // 打开即已读（手动标未读的提醒到此为止）；渲染在 state.sessionPreview 就位后，选中态不丢
+  if (sessionPrefOf(cli, projectId, sessionId).unread) void updateSessionPref(cli, projectId, sessionId, { unread: false });
   markSelectedSessionLink(projectId, sessionId);
   renderSelectedRun();
   try {
-    const data = await request(`/api/sessions/claude/${encodeURIComponent(projectId)}/${encodeURIComponent(sessionId)}/preview`);
+    const data = await request(
+      `/api/sessions/preview?source=${encodeURIComponent(cli)}&project=${encodeURIComponent(projectId)}&scope=${encodeURIComponent(scope)}&id=${encodeURIComponent(sessionId)}`,
+    );
     if (state.sessionPreview?.seq !== seq) return; // 用户已切走或重开
     state.sessionPreview.loading = false;
     state.sessionPreview.data = data;
@@ -1946,17 +10533,17 @@ function closeSessionPreview({ restoreFocus = true } = {}) {
 function renderSessionPreview() {
   const preview = state.sessionPreview;
   elements["conversation-title"].textContent = preview.title;
-  elements["conversation-meta"].textContent = `${preview.projectLabel} · 历史会话只读预览`;
+  elements["conversation-meta"].textContent = `${preview.projectLabel} · ${cliLabel(preview.cli)} 历史会话只读预览`;
   elements["workbench-run-status"].textContent = "历史预览";
   elements["workbench-run-status"].className = "status-label is-neutral";
   elements["cancel-run-button"].disabled = true;
   setComposerMode(null); // 历史预览下胶囊回新任务模式
   const stream = elements["conversation-stream"];
-  stream.setAttribute("aria-live", "off"); // 一次插入几十条历史消息不该被 live region 整段朗读（烛 R5 建议）
+  syncConversationLiveContext(`preview:${preview.key}`);
   const renderedKey = `${preview.seq}|${preview.loading}|${preview.error ?? ""}`;
   // SSE 触发的重渲染不重写预览流——避免闪烁和滚动位置被拽回（内容只在加载状态变化时更新）
   if (stream.dataset.previewKey !== renderedKey) {
-    const banner = `<div class="preview-banner" role="status">
+    const banner = `<div class="preview-banner" role="status" data-stream-key="preview:banner">
       <span>只读预览 · ${escapeHtml(preview.projectLabel)}${preview.data?.truncated ? " · 仅显示最近消息" : ""}</span>
       <button class="text-button" type="button" data-preview-close>返回协作台</button>
     </div>`;
@@ -1966,18 +10553,24 @@ function renderSessionPreview() {
     else if (!preview.data?.messages?.length) body = emptyMarkup("没有可预览的文本消息", "该会话只有工具事件或为空");
     else
       body = preview.data.messages
-        .map((message) =>
-          messageMarkup({
-            role: message.role,
-            author: message.role === "user" ? "LO" : "Claude",
-            content: message.text,
-            created_at: message.timestamp,
-          }),
+        .map((message, index, list) =>
+          messageMarkup(
+            {
+              role: message.role,
+              author: message.role === "user" ? "LO" : cliLabel(preview.cli),
+              cli: message.role === "user" ? null : preview.cli,
+              content: message.text,
+              created_at: message.timestamp,
+              key: `preview-message:${index}`,
+            },
+            list[index - 1]
+              ? { role: list[index - 1].role, author: list[index - 1].role === "user" ? "LO" : cliLabel(preview.cli), created_at: list[index - 1].timestamp }
+              : null,
+          ),
         )
         .join("");
-    stream.innerHTML = banner + body;
+    replaceConversationStream(banner + body, `preview:${preview.key}`, { renderSignature: renderedKey });
     stream.dataset.previewKey = renderedKey;
-    stream.scrollTop = stream.scrollHeight;
   }
   renderRouteDecision(null);
   renderTopology(null);
@@ -1992,10 +10585,6 @@ function selectedRun() {
 function knownProjectPaths() {
   const projects = state.projectsData?.projects ?? [];
   return [...new Set(projects.map((project) => project.path).filter(Boolean))];
-}
-
-function normalizePathKey(value) {
-  return String(value ?? "").trim().replace(/[\\/]+$/, "").replaceAll("/", "\\").toLowerCase();
 }
 
 function matchExistingProject(path) {
@@ -2015,7 +10604,7 @@ function updateSessionCwdHint() {
   }
   const existing = matchExistingProject(value);
   if (existing) {
-    hint.textContent = `✓ 会话将归属已有项目「${existing.label}」（${existing.sessionCount} 个历史会话）。`;
+    hint.textContent = `会话将归属已有项目「${existing.label}」（${existing.sessionCount} 个历史会话）。`;
     hint.classList.add("is-existing");
   } else {
     hint.textContent = "新地址：会话开始后将在此目录创建新项目（CLI 原生归属），并出现在下方项目列表。";
@@ -2030,11 +10619,18 @@ async function openSessionDialog() {
       .join("");
   };
   fillPaths();
+  selectSessionDialogType("local"); // 每次打开回本地模式；远程卡可用性由台账加载后异步刷新
+  void loadSessionRemoteHosts();
   elements["session-cwd-input"].value = state.pendingCwd || "";
+  elements["session-name-input"].dataset.touched = "";
+  syncSessionNameFromCwd(true);
   updateSessionCwdHint();
+  renderSessionDirpick();
+  // 已定地址（笔按钮/继续任务等入口带 pendingCwd）直进第二步；否则从类型选择开始
+  setSessionDialogStep(state.pendingCwd ? "info" : "type");
   const dialog = elements["session-dialog"];
   if (typeof dialog.showModal === "function" && !dialog.open) dialog.showModal();
-  elements["session-cwd-input"].focus();
+  (state.pendingCwd ? elements["session-cwd-input"] : elements["session-next-button"]).focus();
   // 项目数据未就绪（刚进页面）时补拉一次，datalist 与归属判断都吃到完整清单
   if (!state.projectsData?.projects?.length) {
     await loadProjects().catch(() => {});
@@ -2043,21 +10639,347 @@ async function openSessionDialog() {
   }
 }
 
+// Codex 式两步向导：步骤切换（按钮显隐 + 标题如实跟随）
+function setSessionDialogStep(step) {
+  const isType = step === "type";
+  elements["session-step-type"].hidden = !isType;
+  elements["session-step-info"].hidden = isType;
+  elements["session-prev-button"].hidden = isType;
+  elements["session-next-button"].hidden = !isType;
+  elements["session-submit-button"].hidden = isType;
+  syncSessionDialogMode();
+}
+
+// 会话类型（本地/远程）：卡片视觉与状态记录集中在这一处；远程不可用由 card.disabled 拦在上一层
+function selectSessionDialogType(type) {
+  state.sessionDialogType = type === "remote" ? "remote" : "local";
+  for (const peer of elements["session-step-type"].querySelectorAll("[data-session-type]")) {
+    const on = peer.dataset.sessionType === state.sessionDialogType;
+    peer.classList.toggle("is-selected", on);
+    peer.setAttribute("aria-pressed", String(on));
+    peer.querySelector(".boot-type-radio")?.classList.toggle("is-on", on);
+  }
+  syncSessionDialogMode();
+}
+
+// 远程主机台账 → 远程卡可用性：门闸未开 / 零可用主机保持禁用并如实徽标；有可用主机放开并填充下拉
+async function loadSessionRemoteHosts() {
+  const card = elements["session-step-type"].querySelector('[data-session-type="remote"]');
+  const badge = elements["session-remote-badge"];
+  const select = elements["session-remote-host"];
+  if (!card || !badge || !select) return;
+  const block = (text) => {
+    state.sessionRemoteHosts = [];
+    card.disabled = true;
+    badge.hidden = false;
+    badge.textContent = text;
+    if (state.sessionDialogType === "remote") selectSessionDialogType("local");
+  };
+  try {
+    const hosts = (await request("/api/ssh/hosts"))?.hosts ?? [];
+    const usable = hosts.filter((host) => host.enabled !== false);
+    if (!usable.length) {
+      block(hosts.length ? "已全部停用" : "无可用连接");
+      return;
+    }
+    state.sessionRemoteHosts = usable;
+    card.disabled = false;
+    badge.hidden = true;
+    select.innerHTML = usable
+      .map((host) => `<option value="${escapeHtml(host.id)}">${escapeHtml(host.name)} · ${escapeHtml(`${host.user}@${host.host}:${host.port}`)}</option>`)
+      .join("");
+  } catch (error) {
+    block(/REMOTE_GATE/.test(error?.message || "") ? "门闸未开放" : "加载失败");
+  }
+}
+
+// 模式感知：第二步字段组、必填、标题与提交文案如实跟随（远程 = 新建远程项目登记，不假装远程 agent）
+function syncSessionDialogMode() {
+  const remote = state.sessionDialogType === "remote";
+  elements["session-local-fields"].hidden = remote;
+  elements["session-remote-fields"].hidden = !remote;
+  elements["session-cwd-input"].required = !remote;
+  elements["session-dialog-title"].textContent = remote ? "新建远程项目" : "创建项目";
+  elements["session-submit-button"].textContent = remote ? "添加项目" : "开始新会话";
+  // 进入远程第二步即开始目录浏览（loadRemoteBrowser 内部按 hostId+path 去重，重复触发幂等）
+  if (remote && !elements["session-step-info"].hidden) void loadRemoteBrowser();
+}
+
+// ===== 远程项目：SFTP 目录浏览（源文件夹选择器，参考 Codex「新建远程项目」） =====
+function sessionRemoteHostSelected() {
+  const hostId = elements["session-remote-host"]?.value;
+  return (state.sessionRemoteHosts ?? []).find((entry) => entry.id === hostId) ?? null;
+}
+
+function remotePathJoin(base, name) {
+  return `${String(base || "/").replace(/\/+$/, "")}/${name}`;
+}
+
+function remotePathParent(path) {
+  const trimmed = String(path || "/").replace(/\/+$/, "");
+  const index = trimmed.lastIndexOf("/");
+  return index <= 0 ? "/" : trimmed.slice(0, index);
+}
+
+// 远程项目名默认取目录名；用户手改过（touched）就不覆盖
+function syncRemoteNameFromPath(force = false) {
+  const input = elements["session-remote-name"];
+  if (!input) return;
+  if (!force && input.dataset.touched === "1") return;
+  const value = elements["session-remote-path"].value.trim();
+  input.value = value ? String(value).replace(/\/+$/, "").split("/").pop() || "" : "";
+}
+
+async function loadRemoteBrowser({ force = false } = {}) {
+  const host = sessionRemoteHostSelected();
+  const browser = elements["session-remote-browser"];
+  if (!host || !browser) return;
+  const pathInput = elements["session-remote-path"];
+  let path = pathInput.value.trim();
+  if (!path) {
+    path = `/home/${host.user}`; // 与 ssh.mjs 围栏默认 home 同源
+    pathInput.value = path;
+  }
+  const key = `${host.id}:${path}`;
+  const browse = (state.sessionRemoteBrowse ??= { key: "", items: [], loading: false, error: null });
+  if (!force && browse.key === key && (browse.loading || browse.error || browse.items.length)) {
+    renderRemoteBrowser();
+    return;
+  }
+  browse.key = key;
+  browse.loading = true;
+  browse.error = null;
+  renderRemoteBrowser();
+  try {
+    const result = await request(`/api/ssh/hosts/${encodeURIComponent(host.id)}/sftp/list?path=${encodeURIComponent(path)}`);
+    if (browse.key !== key) return; // 等待期间目标已变，丢弃过期响应
+    browse.items = (result?.items ?? [])
+      .filter((item) => item.isDirectory)
+      .sort((a, b) => a.name.localeCompare(b.name));
+    browse.error = null;
+  } catch (error) {
+    if (browse.key !== key) return;
+    browse.items = [];
+    browse.error = /REMOTE_GATE/.test(error?.message || "")
+      ? "SFTP 门闸未开放，目录浏览不可用——可手动输入路径直接登记。"
+      : `列目录失败：${error.message}（可手动输入路径直接登记）`;
+  } finally {
+    if (browse.key === key) {
+      browse.loading = false;
+      renderRemoteBrowser();
+    }
+  }
+}
+
+function renderRemoteBrowser() {
+  const browser = elements["session-remote-browser"];
+  const browse = state.sessionRemoteBrowse;
+  if (!browser || !browse) return;
+  if (browse.loading) {
+    browser.innerHTML = `<p class="remote-browser-tip">正在列目录…</p>`;
+    return;
+  }
+  if (browse.error) {
+    browser.innerHTML = `<p class="remote-browser-tip is-error">${escapeHtml(browse.error)}</p>`;
+    return;
+  }
+  browser.innerHTML = browse.items.length
+    ? browse.items.map((item) => `<button type="button" class="remote-browser-item" data-remote-cd="${escapeHtml(item.name)}"><svg class="icon lucide" aria-hidden="true"><use href="#lucide-folder"></use></svg><span>${escapeHtml(item.name)}</span></button>`).join("")
+    : `<p class="remote-browser-tip">该目录下没有子目录——可直接登记当前路径。</p>`;
+}
+
+// 源文件夹选择区：地址存在显示路径实线卡，否则虚线「添加可读取和编辑的文件夹」
+function renderSessionDirpick() {
+  const area = elements["session-dirpick"];
+  if (!area) return;
+  const value = elements["session-cwd-input"].value.trim();
+  area.classList.toggle("has-dir", Boolean(value));
+  area.innerHTML = value
+    ? `<svg class="icon lucide" aria-hidden="true"><use href="#lucide-folder"></use></svg><code>${escapeHtml(value)}</code>`
+    : `<svg class="icon lucide" aria-hidden="true"><use href="#lucide-folder-open"></use></svg><span>添加可读取和编辑的文件夹</span>`;
+}
+
+// 项目名称默认取目录名；用户手改过（touched）就不覆盖
+function syncSessionNameFromCwd(force = false) {
+  const input = elements["session-name-input"];
+  if (!input) return;
+  if (!force && input.dataset.touched === "1") return;
+  const value = elements["session-cwd-input"].value.trim();
+  input.value = value ? String(value).replace(/[\\/]+$/, "").split(/[\\/]/).pop() || "" : "";
+}
+
 function confirmSessionDialog(event) {
   event.preventDefault();
+  if (state.sessionDialogType === "remote") {
+    void confirmRemoteSessionDialog();
+    return;
+  }
   const value = elements["session-cwd-input"].value.trim();
   if (!value) {
     toast("项目地址必填", "error");
     return;
   }
   state.pendingCwd = value;
+  state.pendingRemote = null; // 对话框选的是本地目录——与远程位置互斥
   const existing = matchExistingProject(value);
+  const pending = existing ? null : addPendingProject(value); // 新目录：项目立刻上树，不等第一段对话落盘
+  if (pending) {
+    // 项目名称（新目录生效）：默认取目录名，用户改过才写显示名 pref
+    const name = elements["session-name-input"].value.trim();
+    if (name && name !== pending.label) void updateProjectPref(pending, { name });
+  }
   elements["session-dialog"].close();
-  // 开新会话：退出续聊模式，胶囊回新任务形态并带地址徽标
+  // 开新会话：退出续聊模式，胶囊回新任务形态并带地址徽标；会话区弹 agent 徽标选择器
   state.selectedRunId = null;
+  state.selectionClearedByUser = true;
+  state.activeTabKey = null;
+  persistTabs();
+  renderTabs();
+  state.agentPickerOpen = true;
   renderRuns();
   toast(existing ? `新会话将归属项目「${existing.label}」` : "新会话将在该地址创建新项目", "success");
   elements["task-input"].focus({ preventScroll: true });
+}
+
+// 远程流：POST /api/remote-projects 登记（不连网）→ 关框刷新项目树，远程项目立刻上树
+async function confirmRemoteSessionDialog() {
+  const hostId = elements["session-remote-host"].value;
+  const host = (state.sessionRemoteHosts ?? []).find((entry) => entry.id === hostId);
+  if (!host) {
+    toast("请选择远程主机", "error");
+    return;
+  }
+  const path = elements["session-remote-path"].value.trim();
+  if (!path) {
+    toast("源文件夹必填——从目录浏览点选或手动输入", "error");
+    return;
+  }
+  const nameInput = elements["session-remote-name"];
+  const name = nameInput.value.trim() || String(path).replace(/\/+$/, "").split("/").pop() || path;
+  const submit = elements["session-submit-button"];
+  submit.disabled = true;
+  try {
+    const result = await request("/api/remote-projects", { method: "POST", body: JSON.stringify({ name, hostId, path }) });
+    elements["session-dialog"].close();
+    nameInput.value = "";
+    nameInput.dataset.touched = "";
+    state.sessionRemoteBrowse = null; // 下次打开按新台账重来
+    await loadProjects();
+    toast(`已登记远程项目「${result?.project?.name ?? name}」（${host.name}）`, "success");
+  } catch (error) {
+    toast(`登记远程项目失败:${error.message}`, "error");
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+// 远程项目 → SSH 终端：复用 pty ssh 面（服务端 spawn 本机 OpenSSH，认证/指纹吃系统 known_hosts）
+async function openRemoteTerminalForProject(project) {
+  const remote = project?.remote;
+  if (!remote) return;
+  try {
+    const result = await request("/api/pty", {
+      method: "POST",
+      body: JSON.stringify({ ssh: { hostId: remote.hostId, path: remote.path }, title: `${project.label} · ${remote.path}` }),
+    });
+    // 已挂载的终端面板直接 attach 新页签；未挂载的由视图可见时 mount 全量列出
+    window.dispatchEvent(new CustomEvent("forge:pty-session-created", { detail: { session: result?.session } }));
+    setView("terminal");
+    toast(`已打开「${project.label}」的远程终端`, "success");
+  } catch (error) {
+    toast(`打开远程终端失败:${error.message}`, "error");
+  }
+}
+
+// 乐观项目：选定目录即上树（LO 拍板：选目录→项目立即出现，不等对话开始）。
+// 团队从属=当前 composer 选中团队（预写 pref，扫描项目出现后同路径自动让位、从属已就位）；
+// 曾被移除（hidden）的同路径项目重新选用时顺手取消隐藏——否则树里看不见
+function addPendingProject(path) {
+  const key = normalizePathKey(path);
+  if (!key || state.pendingProjects.some((project) => normalizePathKey(project.path) === key)) return;
+  const label = String(path).replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path;
+  const pending = {
+    id: `pending-${key}`,
+    path,
+    label,
+    sessionCount: 0,
+    sessions: [],
+    pending: true, // 乐观标记：渲染「新」徽标 + 「近期」过滤豁免
+  };
+  state.pendingProjects.push(pending);
+  persistPendingProjects();
+  void updateProjectPref(pending, { teamId: state.selectedTeamId || defaultTeamId(), hidden: false });
+  renderProjects();
+  return pending;
+}
+
+// 任务创建时的自动归属（严格归属制）：只填未归属——显式归属其他团队的项目不抢，
+// 避免"在 A 团队建了个任务，B 团队的项目被静默迁走"。归属是创建动作的如实记录，不是猜测。
+function assignCwdProjectToTeam(cwd, teamId) {
+  const key = normalizePathKey(cwd);
+  if (!key || !teamById(teamId)) return;
+  const project = matchExistingProject(cwd)
+    ?? state.pendingProjects.find((item) => normalizePathKey(item.path) === key);
+  if (!project || explicitProjectTeamId(project) !== null) return;
+  void updateProjectPref(project, { teamId });
+}
+
+// ===== 多 CLI 团队脉搏（页头 + 全局状态栏共用）=====
+function teamPulseMembers() {
+  const team = currentTeam() || teamById(state.selectedTeamId) || state.teams.find((item) => item.builtin);
+  const members = team?.members?.length
+    ? team.members
+    : ["claude-fable", "codex-technical", "grok-search", "kimi-frontend", "pi-resident"];
+  const healthList = Array.isArray(state.health?.components)
+    ? state.health.components
+    : Array.isArray(state.components) ? state.components : [];
+  const healthById = new Map(healthList.map((item) => [String(item.id ?? item.name ?? "").toLowerCase(), item]));
+  const run = selectedRun();
+  const activeAgents = new Set((run?.turns || []).map((turn) => turn.agentId).filter(Boolean));
+  if (run?.startAgentId) activeAgents.add(run.startAgentId);
+  if (run?.coordinatorId) activeAgents.add(run.coordinatorId);
+  return members.map((id) => {
+    const cli = agentCli(id);
+    const health = healthById.get(String(id).toLowerCase())
+      || healthById.get(String(cli || "").toLowerCase())
+      || null;
+    let tone = "unknown";
+    if (health?.status === "ok" || health?.status === "healthy" || health?.available === true) tone = "ok";
+    else if (health?.status === "error" || health?.status === "failed" || health?.available === false) tone = "error";
+    else if (health?.status === "warning" || health?.status === "degraded" || health?.status === "dormant") tone = "warn";
+    if (activeAgents.has(id) && ACTIVE_RUN_STATES.has(run?.status)) tone = "live";
+    return {
+      id,
+      label: agentLabel(id),
+      cli: cliLabel(cli),
+      logo: cli ? cliIconMarkup(cli, "cli-logo") : "",
+      tone,
+      active: activeAgents.has(id),
+      isLeader: id === (team?.coordinator || members[0]),
+    };
+  });
+}
+
+function renderTeamPulse() {
+  const members = teamPulseMembers();
+  const chips = members.map((member) => `
+    <span class="team-pulse-chip is-${escapeHtml(member.tone)}${member.active ? " is-active" : ""}${member.isLeader ? " is-leader" : ""} is-agent-${agentSlug(member.id)}"
+      title="${escapeHtml(`${member.label} · ${member.cli || "—"}${member.isLeader ? " · leader" : ""}${member.active ? " · 本会话参与" : ""}`)}">
+      ${member.logo || `<span class="team-pulse-fallback">${escapeHtml((AGENT_SHORT[member.id] || member.label).slice(0, 2))}</span>`}
+      <span class="team-pulse-name">${escapeHtml(AGENT_SHORT[member.id] || member.label.slice(0, 2))}</span>
+    </span>`).join("");
+  const live = members.filter((item) => item.tone === "live" || item.tone === "ok").length;
+  const workbench = byId("workbench-team-pulse");
+  if (workbench) {
+    workbench.innerHTML = chips
+      ? `${chips}<span class="team-pulse-count" title="在线/席位">${live}/${members.length}</span>`
+      : `<span class="subtle">团队加载中</span>`;
+  }
+  const global = byId("global-team-pulse");
+  if (global) {
+    global.innerHTML = `${chips}<span class="team-pulse-count">${live}/${members.length}</span>`;
+    global.title = members.map((item) => `${item.label}: ${item.tone}`).join(" · ");
+  }
 }
 
 // ===== ccline 式状态条：模型 · 📁目录 · 用量 · 团队（数据取真实 run 回执） =====
@@ -2072,20 +10994,41 @@ function renderStatusline() {
   // 目录：续聊=run 地址；新任务=待选地址；默认控制面根
   const cwd = run?.cwd || state.pendingCwd || "I:\\514claude\\514cc";
   const cwdShort = String(cwd).replace(/[\\/]+$/, "").split(/[\\/]/).pop() || cwd;
-  // 用量：选中 run 各轮累计 token（对 200k 上下文的百分比）+ 成本
+  // 用量：选中 run 各轮累计 token（对 200k 上下文的百分比）+ 成本（后端 costUsdTotal 权威值优先）
   const totalTokens = (run?.turns || []).reduce((sum, turn) => sum + (Number(turn.tokens) || 0), 0);
-  const totalCost = (run?.turns || []).reduce((sum, turn) => sum + (Number(turn.costUsd) || 0), 0);
+  const totalCost = Number(run?.costUsdTotal) || (run?.turns || []).reduce((sum, turn) => sum + (Number(turn.costUsd) || 0), 0);
   const tokensText = totalTokens
     ? `${((totalTokens / 200000) * 100).toFixed(1)}% · ${(totalTokens / 1000).toFixed(1)}k tokens${totalCost ? ` · $${totalCost.toFixed(2)}` : ""}`
     : "0 tokens";
   const team = currentTeam();
-  bar.innerHTML = [
-    `<span class="sl-seg"><span class="sl-icon">◆</span>${escapeHtml(modelShort)}</span>`,
-    `<span class="sl-seg"><span class="sl-icon">📁</span>${escapeHtml(cwdShort)}</span>`,
-    `<span class="sl-seg"><span class="sl-icon">∑</span><span class="sl-dim">${escapeHtml(tokensText)}</span></span>`,
-    `<span class="sl-seg"><span class="sl-icon">◈</span>${escapeHtml(team?.name ?? "514cc")}</span>`,
-  ].join("");
-  bar.title = `模型 ${model} · 地址 ${cwd} · 团队 ${team?.name ?? "514cc"}`;
+  const memberCount = team?.members?.length || teamPulseMembers().length;
+  const permission = run?.permissionMode || elements["task-permission"]?.value || "plan";
+  // 2026-08-09 侧栏工程波⑤：值统一包 .sl-text 供 CSS 省略；团队段独占一行（全量信息本就在 bar.title）
+  const seg = (icon, text, cls = "") =>
+    `<span class="sl-seg${cls}"><span class="sl-icon">${lucideIcon(icon)}</span><span class="sl-text">${escapeHtml(text)}</span></span>`;
+  const segments = [
+    seg("cpu", modelShort, " sl-seg-model"),
+    seg("folder", cwdShort),
+    `<span class="sl-seg sl-seg-tokens"><span class="sl-icon">${lucideIcon("gauge")}</span><span class="sl-text sl-dim">${escapeHtml(tokensText)}</span></span>`,
+    seg("users", `${team?.name ?? "514cc"} · ${memberCount} CLI`, " sl-seg-team"),
+    seg("shield", permission, " sl-seg-perm"),
+  ];
+  if (run?.worktreePath) {
+    segments.push(seg("git-branch", String(run.worktreePath).split(/[\\/]/).pop(), " sl-seg-worktree"));
+  }
+  if (state.projectPrefsStatus === "loading") {
+    segments.push(`<span class="sl-seg" data-project-prefs-lock><span class="sl-icon">${lucideIcon("refresh-cw")}</span><span class="sl-text">偏好读取中</span></span>`);
+  } else if (state.projectPrefsStatus === "error") {
+    segments.push(`<span class="sl-seg" data-project-prefs-lock><span class="sl-icon">${lucideIcon("shield")}</span><span class="sl-text">${projectPrefsPendingSave ? "偏好写入锁定 · 本地修改待重试" : "偏好写入锁定"}</span></span>`);
+  }
+  bar.innerHTML = segments.join("");
+  bar.dataset.projectPrefsStatus = state.projectPrefsStatus;
+  bar.title = [
+    `模型 ${model} · 地址 ${cwd} · 团队 ${team?.name ?? "514cc"} · 权限 ${permission}`,
+    run?.worktreePath ? `工作树 ${run.worktreePath}` : "",
+    state.projectPrefsStatus === "error" ? `项目偏好写入锁定：${state.projectPrefsError || "权威状态不可用"}` : "",
+  ].filter(Boolean).join("\n");
+  renderTeamPulse();
 }
 
 // ===== 协作台会话流增强：内联审批卡 / 恢复条 / 终态原因 =====
@@ -2162,19 +11105,26 @@ function approvalParamsMarkup(item) {
     : `<div class="approval-kv"><span>参数</span><code>无公开参数</code></div>`;
 }
 
-// 内联审批卡：方法 + 结构化参数 + 截断哈希 + 到期倒计时 + 批准/拒绝（哈希随决议回传校验，故跳过二次弹窗）
+// 内联审批卡只表示一次待决动作。执行 Lease 由 Orchestrator 单独签发、持久化和查询。
 function approvalCardMarkup(item) {
   const method = String(item.method ?? "unknown");
   const broadPermission = method === "item/permissions/requestApproval"; // v1 不支持广域授权——与安全诊断页同口径禁批
+  const run = state.runs.find((entry) => entry.id === item.runId);
+  const scopeBits = [
+    run?.permissionMode ? `模式 ${permissionModeMeta(run.permissionMode, run.permissionMode).short}` : null,
+    run?.worktreePath ? "绑定隔离工作树" : run?.cwd ? "绑定会话 cwd" : "作用域：控制面策略",
+    item.agentId ? `Agent ${item.agentId}` : null,
+  ].filter(Boolean);
   return `
-    <article class="approval-inline">
+    <article class="approval-inline" data-stream-key="approval:${escapeHtml(item.id)}">
       <div class="approval-inline-head">
-        <strong>动作审批</strong>
+        <strong>动作审批 · 待处理</strong>
         <span class="approval-inline-method">${escapeHtml(method)}</span>
-        <span class="approval-inline-countdown">剩余 <time data-approval-expires="${escapeHtml(item.expiresAt ?? "")}">${approvalCountdownText(item.expiresAt)}</time></span>
+        <span class="approval-inline-countdown">审批窗口 <time data-approval-expires="${escapeHtml(item.expiresAt ?? "")}">${approvalCountdownText(item.expiresAt)}</time></span>
       </div>
+      <p class="lease-scope">${escapeHtml(scopeBits.join(" · "))}</p>
       ${approvalParamsMarkup(item)}
-      <div class="approval-inline-hash">动作哈希 <code title="${escapeHtml(item.actionSha256 ?? "")}">${escapeHtml(compactHash(item.actionSha256))}</code></div>
+      <div class="approval-inline-hash">动作哈希 <code title="${escapeHtml(item.actionSha256 ?? "")}">${escapeHtml(compactHash(item.actionSha256))}</code>（批准只释放当前请求；持续写权限仍由执行租约单独约束）</div>
       <div class="approval-inline-actions">
         <button class="button secondary" type="button" data-inline-approval-id="${escapeHtml(item.id)}" data-inline-approval-decision="deny">拒绝</button>
         <button class="button primary" type="button" data-inline-approval-id="${escapeHtml(item.id)}" data-inline-approval-decision="approve"${broadPermission ? " disabled title=\"v1 不支持广域权限授权\"" : ""}>批准</button>
@@ -2182,19 +11132,49 @@ function approvalCardMarkup(item) {
     </article>`;
 }
 
+function capabilityLeaseMarkup(lease, { inline = true } = {}) {
+  const status = String(lease?.status || "unknown");
+  const effective = lease?.gateOpen === true ? "active" : status === "active" ? "invalid" : status;
+  const statusText = {
+    active: "执行租约有效",
+    revoked: "执行租约已吊销",
+    expired: "执行租约已过期",
+    invalid: "执行租约绑定失效",
+  }[effective] || "执行租约状态未知";
+  const classes = inline ? "approval-inline capability-lease" : "approval-row capability-lease-row";
+  return `
+    <article class="${classes}" data-stream-key="lease:${escapeHtml(lease.id)}">
+      <div class="approval-inline-head">
+        <strong>${escapeHtml(statusText)}</strong>
+        <span class="approval-inline-method">${escapeHtml(lease.id)}</span>
+        <span class="approval-inline-countdown">到期 ${escapeHtml(formatDate(lease.expiresAt))}</span>
+      </div>
+      <p class="lease-scope">Run ${escapeHtml(lease.runId || "--")} · ${escapeHtml(lease.scope || "action-bound")} · approval ${escapeHtml(lease.approvalId || "未关联")}</p>
+      <div class="approval-inline-hash">动作哈希 <code title="${escapeHtml(lease.actionSha256 || "")}">${escapeHtml(compactHash(lease.actionSha256))}</code>${lease.invalidReason ? ` · ${escapeHtml(lease.invalidReason)}` : ""}</div>
+      ${status === "active" ? `<div class="approval-inline-actions"><button class="button secondary" type="button" data-lease-revoke-run="${escapeHtml(lease.runId)}">吊销执行租约</button></div>` : ""}
+    </article>`;
+}
+
 // 内联决议结果：approvalId → { runId, decision }——决议后卡片折叠为"已批准/已拒绝"一行留在会话流里
 const inlineApprovalOutcomes = new Map();
 
 function inlineApprovalsMarkup(run) {
-  const resolved = [...inlineApprovalOutcomes.values()]
-    .filter((entry) => entry.runId === run.id)
-    .map((entry) => {
-      const approved = entry.decision === "approve";
-      return `<div class="approval-resolved-line ${approved ? "is-approved" : "is-denied"}">${approved ? "✓ 已批准该动作" : "✕ 已拒绝该动作"}</div>`;
-    });
+  // 已决议按结果聚合：逐条堆叠会在多轮审批后把流尾刷成一列「已批准」（LO 2026-08-10）——
+  // 审计语义保留（次数 + 最近时间），拒绝单独一行（fail-closed 信号不折叠进批准里）
+  const outcomes = [...inlineApprovalOutcomes.values()].filter((entry) => entry.runId === run.id);
+  const resolved = ["approve", "deny"].map((decision) => {
+    const group = outcomes.filter((entry) => entry.decision === decision);
+    if (!group.length) return "";
+    const approved = decision === "approve";
+    const latest = group.map((entry) => entry.resolvedAt).filter(Boolean).sort().at(-1);
+    const countText = group.length > 1 ? ` ×${group.length}` : "";
+    const timeText = latest ? ` · 最近 ${escapeHtml(formatTime(latest))}` : "";
+    return `<div class="approval-resolved-line ${approved ? "is-approved" : "is-denied"}" data-stream-key="approval-result:${decision}:${escapeHtml(run.id)}">${approved ? `${lucideIcon("shield-check", "icon lucide")} 动作审批已批准${countText}` : `${lucideIcon("x", "icon lucide")} 动作审批已拒绝${countText}`}${timeText}</div>`;
+  });
+  const leases = state.leases.filter((lease) => lease.runId === run.id).map((lease) => capabilityLeaseMarkup(lease));
   // 等待审批（run build 授权）与轮中审批（codex command/file 请求）都挂在会话流末尾
   const pending = state.approvals.filter((item) => item.runId === run.id && (item.status ?? "pending") === "pending");
-  return [...resolved, ...pending.map(approvalCardMarkup)].join("");
+  return [...resolved, ...leases, ...pending.map(approvalCardMarkup)].join("");
 }
 
 // 内联审批决议：跳过 confirmAction 二次弹窗——actionSha256 随请求回传、服务端哈希校验已是防误触护栏
@@ -2204,19 +11184,53 @@ async function resolveInlineApproval(id, decision) {
   const buttons = [...document.querySelectorAll(`[data-inline-approval-id="${CSS.escape(id)}"]`)];
   buttons.forEach((button) => { button.disabled = true; });
   try {
-    await request(`${API.approvals}/${encodeURIComponent(id)}/resolve`, {
+    const result = await request(`${API.approvals}/${encodeURIComponent(id)}/resolve`, {
       method: "POST",
       body: { decision, actionSha256: item.actionSha256, actor: "control-center" },
     });
-    inlineApprovalOutcomes.set(id, { runId: item.runId, decision });
-    toast(decision === "approve" ? "动作已批准" : "动作已拒绝", decision === "approve" ? "success" : "warning");
-    appendDiagnostic(`内联审批 ${decision} ${id}`);
+    inlineApprovalOutcomes.set(id, {
+      runId: item.runId,
+      decision,
+      resolvedAt: new Date().toISOString(),
+    });
+    toast(
+      decision === "approve"
+        ? result?.lease?.id
+          ? `动作已批准，执行租约已签发 · ${String(result.lease.id).slice(0, 16)}`
+          : "动作已批准"
+        : "动作已拒绝",
+      decision === "approve" ? "success" : "warning",
+    );
+    appendDiagnostic(`内联审批 ${decision} ${id}${result?.lease?.id ? ` authoritativeLease=${result.lease.id}` : ""}`);
     await loadApprovals();
   } catch (error) {
     toast(error.message, "error");
     appendDiagnostic(`内联审批处理失败 ${id}: ${error.message}`, "error");
     buttons.forEach((button) => { button.disabled = false; });
     await loadApprovals().catch(() => {});
+  }
+}
+
+async function revokeCapabilityLease(runId) {
+  const confirmed = await confirmAction({
+    eyebrow: "执行权限",
+    title: "吊销此执行租约？",
+    rows: [["Run ID", runId], ["影响", "后续 workspace-write 派发将 fail-closed"]],
+    warning: "正在执行的原生 turn 不会被强制终止；吊销对下一次写派发生效。",
+    confirmLabel: "确认吊销",
+    danger: true,
+  });
+  if (!confirmed) return;
+  try {
+    await request(`${API.runs}/${encodeURIComponent(runId)}/lease/revoke`, {
+      method: "POST",
+      body: { reason: "operator-revoke", actor: "control-center" },
+    });
+    toast("执行租约已吊销", "warning");
+    await loadApprovals();
+  } catch (error) {
+    toast(error.message, "error");
+    appendDiagnostic(`执行租约吊销失败 ${runId}: ${error.message}`, "error");
   }
 }
 
@@ -2232,11 +11246,18 @@ function renderRecoveryBar(run) {
   }
   const note = String(run.recoveryNote ?? "").trim() || "上一轮原生会话提交状态不明确，自动重放已被阻止。";
   const acked = state.recoveryAckRunId === run.id;
+  // 对象 sessions 与 normalize 后的数组都支持
+  const sessionMap = Array.isArray(run.sessions)
+    ? Object.fromEntries(run.sessions.map((item) => [item.agentId || item.name, item.sessionId || item.id]).filter(([k, v]) => k && v))
+    : (run.sessions || {});
+  const hints = resumeHintsFromSessions(sessionMap);
+  const hintsHtml = resumeHintsMarkup(hints, { escapeHtml });
   bar.hidden = false;
   bar.innerHTML = `
     <span class="recovery-note">${escapeHtml(redact(note))}</span>
+    ${hintsHtml}
     ${acked
-      ? `<span class="recovery-acked">✓ 已确认——下次发送将自动继续</span>`
+      ? `<span class="recovery-acked">${lucideIcon("check", "icon lucide")} 已确认——下次发送将自动继续</span>`
       : `<button class="button secondary" type="button" data-recovery-ack>确认恢复并继续</button>`}`;
 }
 
@@ -2249,61 +11270,196 @@ function acknowledgeRecovery() {
   elements["task-input"].focus({ preventScroll: true });
 }
 
-// 终态原因：failed/cancelled 时把 run.error / run.recoveryNote 挂到会话流末尾（normalizeRun ...item 已透传）
+// 终态原因：failed/cancelled 时把 run.error / run.recoveryNote 挂到会话流末尾（normalizeRun ...item 已透传）。
+// 失败附"重新发起"——prompt 一键回填 composer 新任务模式，不用手动复制
 function runFailureMarkup(run) {
   if (!["failed", "cancelled", "canceled"].includes(run.status)) return "";
   const reasons = [...new Set([run.error, run.recoveryNote].map((text) => String(text ?? "").trim()).filter(Boolean))];
   if (!reasons.length) return "";
   const failed = run.status === "failed";
   return `
-    <div class="run-end-note ${failed ? "is-failed" : "is-cancelled"}">
+    <div class="run-end-note ${failed ? "is-failed" : "is-cancelled"}" data-stream-key="tail:failure">
       <strong>${failed ? "任务失败" : "任务已取消"}</strong>
       ${reasons.map((reason) => `<span>${escapeHtml(redact(reason))}</span>`).join("")}
+      ${failed ? `<button class="button secondary retry-run-button" type="button" data-retry-run="${escapeHtml(run.id)}">以同一任务重新发起</button>` : ""}
+      ${run.worktreePath ? "" : runDiffButtonMarkup(run)}
+    </div>
+    ${worktreeSettlementMarkup(run)}`;
+}
+
+// run 产物 diff（codeg 对标 P2）：有隔离工作树的终态 run 可查看产物比对——按钮挂完成/失败卡，
+// 面板挂会话流尾部；内容服务端已脱敏+截断（>200KB 标截断）
+function runDiffButtonMarkup(run) {
+  if (!run.worktreePath || !TERMINAL_RUN_STATES.has(run.status)) return "";
+  const open = state.runDiffView?.runId === run.id;
+  return `<button class="text-button" type="button" data-run-diff="${escapeHtml(run.id)}">${open ? "收起产物 diff" : "产物 diff"}</button>`;
+}
+
+// EX-07 结算入口（读模型）：终态 worktree 给出核对 / 续跑 / 复制路径 / git 命令，不静默 merge
+function worktreeSettlementMarkup(run) {
+  if (!run.worktreePath || !TERMINAL_RUN_STATES.has(run.status)) return "";
+  const leaf = String(run.worktreePath).split(/[\\/]/).pop();
+  const sessionMap = Array.isArray(run.sessions)
+    ? Object.fromEntries(run.sessions.map((item) => [item.agentId || item.name, item.sessionId || item.id]).filter(([k, v]) => k && v))
+    : (run.sessions || {});
+  const hintsHtml = resumeHintsMarkup(resumeHintsFromSessions(sessionMap), { escapeHtml });
+  const gitCommands = [
+    `cd "${run.worktreePath}"`,
+    "git status",
+    "git diff --stat",
+  ].join("\n");
+  return `
+    <div class="settlement-card" data-stream-key="tail:settlement">
+      <div class="settlement-head">
+        <strong>工作树结算</strong>
+        <span class="subtle" title="${escapeHtml(run.worktreePath)}">${lucideIcon("git-branch", "icon lucide")} ${escapeHtml(leaf)}</span>
+      </div>
+      <p class="settlement-copy">改动仍在隔离工作树。先核对 diff，再决定是否在新任务/新工作树中继续——不会自动合并到主目录。</p>
+      <div class="settlement-actions">
+        ${runDiffButtonMarkup(run)}
+        <button class="text-button" type="button" data-settlement-continue-worktree="${escapeHtml(run.id)}">在新工作树继续</button>
+        <button class="text-button" type="button" data-settlement-copy-path="${escapeHtml(run.worktreePath)}">复制路径</button>
+        <button class="text-button" type="button" data-settlement-copy-git="${escapeHtml(gitCommands)}">复制 git 命令</button>
+        <button class="text-button" type="button" data-settlement-reveal="${escapeHtml(run.worktreePath)}">打开资源管理器</button>
+      </div>
+      ${hintsHtml}
     </div>`;
 }
 
-// 胶囊 composer 双模式：run=null → 新任务；run → 续聊当前原生会话（一个输入框，语义随上下文切换）
-// ➕ 附件：路径清单并入 prompt 尾部（CLI 有读文件工具，Claude 自行读取；不上传内容本身）
-function withAttachments(prompt) {
-  if (!state.attachments.length) return prompt;
-  return `${prompt}\n\n[附件资料——请读取以下文件作为本任务的上下文]\n${state.attachments.map((path) => `- ${path}`).join("\n")}`;
+function runDiffPanelMarkup(run) {
+  const view = state.runDiffView;
+  if (!view || view.runId !== run.id) return "";
+  if (view.status === "loading") return `<div class="run-diff-panel" data-stream-key="tail:diff"><span class="subtle">正在读取工作树产物…</span></div>`;
+  if (view.status === "error") return `<div class="run-diff-panel is-error" data-stream-key="tail:diff"><span>产物 diff 读取失败：${escapeHtml(view.error)}</span></div>`;
+  const { data } = view;
+  const statusLines = String(data.status ?? "").trim();
+  const clean = !statusLines && !String(data.diff ?? "").trim();
+  return `
+    <div class="run-diff-panel" data-stream-key="tail:diff">
+      <div class="run-diff-head">
+        <strong>产物 diff</strong>
+        <span class="subtle" title="${escapeHtml(data.worktree)}">${lucideIcon("git-branch", "icon lucide")} ${escapeHtml(String(data.worktree ?? "").split(/[\\/]/).pop())} · 与主仓库 HEAD 比对${data.truncated ? " · 已截断" : ""}</span>
+      </div>
+      ${clean ? '<p class="subtle">工作树相对主仓库无改动——agent 未落盘或改动已在别处。</p>' : ""}
+      ${statusLines ? `<pre class="run-diff-status" aria-label="工作树状态">${escapeHtml(statusLines)}</pre>` : ""}
+      ${data.stat?.trim() ? `<pre class="run-diff-stat" aria-label="改动统计">${escapeHtml(data.stat.trim())}</pre>` : ""}
+      ${data.diff?.trim() ? `<pre class="run-diff-body" aria-label="diff 正文">${escapeHtml(data.diff)}</pre>` : ""}
+    </div>`;
 }
 
+// ask 回答卡：回答动作先切回提问成员标签，再聚焦输入框，保证标签与 wire recipient 一致。
+// 终态防残留：cancelled/failed 的旧 pendingAsk（后端修复前的历史 run）不再渲染回答卡
+function pendingAskMarkup(run) {
+  if (!run.pendingAsk || TERMINAL_RUN_STATES.has(run.status)) return "";
+  const question = redact(String(run.pendingAsk.text ?? ""));
+  const askerId = String(run.pendingAsk.from ?? "").trim();
+  const answerable = askerId && (run.teamMembers || []).includes(askerId);
+  return `
+    <div class="ask-card" data-stream-key="tail:ask">
+      <div class="ask-card-head">
+        <span class="ask-dot" aria-hidden="true"></span>
+        <strong>${escapeHtml(agentLabel(askerId))} 在等你拍板</strong>
+        <time>${escapeHtml(formatTime(run.pendingAsk.at))}</time>
+      </div>
+      <p class="ask-card-question">${escapeHtml(question)}</p>
+      ${answerable
+        ? `<button class="button primary" type="button" data-focus-answer="${escapeHtml(askerId)}">切到 ${escapeHtml(agentLabel(askerId))} 回答</button>`
+        : '<button class="button primary" type="button" disabled title="问题来源不属于当前团队">问题来源不可用</button>'}
+    </div>`;
+}
+
+// 完成收尾卡：succeeded 且有多轮协作时的收口统计——轮次/token/成本合计 + 参与成员。
+// 最终结论本身就是流里最后一条 assistant 消息，卡片只做"确认收口"不重复正文
+function runCompletionMarkup(run) {
+  if (!["succeeded", "completed", "complete"].includes(run.status)) return "";
+  const turns = run.turns ?? [];
+  if (!turns.length) return "";
+  const totalTokens = turns.reduce((sum, turn) => sum + (Number(turn.tokens) || 0), 0);
+  const totalCost = Number(run.costUsdTotal) || turns.reduce((sum, turn) => sum + (Number(turn.costUsd) || 0), 0);
+  const agents = [...new Set(turns.map((turn) => turn.agentId).filter(Boolean))].map((id) => agentLabel(id));
+  const parts = [`${turns.length} 轮协作`, agents.join(" · ")];
+  if (totalTokens) parts.push(totalTokens >= 1000 ? `${(totalTokens / 1000).toFixed(1)}k tokens` : `${totalTokens} tokens`);
+  if (totalCost) parts.push(`$${totalCost.toFixed(2)}`);
+  return `
+    <div class="run-end-note is-succeeded" data-stream-key="tail:completion">
+      <strong>${lucideIcon("check", "icon lucide")} 任务完成</strong>
+      <span>${escapeHtml(parts.filter(Boolean).join(" · "))}</span>
+      ${run.worktreePath ? "" : runDiffButtonMarkup(run)}
+    </div>
+    ${worktreeSettlementMarkup(run)}`;
+}
+
+// 失败任务重新发起：prompt 回填 composer 并切到新任务模式（不自动提交——LO 可先改再发）
+function retryRun(id) {
+  const run = state.runs.find((item) => item.id === id);
+  if (!run?.prompt) return;
+  state.selectedRunId = null;
+  state.selectionClearedByUser = true;
+  state.sessionPreview = null;
+  elements["task-input"].value = run.prompt;
+  renderRuns();
+  elements["task-input"].focus({ preventScroll: true });
+  toast("任务内容已回填，确认后发送", "info");
+}
+
+// 胶囊 composer 双模式：run=null → 新任务；run → 续聊当前原生会话（一个输入框，语义随上下文切换）
 function renderAttachments() {
   const box = elements["attach-chips"];
   box.hidden = !state.attachments.length;
   box.innerHTML = state.attachments
     .map((path, index) => {
       const name = String(path).replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path;
-      return `<span class="attach-chip" title="${escapeHtml(path)}">📄 ${escapeHtml(name)}<button type="button" data-detach="${index}" aria-label="移除附件 ${escapeHtml(name)}">×</button></span>`;
+      return `<span class="attach-chip" title="${escapeHtml(path)}">${lucideIcon("paperclip")}<span>${escapeHtml(name)}</span><button type="button" data-detach="${index}" aria-label="移除附件 ${escapeHtml(name)}">${lucideIcon("x")}</button></span>`;
     })
     .join("");
+  workbenchEnvironmentPanel?.refreshLocal?.();
 }
 
 function setComposerMode(run, { waitingApproval = false } = {}) {
   const continuing = Boolean(run);
+  // v4.0 Forge：会话活跃态挂到表单——workbench.css 据此在 composer 外圈跑旋转 conic 环（focus-within 时隐去）
+  elements["task-form"]?.classList.toggle("is-session-active", continuing && ACTIVE_RUN_STATES.has(run.status));
   elements["composer-mode-hint"].textContent = continuing ? "续聊当前会话" : "任务内容";
   elements["composer-new-task"].hidden = !continuing;
   // 项目地址徽标：新任务模式显示当前会话地址（点击可换）；续聊模式显示所属 run 的地址（只读信息）
+  // v41：远程位置（globe + 主机 · 路径）优先于本地 cwd 展示——两者互斥（captureComposerConfig 同口径）
+  const remoteShown = continuing ? run.remote : state.pendingRemote;
   const cwdShown = continuing ? run.cwd : state.pendingCwd;
-  elements["composer-cwd"].hidden = !cwdShown;
-  if (cwdShown) {
+  elements["composer-cwd"].hidden = !cwdShown && !remoteShown;
+  if (remoteShown) {
+    const short = String(remoteShown.path).replace(/[\\/]+$/, "").split(/[\\/]/).pop() || remoteShown.path;
+    elements["composer-cwd"].innerHTML = `${lucideIcon("globe", "icon lucide")} <span>${escapeHtml(short)}</span>`;
+    elements["composer-cwd"].title = `远程项目：${escapeHtml(remoteShown.hostName || remoteShown.hostId)} · ${remoteShown.path}${continuing ? "" : "（点击更换）"}`;
+    elements["composer-cwd"].disabled = continuing;
+  } else if (cwdShown) {
     const short = String(cwdShown).replace(/[\\/]+$/, "").split(/[\\/]/).pop() || cwdShown;
-    elements["composer-cwd"].textContent = `📁 ${short}`;
+    elements["composer-cwd"].innerHTML = `${lucideIcon("folder", "icon lucide")} <span>${escapeHtml(short)}</span>`;
     elements["composer-cwd"].title = `会话项目地址：${cwdShown}${continuing ? "" : "（点击更换）"}`;
     elements["composer-cwd"].disabled = continuing;
   }
-  elements["task-model-pick"].hidden = continuing; // /model 只在新任务时可选（run 已固化 modelOverride）
-  elements["task-effort-pick"].hidden = continuing; // /effort 同理（run 已固化 effortOverride，续聊显示会误导）
-  elements["task-permission-pick"].hidden = continuing; // 权限同理（run 已固化，Build 升权走审批门不走续聊）
-  elements["followup-agent-pick"].hidden = !continuing;
-  // 轮间插话可用性前置告知：run 活跃时发送不打断当前轮，排队到轮边界送达（后端 pendingSteer FIFO）
-  const steering = continuing && ACTIVE_RUN_STATES.has(run.status);
-  elements["task-input"].placeholder = steering
-    ? "会话进行中——发送将作为轮间插话，当前轮结束后送达"
-    : continuing ? "补充要求、质疑证据或继续执行" : "描述要规划、实现、审查或调研的目标";
+  syncComposerControlVisibility(); // 续聊：模型/Effort/权限均可热调（权限限白名单）；新任务按当前目标 Adapter 支持面显示
+  // 团队在续聊时冻结；直接收件人始终由成员目标标签决定。
+  elements["composer-team"].disabled = continuing;
+  elements["start-agent"].disabled = continuing;
+  byId("composer-team-pick")?.setAttribute("title", continuing ? "会话所属团队已固化；上方目标标签仍可切换直接收件人" : "本次会话所属团队与能力边界");
+  // 轮间插话可用性前置告知：run 活跃时发送不打断当前轮，排队到轮边界送达（后端 pendingSteer FIFO）。
+  // ask 挂起优先：团队在等 LO 回答——placeholder 直接把问题递到手边
+  const waitingAnswer = continuing && Boolean(run.pendingAsk);
+  const steering = continuing && !waitingAnswer && ACTIVE_RUN_STATES.has(run.status);
+  const target = activeComposerTarget();
+  const targetName = target.memberId ? agentLabel(target.memberId) : "团队主脑";
+  const answeringAsk = waitingAnswer && run.pendingAsk.from === target.memberId;
+  elements["task-input"].placeholder = answeringAsk
+    ? `回答 ${targetName}：${String(run.pendingAsk.text || "").slice(0, 80)}`
+    : steering
+      ? "会话进行中——发送将作为轮间插话，当前轮结束后送达"
+      : continuing
+        ? `直接发送给 ${targetName}：补充要求、质疑证据或继续执行`
+        : `直接交给 ${targetName} 执行`;
   elements["task-input"].disabled = waitingApproval;
-  elements["submit-task-button"].disabled = waitingApproval;
+  syncSubmitButtonMode(); // 发送/停止双态（LO 2026-08-10）：run 活跃 + 空输入 = 停止键
+  // 审批挂起时输入禁用，但停止键必须可用——它是此时唯一有意义的动作
+  elements["submit-task-button"].disabled = waitingApproval && elements["submit-task-button"].dataset.mode !== "stop";
   elements["followup-agent"].disabled = waitingApproval;
   if (continuing && elements["followup-agent"].dataset.runId !== run.id) {
     // 发送给下拉按团队成员过滤（服务端已强制隔离）+ 预选主脑；仅切 run 时重建
@@ -2313,21 +11469,508 @@ function setComposerMode(run, { waitingApproval = false } = {}) {
     elements["followup-agent"].innerHTML = members
       .map((id) => `<option value="${escapeHtml(id)}">${escapeHtml(agentLabel(id))}${id === run.coordinatorId ? "（主脑）" : ""}</option>`)
       .join("");
-    elements["followup-agent"].value = run.coordinatorId || members[0];
     elements["followup-agent"].dataset.runId = run.id;
+  }
+  syncComposerTargetUi(target);
+}
+
+// 发送/停止双态键（LO 2026-08-10，对齐官方行为）：续聊 run 活跃 + 输入为空 → 停止键
+// （点击级联取消，走 cancelSelectedRun 既有确认弹窗）；有输入 → 发送键——
+// 轮间插话能力不被停止键吃掉。终态/新任务/预览态恒为发送键。
+function syncSubmitButtonMode() {
+  const button = elements["submit-task-button"];
+  if (!button) return;
+  const run = selectedRun();
+  const running = Boolean(run) && !state.sessionPreview && ACTIVE_RUN_STATES.has(run.status);
+  const hasInput = Boolean(elements["task-input"]?.value.trim());
+  const stopMode = running && !hasInput;
+  const mode = stopMode ? "stop" : "send";
+  if (button.dataset.mode !== mode) {
+    button.dataset.mode = mode;
+    button.classList.toggle("is-stop", stopMode);
+    // 停止态用实心方块（官方同款，16px 下一眼即「停止」）——circle-stop 描边小尺寸像 ⊙ 被误读
+    button.innerHTML = stopMode
+      ? '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor" /></svg>'
+      : '<svg class="icon lucide"><use href="#lucide-arrow-up"></use></svg>';
+  }
+  const label = stopMode ? "停止当前任务（级联中止本 run 全部 CLI 子进程）" : "发起协作";
+  button.title = label;
+  button.setAttribute("aria-label", label);
+  // 停止模式必须跳过原生 required 校验（task-input 必填）：空输入正是停止键的使用场景，
+  // 不挂 formnovalidate 浏览器会先弹「请填写此字段」，点击根本到不了 createRun 的停止拦截
+  button.toggleAttribute("formnovalidate", stopMode);
+}
+
+const STREAM_FOCUSABLE_SELECTOR = [
+  "a[href]",
+  "button:not([disabled])",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  "summary",
+  '[tabindex]:not([tabindex="-1"])',
+].join(",");
+
+// 会话正文来自本地 CLI/event store，单条事件可接近 16 MiB。正文超过显示预算时只挂
+// 有界元数据；绝不能为了“截断后显示”先对全文做 redact/Markdown/escape。
+const INLINE_MESSAGE_TEXT_LIMIT = 32 * 1024;
+const INLINE_TOOL_RESULT_TEXT_LIMIT = 32 * 1024;
+const INLINE_TOOL_INPUT_TEXT_LIMIT = 8 * 1024;
+const INLINE_STRUCTURED_ITEM_LIMIT = 24;
+const CONVERSATION_SYNC_SOURCE_BUDGET = 48 * 1024;
+const CONVERSATION_BATCH_MAX_ITEMS = 8;
+const GLOBAL_EVENT_MAX_COUNT = 160;
+const GLOBAL_EVENT_MAX_BYTES = 40 * 1024 * 1024;
+const NORMALIZED_EVENT_FIXED_OVERHEAD = 1024;
+const globalEventBytes = new WeakMap();
+let globalEventResidentBytes = 0;
+
+function yieldToMainThread() {
+  if (typeof window.scheduler?.yield === "function") return window.scheduler.yield();
+  if (typeof window.MessageChannel === "function") {
+    return new Promise((resolveYield) => {
+      const channel = new window.MessageChannel();
+      channel.port1.onmessage = () => {
+        channel.port1.close();
+        channel.port2.close();
+        resolveYield();
+      };
+      channel.port2.postMessage(null);
+    });
+  }
+  return new Promise((resolveYield) => window.setTimeout(resolveYield, 0));
+}
+
+function payloadText(value) {
+  return typeof value === "string" ? value : String(value ?? "");
+}
+
+function declaredPayloadLength(value, declaredLength) {
+  const actual = payloadText(value).length;
+  const declared = Number(declaredLength);
+  return Number.isSafeInteger(declared) && declared >= actual ? declared : actual;
+}
+
+function normalizedEventSourceBytes(sourceCharacters) {
+  const characters = Number(sourceCharacters);
+  if (!Number.isFinite(characters) || characters <= 0) return 0;
+  // JS strings can require two bytes per code unit. The fixed allowance covers the normalized
+  // envelope, bounded summaries and object/property overhead without rescanning the full payload.
+  return Math.ceil(characters) * 2 + NORMALIZED_EVENT_FIXED_OVERHEAD;
+}
+
+function exactRenderSignature(parts) {
+  return parts.map((value) => {
+    const text = payloadText(value);
+    return `${text.length}:${text}`;
+  }).join("");
+}
+
+function messageRenderSignature(message) {
+  const kind = message?.kind ?? String(message?.role ?? "assistant").toLowerCase();
+  return exactRenderSignature([
+    message?.key,
+    kind,
+    message?.renderToken ?? renderTokenFor(message),
+    message?.textLength,
+    message?.toolsTotal,
+    message?.resultsTotal,
+  ]);
+}
+
+function messageRenderCost(message) {
+  const kind = message?.kind ?? String(message?.role ?? "assistant").toLowerCase();
+  if (kind === "tool-result") {
+    let cost = 0;
+    for (const result of (Array.isArray(message?.results) ? message.results : []).slice(0, INLINE_STRUCTURED_ITEM_LIMIT)) {
+      const length = declaredPayloadLength(result?.text, result?.textLength);
+      cost += length > INLINE_TOOL_RESULT_TEXT_LIMIT ? 256 : length;
+      if (cost > CONVERSATION_SYNC_SOURCE_BUDGET) break;
+    }
+    return cost;
+  }
+  const length = declaredPayloadLength(
+    message?.text ?? message?.content ?? message?.message ?? message?.summary,
+    message?.textLength,
+  );
+  return length > INLINE_MESSAGE_TEXT_LIMIT ? 256 : length;
+}
+
+function conversationRenderSignature(renderContext, messageWindow, leadingMarkup, tailMarkup) {
+  return exactRenderSignature([
+    renderContext,
+    `${messageWindow.start}:${messageWindow.end}:${messageWindow.total}`,
+    leadingMarkup,
+    tailMarkup,
+    ...messageWindow.visible.map(messageRenderSignature),
+  ]);
+}
+
+function streamEntryByKey(stream, key) {
+  if (!key) return null;
+  return [...stream.children].find((node) => node instanceof HTMLElement && node.dataset.streamKey === key) ?? null;
+}
+
+function captureConversationStreamState(stream) {
+  const atBottom = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 48;
+  const allDetails = [...stream.querySelectorAll("details")];
+  const openDetails = allDetails
+    .filter((detail) => detail.open)
+    .map((detail) => {
+      const entry = detail.closest("[data-stream-key]");
+      const entryDetails = entry ? [...entry.querySelectorAll("details")] : allDetails;
+      return {
+        entryKey: entry?.dataset.streamKey ?? "",
+        index: entryDetails.indexOf(detail),
+        absoluteIndex: allDetails.indexOf(detail),
+      };
+    });
+
+  const active = document.activeElement;
+  let focus = null;
+  if (active instanceof HTMLElement && active !== stream && stream.contains(active)) {
+    const entry = active.closest("[data-stream-key]");
+    const scope = entry ?? stream;
+    focus = {
+      entryKey: entry?.dataset.streamKey ?? "",
+      index: [...scope.querySelectorAll(STREAM_FOCUSABLE_SELECTOR)].indexOf(active),
+    };
+  }
+
+  let anchor = null;
+  if (!atBottom) {
+    const streamTop = stream.getBoundingClientRect().top;
+    const entry = [...stream.children]
+      .filter((node) => node instanceof HTMLElement && node.dataset.streamKey)
+      .find((node) => node.getBoundingClientRect().bottom > streamTop + 1);
+    if (entry) {
+      anchor = {
+        key: entry.dataset.streamKey,
+        offset: entry.getBoundingClientRect().top - streamTop,
+      };
+    }
+  }
+  return { atBottom, scrollTop: stream.scrollTop, openDetails, focus, anchor };
+}
+
+function restoreConversationStreamState(stream, snapshot) {
+  for (const saved of snapshot.openDetails) {
+    const entry = saved.entryKey ? streamEntryByKey(stream, saved.entryKey) : null;
+    if (saved.entryKey && !entry) continue;
+    const details = entry ? [...entry.querySelectorAll("details")] : [...stream.querySelectorAll("details")];
+    const detail = details[entry ? saved.index : saved.absoluteIndex];
+    if (detail) detail.open = true;
+  }
+
+  if (snapshot.focus) {
+    const entry = snapshot.focus.entryKey ? streamEntryByKey(stream, snapshot.focus.entryKey) : null;
+    const scope = snapshot.focus.entryKey ? entry : stream;
+    const target = scope ? [...scope.querySelectorAll(STREAM_FOCUSABLE_SELECTOR)][snapshot.focus.index] : null;
+    if (target instanceof HTMLElement) target.focus({ preventScroll: true });
+    else stream.focus({ preventScroll: true }); // 曾在流内聚焦时，重渲后绝不让焦点掉到 BODY
+  }
+
+  if (snapshot.atBottom) {
+    stream.scrollTop = stream.scrollHeight;
+    return;
+  }
+  const anchor = streamEntryByKey(stream, snapshot.anchor?.key);
+  if (anchor) {
+    const nextOffset = anchor.getBoundingClientRect().top - stream.getBoundingClientRect().top;
+    stream.scrollTop += nextOffset - snapshot.anchor.offset;
+    return;
+  }
+  stream.scrollTop = Math.min(snapshot.scrollTop, Math.max(0, stream.scrollHeight - stream.clientHeight));
+}
+
+// 消息分组、审批尾卡和终态卡之间有跨节点语义，贸然做局部 diff 容易留下旧 class/旧按钮。
+// 因此仍以单次模板提交为边界，但用稳定 data-stream-key 恢复用户交互状态；SSE 侧再保证每帧至多提交一次。
+const pendingConversationMarkup = new WeakMap();
+const committedConversationSignatures = new WeakMap();
+let conversationRenderGeneration = 0;
+
+function releaseConversationRenderOwnership(stream, ownership) {
+  ownership?.cleanupUserInteraction?.();
+  if (pendingConversationMarkup.get(stream) === ownership) pendingConversationMarkup.delete(stream);
+}
+
+// v4.0 Forge：本地富渲染后处理（rich-render 增强代码块/表格，纯本地无 CDN）。
+// 失败不阻断会话流——后处理是增强层，不是渲染正确性的前提。
+function postProcessRichContent(stream) {
+  if (!stream) return;
+  // CSP：团队星图轨道角度走 CSSOM 自定义属性（内联 style 被 style-src 拦截）
+  stream.querySelectorAll("[data-orbit-angle]").forEach((el) => {
+    el.style.setProperty("--orbit-angle", `${el.dataset.orbitAngle}deg`);
+  });
+  try {
+    // 新旧两版 rich-render 都兼容：新版同步后处理；旧版/异步实现返回 Promise 时吞掉拒绝
+    Promise.resolve(renderRichContent(stream)).catch((error) => {
+      console.warn("rich content post-process failed:", error);
+    });
+  } catch (error) {
+    console.warn("rich content post-process failed:", error);
   }
 }
 
-function renderSelectedRun() {
+function replaceConversationStream(markup, renderContext, { preserveState = true, renderSignature = markup } = {}) {
+  const stream = elements["conversation-stream"];
+  const pending = pendingConversationMarkup.get(stream);
+  if (pending?.renderContext === renderContext && pending.renderSignature === renderSignature) return false;
+  if (stream.dataset.renderContext === renderContext && committedConversationSignatures.get(stream) === renderSignature) return false;
+  const snapshot = preserveState && stream.dataset.renderContext === renderContext
+    ? pending?.renderContext === renderContext
+      ? pending.snapshot
+      : captureConversationStreamState(stream)
+    : null;
+  conversationRenderGeneration += 1; // 取消仍在分批挂载的旧历史首屏
+  releaseConversationRenderOwnership(stream, pending);
+  stream.removeAttribute("aria-busy");
+  stream.innerHTML = markup;
+  committedMarkup.delete(stream); // 旧实现可能在这里保留整份大字符串，切换后主动释放。
+  committedConversationSignatures.set(stream, renderSignature);
+  stream.dataset.renderContext = renderContext;
+  if (snapshot) restoreConversationStreamState(stream, snapshot);
+  else stream.scrollTop = preserveState ? stream.scrollHeight : Number.MAX_SAFE_INTEGER;
+  postProcessRichContent(stream);
+  return true;
+}
+
+async function replaceConversationStreamBatched({
+  renderSignature,
+  renderContext,
+  leadingMarkup,
+  messages,
+  tailMarkup,
+  preserveState = false,
+}) {
+  const stream = elements["conversation-stream"];
+  const pending = pendingConversationMarkup.get(stream);
+  if (pending?.renderContext === renderContext && pending.renderSignature === renderSignature) return false;
+  if (stream.dataset.renderContext === renderContext && committedConversationSignatures.get(stream) === renderSignature) return false;
+
+  const snapshot = preserveState && stream.dataset.renderContext === renderContext
+    ? pending?.renderContext === renderContext
+      ? pending.snapshot
+      : captureConversationStreamState(stream)
+    : null;
+  releaseConversationRenderOwnership(stream, pending);
+  const generation = ++conversationRenderGeneration;
+  const ownership = { generation, renderContext, renderSignature, snapshot, userInteracted: false };
+  const markUserInteraction = (event) => {
+    if (event.isTrusted) ownership.userInteracted = true;
+  };
+  const interactionEvents = ["pointerdown", "wheel", "touchstart", "keydown"];
+  for (const eventName of interactionEvents) stream.addEventListener(eventName, markUserInteraction, { capture: true, passive: eventName !== "keydown" });
+  ownership.cleanupUserInteraction = () => {
+    if (!ownership.cleanupUserInteraction) return;
+    for (const eventName of interactionEvents) stream.removeEventListener(eventName, markUserInteraction, { capture: true });
+    ownership.cleanupUserInteraction = null;
+  };
+  pendingConversationMarkup.set(stream, ownership);
+  committedMarkup.delete(stream);
+  committedConversationSignatures.delete(stream);
+  stream.dataset.renderContext = renderContext;
+  stream.setAttribute("aria-busy", "true");
+  stream.innerHTML = leadingMarkup;
+
+  const stillOwned = () => conversationRenderGeneration === generation
+    && pendingConversationMarkup.get(stream) === ownership
+    && stream.dataset.renderContext === renderContext;
+  // 异常兜底（LO 2026-08-10：审批后长期不输出的根因）：挂载中任何一步抛异常都会让
+  // aria-busy 永久停 true，SSE 驱动的 selectedRun 更新全被 busy 闸无限空转——刷新才恢复。
+  // 渲染异常必须清闸放行，让后续事件还能触发重渲；自殁路径（新挂载已接手）不清闸是有意的。
+  try {
+    for (let start = 0; start < messages.length;) {
+      if (!stillOwned()) {
+        releaseConversationRenderOwnership(stream, ownership);
+        return false;
+      }
+      let end = start;
+      let sourceCost = 0;
+      let chunkMarkup = "";
+      while (end < messages.length && end - start < CONVERSATION_BATCH_MAX_ITEMS) {
+        const nextCost = messageRenderCost(messages[end]);
+        if (end > start && sourceCost + nextCost > CONVERSATION_SYNC_SOURCE_BUDGET) break;
+        chunkMarkup += messageMarkup(messages[end], messages[end - 1]);
+        sourceCost += nextCost;
+        end += 1;
+      }
+      stream.insertAdjacentHTML("beforeend", chunkMarkup);
+      start = end;
+      if (start < messages.length) {
+        await yieldToMainThread();
+      }
+    }
+    if (!stillOwned()) {
+      releaseConversationRenderOwnership(stream, ownership);
+      return false;
+    }
+    if (tailMarkup) stream.insertAdjacentHTML("beforeend", tailMarkup);
+    committedConversationSignatures.set(stream, renderSignature);
+  } catch (error) {
+    releaseConversationRenderOwnership(stream, ownership);
+    stream.removeAttribute("aria-busy");
+    appendDiagnostic(`会话流分批挂载失败（已放开渲染闸）：${error?.message ?? error}`, "error");
+    console.error("conversation batched mount failed:", error);
+    return false;
+  }
+  releaseConversationRenderOwnership(stream, ownership);
+  stream.removeAttribute("aria-busy");
+  postProcessRichContent(stream);
+  if (snapshot && !ownership.userInteracted) restoreConversationStreamState(stream, snapshot);
+  else if (!ownership.userInteracted) {
+    // 最后一批挂载后再滚底，避免把首屏节点的解析、样式计算和滚动布局压进同一任务。
+    window.requestAnimationFrame(() => {
+      if (conversationRenderGeneration === generation && stream.dataset.renderContext === renderContext) {
+        stream.scrollTop = stream.scrollHeight;
+      }
+    });
+  }
+  return true;
+}
+
+const CONVERSATION_WINDOW_SIZE = 160;
+const conversationWindowStarts = new Map();
+
+function conversationWindowKey(runId, agentId = null) {
+  return `${runId}\u0000${agentId ?? "all"}`;
+}
+
+function conversationWindow(run, agentId, messages) {
+  const key = conversationWindowKey(run.id, agentId);
+  const total = messages.length;
+  const latestStart = Math.max(0, total - CONVERSATION_WINDOW_SIZE);
+  const storedStart = conversationWindowStarts.get(key);
+  const start = storedStart == null
+    ? latestStart
+    : Math.min(latestStart, Math.max(0, Number(storedStart) || 0));
+  const end = Math.min(total, start + CONVERSATION_WINDOW_SIZE);
+  return {
+    start,
+    end,
+    total,
+    hidden: start,
+    hiddenAfter: Math.max(0, total - end),
+    visible: messages.slice(start, end),
+  };
+}
+
+function freezeLatestConversationWindowForIncoming(event) {
+  if (
+    !eventAffectsConversation(event)
+    || state.view !== "workbench"
+    || state.sessionPreview
+    || event.runId !== state.selectedRunId
+  ) return;
+  const run = selectedRun();
+  if (!run) return;
+  const agentId = activeAgentId();
+  const incomingMessage = conversationMessageFromEvent(event);
+  if (!incomingMessage || !messageMatchesAgentPage(incomingMessage, agentId)) return;
+  const key = conversationWindowKey(run.id, agentId);
+  if (conversationWindowStarts.has(key)) return;
+
+  const stream = elements["conversation-stream"];
+  if (
+    stream.dataset.renderContext !== `run:${run.id}:${agentId ?? "all"}`
+    || stream.getAttribute("aria-busy") === "true"
+    || stream.scrollHeight - stream.scrollTop - stream.clientHeight < 48
+  ) return;
+
+  const messages = normalizeRunMessages(run, { agentId });
+  if (messages.length < CONVERSATION_WINDOW_SIZE) return;
+  const latestStart = Math.max(0, messages.length - CONVERSATION_WINDOW_SIZE);
+  const indexByKey = new Map(messages.map((message, index) => [String(message.key ?? ""), index]));
+  let renderedStart = latestStart;
+  for (const child of stream.children) {
+    const renderedIndex = indexByKey.get(child.dataset?.streamKey ?? "");
+    if (renderedIndex != null) {
+      renderedStart = renderedIndex;
+      break;
+    }
+  }
+  // 冻结当前真实 DOM 的起点，而不是当前数据尾部。这样前一帧尚未提交的新事件也不会
+  // 让第二个 SSE 把用户正在阅读的首条消息挤出窗口。
+  conversationWindowStarts.set(key, Math.min(latestStart, Math.max(0, renderedStart)));
+}
+
+function conversationHistoryGateMarkup(messageWindow) {
+  return messageWindow.hidden
+    ? `<div class="conversation-history-gate" data-stream-key="history:gate">
+        <button class="text-button" type="button" data-load-earlier>加载更早（${messageWindow.hidden}）</button>
+        <span>当前窗口 ${messageWindow.visible.length} 条 · 第 ${messageWindow.start + 1}-${messageWindow.end} 条，共 ${messageWindow.total} 条</span>
+      </div>`
+    : "";
+}
+
+function conversationNewerGateMarkup(messageWindow) {
+  return messageWindow.hiddenAfter
+    ? `<div class="conversation-history-gate is-newer" data-stream-key="history:newer">
+        <button class="text-button" type="button" data-load-newer>加载更新（${messageWindow.hiddenAfter}）</button>
+        <button class="text-button" type="button" data-return-latest>回到最新</button>
+        <span>第 ${messageWindow.start + 1}-${messageWindow.end} 条，共 ${messageWindow.total} 条</span>
+      </div>`
+    : "";
+}
+
+function moveConversationWindow(direction) {
+  const run = selectedRun();
+  if (!run || elements["conversation-stream"].getAttribute("aria-busy") === "true") return;
+  const agentId = activeAgentId();
+  const messages = normalizeRunMessages(run, { agentId });
+  const current = conversationWindow(run, agentId, messages);
+  const key = conversationWindowKey(run.id, agentId);
+  const latestStart = Math.max(0, messages.length - CONVERSATION_WINDOW_SIZE);
+  const pageStarts = [];
+  for (let start = latestStart; ; start = Math.max(0, start - CONVERSATION_WINDOW_SIZE)) {
+    pageStarts.unshift(start);
+    if (start === 0) break;
+  }
+  const nextStart = direction === "older"
+    ? [...pageStarts].reverse().find((start) => start < current.start) ?? current.start
+    : pageStarts.find((start) => start > current.start) ?? current.start;
+  if (nextStart === latestStart) conversationWindowStarts.delete(key);
+  else conversationWindowStarts.set(key, nextStart);
+  renderSelectedRun({ preserveStreamState: true });
+}
+
+function loadEarlierConversation() {
+  moveConversationWindow("older");
+}
+
+function loadNewerConversation() {
+  moveConversationWindow("newer");
+}
+
+function returnToLatestConversation() {
+  const run = selectedRun();
+  if (!run || elements["conversation-stream"].getAttribute("aria-busy") === "true") return;
+  conversationWindowStarts.delete(conversationWindowKey(run.id, activeAgentId()));
+  renderSelectedRun({ preserveStreamState: true });
+}
+
+function releaseConversationWindows(runId) {
+  const prefix = `${runId}\u0000`;
+  for (const key of conversationWindowStarts.keys()) {
+    if (key.startsWith(prefix)) conversationWindowStarts.delete(key);
+  }
+}
+
+function renderSelectedRun({ preserveStreamState = true } = {}) {
   if (state.sessionPreview) {
+    missionControlDock?.selectRun(null);
+    syncRailToActiveRun();
     renderRecoveryBar(null); // 历史预览与 run 上下文无关，恢复条一并收起
     renderSessionPreview();
     return;
   }
   delete elements["conversation-stream"].dataset.previewKey;
-  elements["conversation-stream"].setAttribute("aria-live", "polite"); // 退出预览恢复实时播报
   const run = selectedRun();
   if (!run) {
+    missionControlDock?.selectRun(null);
+    syncRailToActiveRun();
+    const renderContext = `new-task:${state.agentPickerOpen ? "picker" : "welcome"}`;
+    syncConversationLiveContext(renderContext);
     elements["conversation-title"].textContent = "新任务";
     elements["conversation-meta"].textContent = "等待输入";
     elements["workbench-run-status"].textContent = "未选择任务";
@@ -2335,17 +11978,45 @@ function renderSelectedRun() {
     elements["cancel-run-button"].disabled = true;
     setComposerMode(null);
     renderRecoveryBar(null);
-    elements["conversation-stream"].innerHTML = emptyMarkup("准备接收任务", "任务创建后，路由、会话与工具事件会在此汇合。");
+    replaceConversationStream(
+      state.agentPickerOpen ? agentPickerMarkup() : welcomeTemplatesMarkup(),
+      renderContext,
+    );
     renderRouteDecision(null);
     renderTopology(null);
+    renderMemberStrip();
+    renderConversationAgents(null);
     renderWorkbenchEvents();
     renderStatusline();
     return;
   }
 
-  elements["conversation-title"].textContent = run.title;
-  elements["conversation-meta"].textContent = `run ${run.id} · ${formatDate(run.createdAt)}`;
-  elements["workbench-run-status"].textContent = runStatusText(run.status);
+  missionControlDock?.selectRun(run.id, `${run.updatedAt ?? run.createdAt ?? ""}:${run.status}:${run.round ?? 0}`);
+  syncRailToActiveRun();
+
+  const agentId = activeAgentId(); // 成员独立页（null=团队协作页）
+  const renderContext = `run:${run.id}:${agentId ?? "team"}`;
+  syncConversationLiveContext(renderContext);
+  elements["conversation-title"].textContent = agentId ? `${run.title} · ${agentLabel(agentId)}` : run.title;
+  renderConversationAgents(run);
+  // meta 行补编排模式与隔离态：social=默认社会编排；worktree 存在说明写盘已隔离。
+  // run id 只露短码（全量 UUID 是审计场景才需要的技术细节，进 title 悬停）
+  const metaParts = [`run ${String(run.id).slice(0, 8)}`, formatDate(run.createdAt)];
+  // 轮次预算常驻可见：以前只有撞到上限时才冒出一句英文报错，用户全程不知道还剩几轮
+  // （LO 2026-08-08：为什么会显示 maximum collaboration rounds reached）
+  if (Number(run.maxRounds) > 0) {
+    const used = Number(run.round) || 0;
+    const cap = Number(run.maxRounds);
+    const refunded = Number(run.roundsRefunded) || 0;
+    const budget = used >= cap ? `轮次 ${used}/${cap} · 已用满` : `轮次 ${used}/${cap}`;
+    metaParts.push(refunded ? `${budget} · 已退还 ${refunded}` : budget);
+  }
+  if (agentId) metaParts.push(`独立页 · 只看 ${agentLabel(agentId)}`);
+  if (run.orchestrationMode === "pipeline") metaParts.push("Pipeline 拓扑");
+  if (run.worktreePath) metaParts.push(`wt ${String(run.worktreePath).split(/[\\/]/).pop()}`);
+  elements["conversation-meta"].textContent = metaParts.join(" · ");
+  elements["conversation-meta"].title = [`run ${run.id}`, run.worktreePath ? `写盘隔离于工作树：${run.worktreePath}` : ""].filter(Boolean).join("\n");
+  elements["workbench-run-status"].textContent = runStatusText(run.status, run);
   const successful = ["complete", "completed", "succeeded"].includes(run.status);
   elements["workbench-run-status"].className = `status-label is-${TERMINAL_RUN_STATES.has(run.status) ? (successful ? "ok" : "error") : "warning"}`;
   elements["cancel-run-button"].disabled = !ACTIVE_RUN_STATES.has(run.status);
@@ -2353,19 +12024,46 @@ function renderSelectedRun() {
   setComposerMode(run, { waitingApproval });
   renderRecoveryBar(run);
 
-  const stream = elements["conversation-stream"];
-  // 仅当用户已在底部时才自动滚底——上滚查看历史/展开工具结果时，后续 SSE 帧不把视图拽回底部
-  const atBottom = stream.scrollHeight - stream.scrollTop - stream.clientHeight < 48;
-  const messages = normalizeRunMessages(run);
-  // 会话流尾部增强：内联审批卡（等待/轮中审批）+ 终态失败/取消原因
-  const tailMarkup = inlineApprovalsMarkup(run) + runFailureMarkup(run);
-  stream.innerHTML = (messages.length
-    ? messages.map(messageMarkup).join("")
-    : emptyMarkup("任务已创建", "等待主脑计划或 Agent 事件。")) + tailMarkup;
+  const messages = normalizeRunMessages(run, { agentId });
+  const messageWindow = conversationWindow(run, agentId, messages);
+  const historyGate = conversationHistoryGateMarkup(messageWindow);
+  const newerGate = conversationNewerGateMarkup(messageWindow);
+  // 会话流尾部增强：活跃轮呼吸行 + ask 回答卡 + 内联审批卡 + 终态收口（完成统计/失败原因+重试）
+  const tailMarkup = newerGate + liveTurnMarkup(run) + pendingAskMarkup(run) + inlineApprovalsMarkup(run)
+    + runCompletionMarkup(run) + runFailureMarkup(run) + runDiffPanelMarkup(run);
+  const renderSignature = conversationRenderSignature(renderContext, messageWindow, historyGate, tailMarkup);
+  const syncSourceCost = messageWindow.visible.reduce((sum, message) => Math.min(
+    CONVERSATION_SYNC_SOURCE_BUDGET + 1,
+    sum + messageRenderCost(message),
+  ), 0);
+  const shouldBatch = messageWindow.visible.length > 0 && (
+    messageWindow.visible.length >= 48
+    || syncSourceCost > CONVERSATION_SYNC_SOURCE_BUDGET
+  );
+  if (shouldBatch) {
+    void replaceConversationStreamBatched({
+      renderSignature,
+      renderContext,
+      leadingMarkup: historyGate,
+      messages: messageWindow.visible,
+      tailMarkup,
+      preserveState: preserveStreamState,
+    });
+  } else {
+    const messageMarkupText = messageWindow.visible
+      .map((message, index) => messageMarkup(message, messageWindow.visible[index - 1]))
+      .join("");
+    const streamMarkup = (messages.length
+      ? historyGate + messageMarkupText
+      : agentId
+        ? emptyMarkup(`${agentLabel(agentId)} 还没发言`, "直接在下方输入，单独问 ta——不经团队路由", `empty:${run.id}:${agentId}`)
+        : emptyMarkup("任务已创建", "等待主脑计划或 Agent 事件。", `empty:${run.id}:all`)) + tailMarkup;
+    replaceConversationStream(streamMarkup, renderContext, { preserveState: preserveStreamState, renderSignature });
+  }
   ensureApprovalCountdown();
-  if (atBottom) stream.scrollTop = stream.scrollHeight;
   renderRouteDecision(run.route ? normalizeRoute(run.route) : state.routePreview);
   renderTopology(run);
+  renderMemberStrip();
   renderWorkbenchEvents();
   renderStatusline();
 }
@@ -2381,24 +12079,86 @@ const AGENT_LABELS = {
   "pi-resident": "Pi",
 };
 function agentLabel(id) {
-  return AGENT_LABELS[id] || id || "Agent";
+  const catalog = Array.isArray(state.bootstrap?.teamCatalog) ? state.bootstrap.teamCatalog : [];
+  return catalog.find((profile) => profile.id === id)?.label || AGENT_LABELS[id] || id || "Agent";
 }
 
-// CLI 式工具调用行："⏺ Bash(cat foo.txt)" + 可折叠结果——与正常 CLI 呈现对齐。
+function compactPayloadCount(length, unit = "字符") {
+  return `${Number(length || 0).toLocaleString("zh-CN")} ${unit}`;
+}
+
+function payloadRenderGuardMarkup(label, length, unit = "字符") {
+  return `<div class="payload-render-guard" role="note"><strong>${escapeHtml(label)}过大，未直接渲染</strong><span>${escapeHtml(compactPayloadCount(length, unit))} · 源记录仍保留</span></div>`;
+}
+
+function boundedMetadataText(value, limit = 160) {
+  const text = payloadText(value);
+  const clipped = text.length > limit ? `${text.slice(0, limit)}…` : text;
+  return redact(clipped);
+}
+
+// 头像双字码 + 配色槽：多 agent 对话里"谁在说话"要一眼可辨（色相互斥，暖纸主题下柔和 tint）
+const AGENT_SHORT = {
+  "claude-fable": "CL",
+  "codex-technical": "CX",
+  "grok-search": "GS",
+  "grok-build": "GB",
+  "gemini-research": "GM",
+  "kimi-frontend": "KM",
+  "pi-resident": "PI",
+};
+function agentSlug(id) {
+  return String(id ?? "").toLowerCase().replace(/[^a-z0-9-]/g, "") || "default";
+}
+
+// CLI 式工具调用行 → v4.0 工具卡：Lucide 工具字形 + 名称 + 单行情令摘要 + 状态图标，结果可折叠。
 // 入参先 redact 再截断：Bash 命令行入参最可能带赋值式密钥（PASSWORD=xxx），与工具结果同等脱敏，
 // 否则密钥在调用行明文进 DOM/截图（工具结果脱敏了、调用行漏了会形成不对称泄漏）。
+// 常见工具给专属 Lucide 字形（卡片左侧一眼可辨工具族），其余 wrench 兜底
+const TOOL_GLYPHS = Object.freeze({
+  bash: "terminal", shell: "terminal",
+  read: "file-text", write: "file-text", edit: "file-text", notebookedit: "file-text",
+  glob: "search", grep: "search", websearch: "search", webfetch: "search",
+  task: "bot", todowrite: "check", todoread: "check",
+});
+function toolGlyphFor(name) {
+  return TOOL_GLYPHS[String(name ?? "").toLowerCase()] ?? "wrench";
+}
+function toolSlugFor(name) {
+  return String(name ?? "").toLowerCase().replace(/[^a-z0-9-]/g, "") || "tool";
+}
 function toolCallMarkup(tool) {
-  const full = redact(String(tool.input ?? "")).replace(/\s+/g, " ");
+  const name = String(tool.name || "tool");
+  const slug = toolSlugFor(name);
+  const glyph = lucideIcon(toolGlyphFor(name));
+  // 历史回放中的调用行都是"已完成"；进行态由 .tool-status.is-running（workbench.css）承接未来扩展
+  const status = `<span class="tool-status is-done" title="已完成" aria-hidden="true">${lucideIcon("circle-check")}</span>`;
+  const rawInput = payloadText(tool.input);
+  const inputLength = declaredPayloadLength(rawInput, tool.inputLength);
+  if (inputLength > INLINE_TOOL_INPUT_TEXT_LIMIT) {
+    return `<div class="tool-call tool-card" data-tool="${escapeHtml(slug)}"><span class="tool-glyph" aria-hidden="true">${glyph}</span><strong>${escapeHtml(boundedMetadataText(name))}</strong><span class="tool-args">（输入过大 · ${escapeHtml(compactPayloadCount(inputLength))}）</span>${status}</div>`;
+  }
+  const full = redact(rawInput).replace(/\s+/g, " ");
   const shown = full.slice(0, 160) + (full.length > 160 ? "…" : "");
   const title = full.length > 160 ? ` title="${escapeHtml(full.slice(0, 600))}"` : "";
-  return `<div class="tool-call"><span class="tool-dot" aria-hidden="true">⏺</span><strong>${escapeHtml(tool.name || "tool")}</strong><span class="tool-args"${title}>${escapeHtml(full ? `(${shown})` : "")}</span></div>`;
+  return `<div class="tool-call tool-card" data-tool="${escapeHtml(slug)}"><span class="tool-glyph" aria-hidden="true">${glyph}</span><strong>${escapeHtml(boundedMetadataText(name))}</strong><span class="tool-args"${title}>${escapeHtml(full ? `(${shown})` : "")}</span>${status}</div>`;
 }
 
-function toolResultMarkup(result) {
-  const text = redact(String(result.text ?? ""));
+function toolResultMarkup(result, { allowInline = true } = {}) {
+  const rawText = payloadText(result.text);
+  const textLength = declaredPayloadLength(rawText, result.textLength);
+  const statusIcon = `<span class="tool-status ${result.isError ? "is-error" : "is-done"}" aria-hidden="true">${lucideIcon(result.isError ? "circle-alert" : "circle-check")}</span>`;
+  const label = result.isError ? "工具错误" : "工具结果";
+  if (!allowInline || textLength > INLINE_TOOL_RESULT_TEXT_LIMIT) {
+    return `<details class="tool-result tool-card${result.isError ? " is-error" : ""}">
+      <summary>${statusIcon}${label} · 超过显示预算</summary>
+      ${payloadRenderGuardMarkup("工具结果", textLength)}
+    </details>`;
+  }
+  const text = redact(rawText);
   const lineCount = text ? text.split("\n").length : 0;
-  return `<details class="tool-result${result.isError ? " is-error" : ""}">
-    <summary>${result.isError ? "⚠ 工具错误" : "工具结果"} · ${lineCount} 行</summary>
+  return `<details class="tool-result tool-card${result.isError ? " is-error" : ""}">
+    <summary>${statusIcon}${label} · ${lineCount} 行</summary>
     <pre>${escapeHtml(text) || "(空)"}</pre>
   </details>`;
 }
@@ -2406,11 +12166,50 @@ function toolResultMarkup(result) {
 // 治理事件 → 会话流系统注记：编排/适配器护栏信号不静默吞掉（玫瑰=警示 / 琥珀=提示，样式克制）
 const GOVERNANCE_EVENTS = {
   "run.coordinator_write_skipped": { tone: "rose", text: (data) => data.note || "主脑兼任执行者，本轮仅规划不落盘" },
+  // 恢复确认（随热改一次性携带）：放弃可能仍占用原生轮的声明工作——不静默，人有知情权
+  "run.recovery_acknowledged": { tone: "amber", text: () => "已确认恢复：放弃提交状态不明的声明工作，会话停在可续聊的闲置态" },
   "adapter.fallback": { tone: "amber", text: (data) => `适配器降级：${data.from || "?"} → ${data.to || "?"}${data.reason ? `（${data.reason}）` : ""}` },
-  "adapter.replay_blocked": { tone: "rose", text: (data) => `已阻止不安全的原生轮重放：${data.reason || "提交状态不明确"}` },
+  "adapter.replay_blocked": {
+    tone: "rose",
+    // 打断已获 provider 确认时如实标注"会话无活跃占用"——与"可能有活跃工作"是两种风险等级
+    text: (data) => `已阻止不安全的原生轮重放：${data.reason || "提交状态不明确"}${data.interruptConfirmed === true ? "（原生轮已确认打断，会话无活跃占用）" : ""}`,
+  },
+  // 已确认打断的只读超时轮自动原生续跑：不静默——次数/硬顶/轮次都要可见（自动 ≠ 免审计）
+  "run.auto_recovery": {
+    tone: "amber",
+    text: (data) => `${agentLabel(data.agentId || "")} 第 ${data.round ?? "?"} 轮超时且原生轮已确认打断——已自动原生续跑（第 ${data.count ?? "?"}/${data.cap ?? "?"} 次，只读轮无写盘残留）`,
+  },
   "run.authorization_revoked": { tone: "rose", text: (data) => `Build 授权已撤销：${data.reason || "运行时策略变更"}` },
-  "agent.turn_checkpoint": { tone: "amber", text: (data, event) => `轮次检查点 · 第 ${data.round ?? "?"} 轮 ${agentLabel(data.agentId ?? event.agentId ?? "")} · ${data.phase || "?"}` },
+  // 轮次检查点降噪：正常相位流转（prepared/session_ready/submitting/submitted/completed）由
+  // 活跃轮呼吸行实时呈现，注记只留 ambiguous——需要人明白"提交状态不明确"的那一条
+  "agent.turn_checkpoint": { tone: "rose", text: (data, event) => (data.phase === "ambiguous" ? `第 ${data.round ?? "?"} 轮 ${agentLabel(data.agentId ?? event.agentId ?? "")} 提交状态不明确——自动重放已阻止，需人工确认` : null) },
   "run.steer_queued": { tone: "amber", text: (data) => `轮间插话已排队（第 ${data.depth ?? "?"} 位）· 当前轮结束后送达 ${agentLabel(data.agentId || "")}` },
+  // 轮次退还必须看得见：不播报就等于悄悄改配额。可能触达 provider 的派发上限不随之放松
+  "run.round_refunded": {
+    tone: "amber",
+    text: (data) => `已退还一轮白烧配额（该轮停在「${data.phase ?? "未完成"}」未产出）· 轮次回到 ${data.round ?? "?"}/${data.maxRounds ?? "?"} · 累计退还 ${data.roundsRefunded ?? "?"} 次`,
+  },
+  // v3.6 社会模拟编排：agent 间路由可见性（bus.jsonl 的 [[msg:]] 被编排器路由时落一条注记）。
+  // memo=全员黑板（violet 记号）、lo=向用户提问、team=广播——不用内部代号直译
+  "bus.routed": {
+    tone: "amber",
+    text: (data) => {
+      const snippet = `${String(data.text || "").slice(0, 60)}${String(data.text || "").length > 60 ? "…" : ""}`;
+      if (data.to === "memo") return `${agentLabel(data.from || "")} 记入全员黑板：${snippet}`;
+      if (data.to === "lo") return `${agentLabel(data.from || "")} 向你提问：${snippet}`;
+      if (data.to === "team") return `${agentLabel(data.from || "")} 向全员广播：${snippet}`;
+      return `${agentLabel(data.from || "")} → ${agentLabel(data.to || "")}：${snippet}`;
+    },
+    toneOf: (data) => (data.to === "memo" ? "violet" : "amber"),
+  },
+  // ask/answer 挂起：团队向你提问，run 等待回答（在下方输入即恢复主循环）
+  "run.waiting_input": { tone: "amber", text: (data) => `团队向你提问（来自 ${agentLabel(data.from || "")}），在下方回答即继续：${String(data.text || "").slice(0, 60)}${String(data.text || "").length > 60 ? "…" : ""}` },
+  // ask 频次熔断（v3.7：agent 拿结论当提问的 ask→answer 死循环防护）
+  "run.ask_throttled": { tone: "rose", text: (data) => `${agentLabel(data.from || "")} 对你的提问已达单次任务上限（2 次），后续输出按结论处理，不再挂起等待回答` },
+  // v3.6 P3 治理三连：worktree 隔离建立/跳过 + run 级预算耗尽（后端事件已发，此处兑现可见性）
+  "run.worktree_created": { tone: "amber", text: (data) => `已创建隔离工作树：写盘轮在 ${String(data.worktree || "").split(/[\\/]/).pop() || "worktree"} 进行，真实目录零污染` },
+  "run.worktree_skipped": { tone: "rose", text: () => "本会话未设项目地址——写盘将发生在默认目录，无工作树隔离" },
+  "run.budget_exhausted": { tone: "rose", text: (data) => `run 累计成本已达硬顶（$${Number(data.costUsdTotal ?? 0).toFixed(2)}），已停止派发新轮` },
   // 先脱敏后截断（与 toolCallMarkup 同序）：截断可把密钥模式切半使 redact 失配；旧持久化队列的
   // prompt 不再过 continue 入口的密钥门，此处是最后一道
   "run.steer_dropped": { tone: "rose", text: (data) => { const safe = redact(String(data.text || "")); return `轮间插话被丢弃（${data.reason === "ROUND_LIMIT" ? "已达最大协作轮次" : data.reason || "未知原因"}）：${safe.slice(0, 60)}${safe.length > 60 ? "…" : ""}`; } },
@@ -2429,106 +12228,662 @@ function turnMetaText(data, event) {
   return parts.filter(Boolean).join(" · ");
 }
 
-function normalizeRunMessages(run) {
-  // 以事件流为一等来源重建完整 CLI 对话（文本 + 工具调用 + 工具结果 + 轮次分隔）。
-  // 载荷读 event.data（normalizeEvent 已从 envelope.data 挂出）、去重键用 event.id，含 seq 供同毫秒 tie-break。
-  const items = [];
-  const seenEventIds = new Set();
-  // 历史全量（per-run 磁盘回放，不受 160 条窗口限制）+ 实时 SSE，按 event.id 去重合并——长会话/重启后完整
-  const historical = (state.runEvents && state.runEvents[run.id]) || [];
-  const sourceEvents = [...historical, ...state.events.filter((event) => event.runId === run.id)];
-  for (const event of sourceEvents) {
-    if (event.runId !== run.id) continue;
-    if (event.id && seenEventIds.has(event.id)) continue;
-    if (event.id) seenEventIds.add(event.id);
-    const data = event.data || {};
-    const seq = Number.isFinite(Number(event.seq)) ? Number(event.seq) : 0;
-    if (event.type === "assistant.message" && (data.text || data.tools?.length)) {
-      items.push({ kind: "assistant", author: event.agentId || "Agent", text: data.text || "", tools: data.tools || [], created_at: event.timestamp, seq, key: event.id });
-    } else if (event.type === "tool.result" && data.results?.length) {
-      items.push({ kind: "tool-result", results: data.results, created_at: event.timestamp, seq, key: event.id });
-    } else if (event.type === "agent.turn_started") {
-      items.push({ kind: "divider", text: `第 ${data.round ?? "?"} 轮 · ${agentLabel(data.agentId ?? event.agentId ?? "")}`, created_at: event.timestamp, seq, key: event.id });
-    } else if (event.type === "agent.turn_completed") {
-      // 消息级 token/成本徽标：轮次收尾的统计行（模型/tokens/成本来自适配器回执）
-      items.push({ kind: "turn-meta", text: turnMetaText(data, event), created_at: event.timestamp, seq, key: event.id });
-    } else if (event.type === "tool.event") {
-      // codex/pi/gemini/grok-search 适配器发的工具活动——渲染成 CLI 式工具调用行，非 Claude 主脑也可见
-      const label = data.command || (data.tool ? `${data.tool}${data.status ? ` · ${data.status}` : ""}` : data.status || "工具");
-      items.push({ kind: "assistant", author: event.agentId || "Agent", text: "", tools: [{ name: data.tool || "tool", input: label }], created_at: event.timestamp, seq, key: event.id });
-    } else if (event.type === "agent.error" || event.type === "adapter.parse_error" || event.type === "adapter.stderr") {
-      // 中途失败不静默消失：以错误块呈现在对话里（严禁 silent fallback 的 UI 侧兑现）
-      items.push({ kind: "tool-result", results: [{ isError: true, text: data.message || event.content || event.type }], created_at: event.timestamp, seq, key: event.id });
-    } else if (event.type === "user.message" && data.text) {
-      items.push({ kind: "user", author: "LO", text: data.text, created_at: event.timestamp, seq, key: event.id }); // 续聊的用户追问
-    } else if (GOVERNANCE_EVENTS[event.type]) {
-      // 治理事件以系统注记进会话流（与 user.message 同列）——写入跳过/降级/重放阻断/授权撤销/轮次检查点
-      const governance = GOVERNANCE_EVENTS[event.type];
-      items.push({ kind: "governance", tone: governance.tone, text: redact(String(governance.text(data, event))), created_at: event.timestamp, seq, key: event.id });
-    }
+const eventRenderTokens = new WeakMap();
+const objectRenderTokens = new WeakMap();
+const runHistoryMessageCaches = new WeakMap();
+let nextRenderToken = 0;
+
+function renderTokenFor(object, prefix = "object") {
+  if (!object || typeof object !== "object") return `${prefix}:${String(object ?? "")}`;
+  const tokens = prefix === "event" ? eventRenderTokens : objectRenderTokens;
+  let token = tokens.get(object);
+  if (!token) {
+    token = `${prefix}:${++nextRenderToken}`;
+    tokens.set(object, token);
   }
-  // 事件流是一等来源；仅当无实时事件（重启后事件已滚出回放窗口）才用 run.turns 兜底，避免与事件双份。
-  // created_at 兜底 run.createdAt，防止 turns 缺时间戳时排序落 epoch-0 把历史轮次倒置到 prompt 之前。
-  const fallback = items.length
-    ? []
-    : Array.isArray(run.messages)
-      ? run.messages.map((message, index) => ({
-          kind: message.role === "user" ? "user" : "assistant",
-          author: message.author ?? message.agentId ?? message.agent_id ?? "Agent",
-          text: message.content ?? message.text ?? "",
-          created_at: message.createdAt ?? message.created_at ?? message.timestamp ?? run.createdAt,
-          seq: index,
-          key: String(message.id ?? `base-${index}`),
-        }))
-      : [];
-  const keyed = new Map();
-  for (const item of [...fallback, ...items]) keyed.set(item.key, item);
-  const all = [...keyed.values()];
-  if (run.prompt && !all.some((item) => item.kind === "user" && item.text === run.prompt)) {
-    all.push({ kind: "user", author: "LO", text: run.prompt, created_at: run.createdAt, seq: -1, key: "initial-prompt" });
-  }
-  return all.sort((a, b) => {
-    const ta = new Date(a.created_at ?? 0).getTime();
-    const tb = new Date(b.created_at ?? 0).getTime();
-    return ta !== tb ? ta - tb : (a.seq ?? 0) - (b.seq ?? 0);
-  });
+  return token;
 }
 
-function messageMarkup(message) {
+function freezeConversationMessage(message) {
+  const snapshot = { ...message };
+  if (Array.isArray(snapshot.tools)) {
+    snapshot.tools = Object.freeze(snapshot.tools.map((tool) => Object.freeze({ ...tool })));
+  }
+  if (Array.isArray(snapshot.results)) {
+    snapshot.results = Object.freeze(snapshot.results.map((result) => Object.freeze({ ...result })));
+  }
+  snapshot.renderToken ??= renderTokenFor(snapshot, "message");
+  return Object.freeze(snapshot);
+}
+
+function eventMatchesAgentPage(event, agentId) {
+  if (!agentId) return true;
+  if (event.type === "user.message") return true;
+  const data = event.data || {};
+  if (event.agentId === agentId || data.agentId === agentId || data.from === agentId || data.to === agentId) return true;
+  return Boolean(!event.agentId && GOVERNANCE_EVENTS[event.type] && !data.from && !data.to);
+}
+
+function messageMatchesAgentPage(message, agentId) {
+  if (!agentId) return true;
+  if (message.eventType === "user.message" || message.kind === "user") return true;
+  if (
+    message.sourceAgentId === agentId
+    || message.sourceDataAgentId === agentId
+    || message.sourceFrom === agentId
+    || message.sourceTo === agentId
+  ) return true;
+  return Boolean(message.runLevelGovernance);
+}
+
+function messageTime(value) {
+  const parsed = Date.parse(value ?? "");
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function compareConversationMessages(left, right) {
+  return (left.sortTime ?? 0) - (right.sortTime ?? 0) || (left.seq ?? 0) - (right.seq ?? 0);
+}
+
+function insertConversationMessageSorted(messages, message) {
+  const last = messages.at(-1);
+  if (!last || compareConversationMessages(last, message) <= 0) {
+    messages.push(message);
+    return messages.length - 1;
+  }
+  let low = 0;
+  let high = messages.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (compareConversationMessages(messages[middle], message) <= 0) low = middle + 1;
+    else high = middle;
+  }
+  messages.splice(low, 0, message);
+  return low;
+}
+
+function conversationMessageFromEvent(event) {
+  if (!event || !eventAffectsConversation(event)) return null;
+  const data = event.data || {};
+  const seq = Number.isFinite(Number(event.seq)) ? Number(event.seq) : 0;
+  const common = {
+    created_at: event.timestamp,
+    sortTime: messageTime(event.timestamp),
+    seq,
+    key: event.id,
+    renderToken: renderTokenFor(event, "event"),
+    eventType: event.type,
+    sourceAgentId: event.agentId,
+    sourceDataAgentId: data.agentId,
+    sourceFrom: data.from,
+    sourceTo: data.to,
+    runLevelGovernance: Boolean(!event.agentId && GOVERNANCE_EVENTS[event.type] && !data.from && !data.to),
+  };
+  if (event.type === "assistant.message" && (data.text || data.textLength || data.tools?.length || data.toolsTotal)) {
+    return freezeConversationMessage({
+      ...common,
+      kind: "assistant",
+      author: event.agentId || "Agent",
+      text: data.text || "",
+      textLength: declaredPayloadLength(data.text, data.textLength),
+      tools: Array.isArray(data.tools) ? data.tools : [],
+      toolsTotal: Math.max(Array.isArray(data.tools) ? data.tools.length : 0, Number(data.toolsTotal) || 0),
+    });
+  }
+  if (event.type === "tool.result" && (data.results?.length || data.resultsTotal)) {
+    return freezeConversationMessage({
+      ...common,
+      kind: "tool-result",
+      results: Array.isArray(data.results) ? data.results : [],
+      resultsTotal: Math.max(Array.isArray(data.results) ? data.results.length : 0, Number(data.resultsTotal) || 0),
+    });
+  }
+  if (event.type === "agent.turn_started") {
+    return freezeConversationMessage({ ...common, kind: "divider", text: `第 ${data.round ?? "?"} 轮 · ${agentLabel(data.agentId ?? event.agentId ?? "")}` });
+  }
+  if (event.type === "agent.turn_completed") {
+    return freezeConversationMessage({ ...common, kind: "turn-meta", text: turnMetaText(data, event) });
+  }
+  if (event.type === "tool.event") {
+    const label = data.command || (data.tool ? `${data.tool}${data.status ? ` · ${data.status}` : ""}` : data.status || "工具");
+    return freezeConversationMessage({
+      ...common,
+      kind: "assistant",
+      author: event.agentId || "Agent",
+      text: "",
+      textLength: 0,
+      tools: [{ name: data.tool || "tool", input: label, inputLength: declaredPayloadLength(label, data.commandLength) }],
+      toolsTotal: 1,
+    });
+  }
+  if (event.type === "grok.completed" && (data.text || data.textLength)) {
+    return freezeConversationMessage({
+      ...common,
+      kind: "assistant",
+      author: event.agentId || "grok-build",
+      text: data.text || "",
+      textLength: declaredPayloadLength(data.text, data.textLength),
+      tools: [],
+      toolsTotal: 0,
+    });
+  }
+  if (["agent.error", "adapter.parse_error", "adapter.stderr"].includes(event.type)) {
+    const text = data.message || event.content || event.type;
+    return freezeConversationMessage({ ...common, kind: "tool-result", results: [{ isError: true, text }], resultsTotal: 1 });
+  }
+  if (event.type === "user.message" && (data.text || data.textLength)) {
+    return freezeConversationMessage({
+      ...common,
+      kind: "user",
+      author: "LO",
+      text: data.text || "",
+      textLength: declaredPayloadLength(data.text, data.textLength),
+    });
+  }
+  // 无摘要 reasoning 完成态只用于清活跃记账（见 eventAffectsConversation），重建历史同样不落空卡
+  if (event.type === "codex.item/completed" && data.progress && !(data.progress.kind === "reasoning" && !data.progress.text)) {
+    return freezeConversationMessage({ ...common, kind: "process", author: event.agentId || "Agent", progress: data.progress });
+  }
+  if (GOVERNANCE_EVENTS[event.type]) {
+    const governance = GOVERNANCE_EVENTS[event.type];
+    const text = governance.text(data, event);
+    if (text == null) return null;
+    return freezeConversationMessage({ ...common, kind: "governance", tone: governance.toneOf?.(data) ?? governance.tone, text: redact(String(text)) });
+  }
+  return null;
+}
+
+function fallbackRunMessages(run, agentId) {
+  if (!Array.isArray(run.messages)) return [];
+  return run.messages
+    .filter((message) => !agentId || message.role === "user" || String(message.agentId ?? message.agent_id ?? message.author ?? "") === agentId)
+    .map((message, index) => freezeConversationMessage({
+      kind: message.role === "user" ? "user" : "assistant",
+      author: message.author ?? message.agentId ?? message.agent_id ?? "Agent",
+      text: message.content ?? message.text ?? "",
+      textLength: declaredPayloadLength(message.content ?? message.text, message.textLength),
+      created_at: message.createdAt ?? message.created_at ?? message.timestamp ?? run.createdAt,
+      sortTime: messageTime(message.createdAt ?? message.created_at ?? message.timestamp ?? run.createdAt),
+      seq: index,
+      key: String(message.id ?? `base-${index}`),
+      eventType: message.role === "user" ? "user.message" : "assistant.message",
+    }));
+}
+
+function ensureInitialPrompt(messages, run) {
+  if (!run.prompt || messages.some((item) => item.kind === "user" && item.text === run.prompt)) return;
+  insertConversationMessageSorted(messages, freezeConversationMessage({
+    kind: "user",
+    author: "LO",
+    text: run.prompt,
+    textLength: run.prompt.length,
+    created_at: run.createdAt,
+    sortTime: messageTime(run.createdAt),
+    seq: -1,
+    key: "initial-prompt",
+    eventType: "user.message",
+  }));
+}
+
+function historyMessagesForRun(run, agentId, events) {
+  let caches = runHistoryMessageCaches.get(events);
+  if (!caches) {
+    caches = new Map();
+    runHistoryMessageCaches.set(events, caches);
+  }
+  const key = agentId ?? "all";
+  const cached = caches.get(key);
+  if (cached) return cached;
+  const base = events.conversationMessages ?? [];
+  const messages = base.length
+    ? (agentId ? base.filter((message) => messageMatchesAgentPage(message, agentId)) : [...base])
+    : fallbackRunMessages(run, agentId);
+  ensureInitialPrompt(messages, run);
+  caches.set(key, messages);
+  return messages;
+}
+
+function invalidateRunHistoryMessageCaches(events) {
+  runHistoryMessageCaches.delete(events);
+}
+
+function appendRunHistoryMessageIndexes(events, event) {
+  const message = conversationMessageFromEvent(event);
+  if (!message) return;
+  insertConversationMessageSorted(events.conversationMessages, message);
+  const caches = runHistoryMessageCaches.get(events);
+  if (!caches) return;
+  for (const [agentId, messages] of caches) {
+    if (!messageMatchesAgentPage(message, agentId === "all" ? null : agentId)) continue;
+    if (message.kind === "user") {
+      const synthetic = messages.findIndex((item) => item.key === "initial-prompt" && item.text === message.text);
+      if (synthetic >= 0) messages.splice(synthetic, 1);
+    }
+    insertConversationMessageSorted(messages, message);
+  }
+}
+
+function removeRunHistoryMessageIndexes(events, event) {
+  const removeByKey = (messages) => {
+    const index = messages.findIndex((message) => message.key === event.id);
+    if (index >= 0) messages.splice(index, 1);
+  };
+  removeByKey(events.conversationMessages);
+  // 缓存里可能含 synthetic initial prompt。真实 prompt 被滑动窗口淘汰后必须重建，
+  // 不能只删同 key 后把首条用户意图一并永久丢掉。
+  invalidateRunHistoryMessageCaches(events);
+}
+
+function normalizeRunMessages(run, { agentId = null } = {}) {
+  const historical = state.runEvents[run.id];
+  if (historical) return historyMessagesForRun(run, agentId, historical);
+
+  // 首次历史请求完成前只需合并全局有界实时尾部（最多 160 条 / 40 MiB）。完整历史一旦
+  // 到达，上面的增量索引接管，避免每个 SSE frame 重扫、去重和排序 5000 条事件。
+  const items = [];
+  for (const event of state.events) {
+    if (event.runId !== run.id || !eventMatchesAgentPage(event, agentId)) continue;
+    const message = conversationMessageFromEvent(event);
+    if (message) insertConversationMessageSorted(items, message);
+  }
+  const messages = items.length ? items : fallbackRunMessages(run, agentId);
+  ensureInitialPrompt(messages, run);
+  return messages;
+}
+
+function streamKeyAttribute(message) {
+  return message?.key ? ` data-stream-key="${escapeHtml(String(message.key))}"` : "";
+}
+
+const FILE_CHANGE_LABELS = { add: "新增", update: "修改", delete: "删除", rename: "重命名" };
+
+/** 命令的首个词——折叠态一眼分辨 npm / git / node，不用展开。 */
+function commandHeadline(command) {
+  const text = String(command || "").trim();
+  if (!text) return "命令";
+  const firstLine = text.split("\n")[0];
+  return firstLine.length > 96 ? `${firstLine.slice(0, 96)}…` : firstLine;
+}
+
+/**
+ * Codex 过程卡：命令 / 文件改动 / 旁白。默认折叠成一行（几百条命令也不淹没对话），
+ * 展开看完整命令与输出——对齐 CLI 里"命令 + 输出 + 退出码"的读法。
+ */
+function processCardMarkup(message, keyAttribute) {
+  const progress = message.progress || {};
+  const time = `<time>${escapeHtml(formatTime(message.created_at))}</time>`;
+  if (progress.kind === "note" || progress.kind === "reasoning") {
+    const glyph = lucideIcon(progress.kind === "reasoning" ? "brain" : "message-square");
+    const label = progress.kind === "reasoning" ? "推理摘要" : "过程旁白";
+    return `<div class="process-note"${keyAttribute}>
+      <span class="process-glyph" aria-hidden="true">${glyph}</span>
+      <span class="process-note-body"><span class="process-note-label">${escapeHtml(label)}</span>${renderMarkdown(progress.text ?? "", redact)}${progress.truncated ? '<span class="process-truncated">（已截断）</span>' : ""}</span>
+      ${time}
+    </div>`;
+  }
+  if (progress.kind === "file") {
+    const changes = Array.isArray(progress.changes) ? progress.changes : [];
+    const hidden = Math.max(0, Number(progress.changesTotal || changes.length) - changes.length);
+    const failed = progress.status && progress.status !== "completed";
+    const summary = changes.length === 1
+      ? `${FILE_CHANGE_LABELS[changes[0].change] ?? "改动"} ${redact(String(changes[0].path || "")).split(/[\\/]/).pop() || "文件"}`
+      : `改动 ${Number(progress.changesTotal || changes.length)} 个文件`;
+    const bodies = changes.map((change) => `
+      <div class="process-file">
+        <div class="process-file-head"><span class="process-file-kind is-${escapeHtml(change.change ?? "update")}">${escapeHtml(FILE_CHANGE_LABELS[change.change] ?? change.change ?? "改动")}</span><code>${escapeHtml(redact(String(change.path || "")))}</code></div>
+        ${change.diff ? `<pre class="process-diff">${escapeHtml(redact(change.diff))}</pre>${change.diffTruncated ? '<span class="process-truncated">（diff 已截断）</span>' : ""}` : ""}
+      </div>`).join("");
+    return `<details class="process-card is-file${failed ? " is-error" : ""}"${keyAttribute}>
+      <summary><span class="process-glyph" aria-hidden="true">${lucideIcon("file-pen-line")}</span><span class="process-summary-text">${escapeHtml(summary)}</span>${time}</summary>
+      <div class="process-body">${bodies}${hidden ? payloadRenderGuardMarkup("文件改动", hidden, "个") : ""}</div>
+    </details>`;
+  }
+  const failed = Number.isInteger(progress.exitCode) ? progress.exitCode !== 0 : progress.status === "failed";
+  const meta = [
+    Number.isInteger(progress.exitCode) ? `退出码 ${progress.exitCode}` : null,
+    Number.isFinite(progress.durationMs) ? formatDuration(progress.durationMs) : null,
+  ].filter(Boolean).join(" · ");
+  return `<details class="process-card is-command${failed ? " is-error" : ""}"${keyAttribute}>
+    <summary>
+      <span class="process-glyph" aria-hidden="true">${lucideIcon(failed ? "circle-alert" : "terminal")}</span>
+      <code class="process-summary-text">${escapeHtml(redact(commandHeadline(progress.command)))}</code>
+      ${meta ? `<span class="process-meta">${escapeHtml(meta)}</span>` : ""}${time}
+    </summary>
+    <div class="process-body">
+      <pre class="process-command">${escapeHtml(redact(String(progress.command || "")))}</pre>
+      ${progress.cwd ? `<div class="process-cwd">工作目录 <code>${escapeHtml(redact(String(progress.cwd)))}</code></div>` : ""}
+      ${progress.output
+    ? `<pre class="process-output">${escapeHtml(redact(progress.output))}</pre>${progress.outputTruncated ? '<span class="process-truncated">（输出已截断，仅保留首尾）</span>' : ""}`
+    : '<div class="process-empty-output">无输出</div>'}
+    </div>
+  </details>`;
+}
+
+function messageMarkup(message, prev = null) {
   // 兼容两代形态：旧 {role, content}（历史预览）与新 {kind, text, tools}（事件流重建）
   const kind = message.kind ?? String(message.role ?? "assistant").toLowerCase();
+  const keyAttribute = streamKeyAttribute(message);
   if (kind === "divider") {
-    return `<div class="turn-divider"><span>${escapeHtml(message.text ?? "")}</span></div>`;
+    return `<div class="turn-divider"${keyAttribute}><span>${escapeHtml(message.text ?? "")}</span></div>`;
   }
   if (kind === "turn-meta") {
-    return `<div class="turn-meta"><span>${escapeHtml(message.text ?? "")}</span><time>${escapeHtml(formatTime(message.created_at))}</time></div>`;
+    return `<div class="turn-meta"${keyAttribute}><span>${escapeHtml(message.text ?? "")}</span><time>${escapeHtml(formatTime(message.created_at))}</time></div>`;
   }
   if (kind === "tool-result") {
-    return `<div class="message-row is-tool-result">${(message.results ?? []).map(toolResultMarkup).join("")}</div>`;
+    const results = Array.isArray(message.results) ? message.results : [];
+    const resultsTotal = Math.max(results.length, Number(message.resultsTotal) || 0);
+    let remainingTextBudget = INLINE_TOOL_RESULT_TEXT_LIMIT;
+    const visibleResults = results.slice(0, INLINE_STRUCTURED_ITEM_LIMIT).map((result) => {
+      const length = declaredPayloadLength(result?.text, result?.textLength);
+      const allowInline = length <= remainingTextBudget;
+      if (allowInline) remainingTextBudget -= length;
+      return toolResultMarkup(result, { allowInline });
+    });
+    const hiddenResults = Math.max(0, resultsTotal - Math.min(results.length, INLINE_STRUCTURED_ITEM_LIMIT));
+    if (hiddenResults) {
+      visibleResults.push(payloadRenderGuardMarkup("工具结果项", hiddenResults, "项"));
+    }
+    return `<div class="message-row is-tool-result"${keyAttribute}>${visibleResults.join("")}</div>`;
   }
   if (kind === "governance") {
     // 治理注记：无头像、竖条 + 小号字（样式在 styles.css 末尾"协作台会话流增强"区块）
-    return `<div class="gov-note is-${escapeHtml(message.tone ?? "amber")}"><span>${escapeHtml(message.text ?? "")}</span><time>${escapeHtml(formatTime(message.created_at))}</time></div>`;
+    return `<div class="gov-note is-${escapeHtml(message.tone ?? "amber")}"${keyAttribute}><span>${escapeHtml(message.text ?? "")}</span><time>${escapeHtml(formatTime(message.created_at))}</time></div>`;
+  }
+  if (kind === "process") {
+    return processCardMarkup(message, keyAttribute);
   }
   const role = kind === "user" ? "user" : kind === "tool" ? "tool" : "assistant";
   const rawAuthor = message.author ?? message.agent_name ?? message.agentId ?? (role === "user" ? "LO" : role === "tool" ? "工具" : "Agent");
-  const author = role === "assistant" ? agentLabel(String(rawAuthor)) : String(rawAuthor);
-  const content = message.text ?? message.content ?? message.message ?? message.summary ?? "";
-  const avatar = role === "user" ? "LO" : role === "tool" ? "T" : author.slice(0, 2).toUpperCase();
-  const className = role === "tool" ? " is-tool" : role === "system" ? " is-system" : "";
+  const author = boundedMetadataText(role === "assistant" ? agentLabel(String(rawAuthor)) : String(rawAuthor));
+  let content = payloadText(message.text ?? message.content ?? message.message ?? message.summary);
+  const contentLength = declaredPayloadLength(content, message.textLength);
+  // [[msg:x]]/[[memo]] 是给编排器的路由指令（bus.routed 注记已呈现其语义）——正文里剥掉
+  // 标记本身保留内容，不让内部协议原文示人（与后端 parseDirectives 同规格）
+  const oversizedContent = contentLength > INLINE_MESSAGE_TEXT_LIMIT;
+  if (role === "assistant" && !oversizedContent) content = content.replace(/^\s*\[\[(?:msg:[A-Za-z0-9._-]{1,64}|memo)\]\]\s*/gm, "");
+  const className = role === "tool" ? " is-tool" : role === "system" ? " is-system" : role === "user" ? " is-user" : "";
+  // agent 配色槽：多 agent 对话里发言者一眼可辨（CSS .is-agent-* 定义色板）
+  const agentClass = role === "assistant" ? ` is-agent-${agentSlug(rawAuthor)}` : "";
+  // 群聊分组（Discord 式）：同一发言者 3 分钟内连续发言合并——头像/名字不重复，
+  // 多 agent 团队对话视觉噪音减半；分组行悬停露小时间戳（CSS 呈现）
+  const prevKind = prev ? (prev.kind ?? String(prev.role ?? "").toLowerCase()) : null;
+  const prevAuthor = prev ? String(prev.author ?? prev.agent_name ?? prev.agentId ?? "") : null;
+  const grouped = Boolean(
+    prev
+    && (kind === "user" || kind === "assistant")
+    && prevKind === kind
+    && prevAuthor === String(rawAuthor)
+    && !(message.tools ?? []).length
+    && Math.abs(new Date(message.created_at ?? 0).getTime() - new Date(prev.created_at ?? 0).getTime()) < 3 * 60_000,
+  );
+  const hoverTime = formatTime(message.created_at ?? message.timestamp);
+  // CLI/厂商官方徽标头像（历史预览按会话来源传 cli；协作流按 agent 厂商映射）——有官方标志就用官方标志；
+  // 无官方徽标时回退 Lucide 字形（用户 user-round / 工具 wrench / 未知 agent bot），身份色靠 --agent-* 环表达
+  const cli = (message.cli && CLI_ICONS[message.cli] ? message.cli : null) ?? (role === "assistant" ? agentCli(rawAuthor) : null);
+  const avatarContent = cli
+    ? cliIconMarkup(cli)
+    : role === "user"
+      ? lucideIcon("user-round")
+      : role === "tool"
+        ? lucideIcon("wrench")
+        : lucideIcon("bot");
   // assistant 输出走 markdown 渲染（用户友好）；用户输入保持原文换行（所见即所输）
-  const body = role === "user"
-    ? `<p class="message-body">${escapeHtml(redact(String(content)))}</p>`
-    : `<div class="message-body md-body">${renderMarkdown(String(content), redact)}</div>`;
-  const toolCalls = (message.tools ?? []).map(toolCallMarkup).join("");
+  const body = oversizedContent
+    ? payloadRenderGuardMarkup(role === "user" ? "用户消息" : "助手消息", contentLength)
+    : role === "user"
+      ? `<p class="message-body">${escapeHtml(redact(content))}</p>`
+      : `<div class="message-body md-body">${renderMarkdown(content, redact)}</div>`;
+  const tools = Array.isArray(message.tools) ? message.tools : [];
+  const toolsTotal = Math.max(tools.length, Number(message.toolsTotal) || 0);
+  const toolCalls = tools.slice(0, INLINE_STRUCTURED_ITEM_LIMIT).map(toolCallMarkup).join("")
+    + (toolsTotal > INLINE_STRUCTURED_ITEM_LIMIT
+      ? payloadRenderGuardMarkup("工具调用项", toolsTotal - INLINE_STRUCTURED_ITEM_LIMIT, "项")
+      : "");
+  const roleBlurb = role === "assistant" ? (AGENT_ROLE_BLURB[String(rawAuthor)] || "") : "";
+  const cliBadge = cli && !grouped
+    ? `<span class="message-cli-badge is-cli-${escapeHtml(cli)}" title="${escapeHtml(cliLabel(cli))} 原生会话">${escapeHtml(cliLabel(cli))}</span>`
+    : "";
   return `
-    <article class="message-row${className}">
-      <div class="message-avatar" aria-hidden="true">${escapeHtml(avatar)}</div>
+    <article class="message-row${className}${agentClass}${cli ? ` has-cli-avatar is-cli-${cli}` : ""}${grouped ? " is-grouped" : ""}"${keyAttribute}>
+      <div class="message-avatar" aria-hidden="true">${grouped ? `<time class="hover-time">${escapeHtml(hoverTime)}</time>` : avatarContent}</div>
       <div class="message-content">
-        <div class="message-head"><strong>${escapeHtml(author)}</strong><time>${escapeHtml(formatTime(message.created_at ?? message.timestamp))}</time></div>
+        ${grouped ? "" : `<div class="message-head"><strong>${escapeHtml(author)}</strong>${cliBadge}${roleBlurb ? `<span class="message-role-blurb">${escapeHtml(roleBlurb)}</span>` : ""}<time>${escapeHtml(hoverTime)}</time></div>`}
         ${body}${toolCalls}
       </div>
     </article>`;
+}
+
+// 活跃轮呼吸行：run 进行中时会话流尾部的"谁在干什么"实时指示——最后一条 turnAttempt 的
+// agent + 相位人话 + 三点动画。没有它，LO 面对静止的流不知道系统是活着还是卡死。
+function liveTurnMarkup(run) {
+  if (!ACTIVE_RUN_STATES.has(run.status)) return "";
+  if (run.status === "waiting_approval" || run.status === "recovery_required" || run.pendingAsk) return ""; // 等的是人，不是 agent
+  if (run.recoveryNote) return ""; // 重启遗留的 waiting_agent：协程已死，呼吸行是假活
+  const attempt = (run.turnAttempts ?? []).at(-1);
+  // 时效兜底：相位 30 分钟没动过=协程大概率已死（超时上限量级），不假装还在跑
+  const staleMs = Date.now() - Date.parse(attempt?.updatedAt ?? run.updatedAt ?? 0);
+  if (Number.isFinite(staleMs) && staleMs > 30 * 60_000) return "";
+  if (!attempt || ["completed", "failed"].includes(attempt.phase)) {
+    // 轮间空隙（上轮已结、下轮未起）：编排器在路由/编织上下文
+    return run.status === "running"
+      ? `<div class="live-turn" data-stream-key="tail:live"><span class="live-dots" aria-hidden="true"><i></i><i></i><i></i></span><span>编排器正在路由下一轮</span></div>`
+      : "";
+  }
+  const phaseText = {
+    prepared: "正在准备会话",
+    session_ready: "会话已就绪，正在提交",
+    submitting: "正在提交任务",
+    submitted: "正在执行",
+    ambiguous: "提交状态待确认",
+  }[attempt.phase] ?? "正在执行";
+  const slug = agentSlug(attempt.agentId);
+  const attemptCli = agentCli(attempt.agentId);
+  // 已运行时长：submitted 期间没有中间 checkpoint，只显示"正在执行"时 4 分钟和 40 分钟长得一样，
+  // 用户无法区分"在深度思考"和"已经死了"（LO 2026-08-08：发继续没反应，实为 Codex 正常长跑）。
+  const since = attempt.updatedAt || attempt.createdAt || null;
+  // 具体在跑什么 > 泛泛的"正在执行"：有活跃 item 时用它替换相位文案
+  const activity = codexActivityText(run.id);
+  return `
+    <div class="live-turn is-agent-${slug}" data-stream-key="tail:live">
+      <span class="message-avatar live-avatar${attemptCli ? ` has-cli-avatar is-cli-${attemptCli}` : ""}" aria-hidden="true">${attemptCli ? cliIconMarkup(attemptCli) : lucideIcon("bot")}</span>
+      <span><strong>${escapeHtml(agentLabel(attempt.agentId))}</strong> ${escapeHtml(activity || phaseText)}</span>
+      <span class="live-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+      ${since ? `<time class="live-elapsed" data-live-since="${escapeHtml(since)}">${escapeHtml(liveElapsedText(since))}</time>` : ""}
+    </div>`;
+}
+
+// 正在执行的 Codex item：item/started 记入、item/completed 抹去。历史卡片只认完成态
+// （每条命令一行），"此刻在跑什么"由这里承接——两者合起来才等于 CLI 的可见度。
+// reasoning 也在册：模型长考时没有 command/file 活跃，没有它呼吸行只剩干巴巴的相位文案
+// （LO 2026-08-10：要 Codex 官方那种「正在思考」状态）。
+const codexActivity = new Map();
+
+function trackCodexActivity(event) {
+  if (!event?.runId) return false;
+  const progress = event.data?.progress;
+  if (event.type === "codex.item/started" && progress?.id && ["command", "file", "reasoning"].includes(progress.kind)) {
+    codexActivity.set(`${event.runId}\u0000${progress.id}`, { runId: event.runId, progress, since: event.timestamp });
+    return true;
+  }
+  if (event.type === "codex.item/completed" && progress?.id) {
+    return codexActivity.delete(`${event.runId}\u0000${progress.id}`);
+  }
+  // run 收尾时清掉残留（进程被杀/轮失败时不会有 completed），否则会一直显示假的"正在执行"
+  if (/^run\.(completed|failed|cancelled)$/.test(event.type)) {
+    let removed = false;
+    for (const key of [...codexActivity.keys()]) {
+      if (key.startsWith(`${event.runId}\u0000`)) removed = codexActivity.delete(key) || removed;
+    }
+    return removed;
+  }
+  return false;
+}
+
+/** 当前 run 正在跑的那条命令/改动的人话摘要；没有则空串。 */
+function codexActivityText(runId) {
+  const entry = [...codexActivity.values()].filter((item) => item.runId === runId).at(-1);
+  if (!entry) return "";
+  if (entry.progress.kind === "reasoning") return "正在思考";
+  if (entry.progress.kind === "file") {
+    const count = Number(entry.progress.changesTotal || entry.progress.changes?.length || 0);
+    return count ? `正在写入 ${count} 个文件` : "正在写入文件";
+  }
+  return `正在执行 ${commandHeadline(entry.progress.command)}`;
+}
+
+/** 活跃轮已运行时长文案；超过 5 分钟追加提示，帮助区分"慢"与"停"。 */
+function liveElapsedText(since) {
+  const startedMs = Date.parse(String(since ?? ""));
+  if (!Number.isFinite(startedMs)) return "";
+  const elapsed = Math.max(0, Date.now() - startedMs);
+  const totalSeconds = Math.floor(elapsed / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  // formatDuration 输出的是 "263 s"，分钟级读起来费劲——活跃轮要的是一眼看懂
+  const span = minutes ? `${minutes} 分 ${String(totalSeconds % 60).padStart(2, "0")} 秒` : `${totalSeconds} 秒`;
+  return elapsed >= 5 * 60_000 ? `已运行 ${span} · 长时间执行中` : `已运行 ${span}`;
+}
+
+/** 秒级走时：只改那一个 time 节点的文本，不触发会话流重绘。 */
+function tickLiveElapsed() {
+  for (const node of document.querySelectorAll("[data-live-since]")) {
+    node.textContent = liveElapsedText(node.dataset.liveSince);
+  }
+}
+
+// v3.6 社会模拟拓扑：从 bus.jsonl 的 from/to 消息流构建参与者链（谁说了几句、谁是 leader）。
+// 成功短 TTL + 失败指数负缓存；旧 run 请求可取消，避免离线 bus 在 SSE 热路径形成请求风暴。
+const socialTopologyCache = new Map(); // runId → { at, messages, diagnostics } | { error, failures, retryAt }
+const socialTopologyInflight = new Map(); // runId → { promise, controller }
+let socialTopologyGeneration = 0;
+const SOCIAL_TOPOLOGY_TTL_MS = 30_000; // bus.routed 会精确失效；TTL 只兜底外部写入
+const SOCIAL_TOPOLOGY_MAX_BACKOFF_MS = 30_000;
+
+function trimSocialTopologyCache() {
+  while (socialTopologyCache.size > 30) socialTopologyCache.delete(socialTopologyCache.keys().next().value);
+}
+
+function abortSocialTopologyRequest(runId) {
+  const entry = socialTopologyInflight.get(runId);
+  if (!entry) return;
+  // Delete ownership before aborting. A transport that ignores AbortSignal is
+  // still fenced out by the promise-identity gate in the completion handler.
+  socialTopologyInflight.delete(runId);
+  entry.controller.abort();
+}
+
+function invalidateSocialTopology(runId) {
+  socialTopologyCache.delete(runId);
+  abortSocialTopologyRequest(runId);
+}
+
+function cancelSocialTopologyRequestsExcept(runId) {
+  for (const id of socialTopologyInflight.keys()) {
+    if (id !== runId) abortSocialTopologyRequest(id);
+  }
+}
+
+function supersededSocialTopologyError() {
+  return Object.assign(new Error("social topology request was superseded"), {
+    name: "AbortError",
+    code: "ABORT_ERR",
+  });
+}
+
+function loadSocialTopologyMessages(runId) {
+  const now = Date.now();
+  const cached = socialTopologyCache.get(runId);
+  if (cached?.messages && now - cached.at < SOCIAL_TOPOLOGY_TTL_MS) {
+    return Promise.resolve({ messages: cached.messages, diagnostics: cached.diagnostics ?? null });
+  }
+  if (cached?.error && now < cached.retryAt) return Promise.reject(cached.error);
+  const existing = socialTopologyInflight.get(runId);
+  if (existing) return existing.promise;
+  const controller = new AbortController();
+  const pending = request(`/api/runs/${encodeURIComponent(runId)}/bus`, { signal: controller.signal })
+    .then((payload) => {
+      if (controller.signal.aborted || socialTopologyInflight.get(runId)?.promise !== pending) {
+        throw supersededSocialTopologyError();
+      }
+      const messages = Array.isArray(payload?.messages) ? payload.messages : [];
+      const diagnostics = payload?.diagnostics && typeof payload.diagnostics === "object" ? payload.diagnostics : null;
+      socialTopologyCache.set(runId, { at: Date.now(), messages, diagnostics });
+      trimSocialTopologyCache();
+      return { messages, diagnostics };
+    })
+    .catch((error) => {
+      const ownsRequest = socialTopologyInflight.get(runId)?.promise === pending;
+      if (!controller.signal.aborted && ownsRequest && error?.name !== "AbortError") {
+        const failures = (cached?.failures ?? 0) + 1;
+        const retryAfter = Math.min(1_000 * (2 ** (failures - 1)), SOCIAL_TOPOLOGY_MAX_BACKOFF_MS);
+        socialTopologyCache.set(runId, { error, failures, retryAt: Date.now() + retryAfter });
+        trimSocialTopologyCache();
+      }
+      throw error;
+    })
+    .finally(() => {
+      if (socialTopologyInflight.get(runId)?.promise === pending) socialTopologyInflight.delete(runId);
+    });
+  socialTopologyInflight.set(runId, { promise: pending, controller });
+  return pending;
+}
+
+async function renderSocialTopology(run, generation) {
+  const container = elements["session-topology"];
+  const canCommit = () =>
+    generation === socialTopologyGeneration
+    && state.selectedRunId === run.id
+    && selectedRun()?.orchestrationMode === "social";
+  try {
+    const { messages, diagnostics } = await loadSocialTopologyMessages(run.id);
+    if (!canCommit()) return;
+    const degraded = diagnostics?.status === "degraded";
+    const truncated = diagnostics?.truncated?.bytes === true || diagnostics?.truncated?.messages === true;
+    const windowed = truncated || degraded;
+    if (!messages.length) {
+      commitMarkup(container, degraded
+        ? `<div class="empty-state" role="alert"><span>bus 审计降级，暂无法完整重建团队拓扑</span></div>`
+        : `<div class="empty-state"><span>暂无对话</span></div>`);
+      return;
+    }
+    const participants = [];
+    for (const message of messages) {
+      for (const party of [message.from, message.to]) {
+        if (party && !participants.includes(party)) participants.push(party);
+      }
+    }
+    const notice = degraded
+      ? `<div class="topology-window-note is-degraded" role="alert">bus 审计降级，以下拓扑可能不完整</div>`
+      : truncated
+        ? `<div class="topology-window-note" role="status">仅按最近 ${messages.length} 条消息重建</div>`
+        : "";
+    commitMarkup(container, notice + participants
+      .map((party) => {
+        const label = party === "lo" ? "LO" : party === "team" ? "全员" : party === "system" ? "系统" : agentLabel(party);
+        const role = party === "lo" ? "用户" : party === "team" ? "广播" : party === "system" ? "编排器" : party === run.coordinatorId ? "leader" : "成员";
+        const spoken = messages.filter((message) => message.from === party).length;
+        // 参与者卡与会话流同一套 agent 配色槽/双字码（群聊视觉一致性）；最近发言者呼吸高亮
+        const chip = party === "lo" ? "LO" : party === "team" ? "全" : party === "system" ? "系" : AGENT_SHORT[party] ?? label.slice(0, 2).toUpperCase();
+        const partyCli = agentCli(party);
+        const chipContent = partyCli ? cliIconMarkup(partyCli) : escapeHtml(chip);
+        const slug = ["lo", "team", "system"].includes(party) ? "" : ` is-agent-${agentSlug(party)}`;
+        const speaking = messages.at(-1)?.from === party ? " is-speaking" : "";
+        const interactive = party !== "lo" && party !== "team" && party !== "system";
+        const tag = interactive ? "button" : "div";
+        const attributes = interactive
+          ? ` type="button" data-topology-agent="${escapeHtml(party)}" title="打开 ${escapeHtml(label)} 的独立页" aria-label="打开 ${escapeHtml(label)} 的独立页"`
+          : "";
+        const countLabel = windowed ? `${spoken} 条近期发言` : `${spoken} 条发言`;
+        return `<${tag} class="topology-node${slug}${speaking}"${attributes}><span class="topology-chip${partyCli ? " has-cli-logo" : ""}" aria-hidden="true">${chipContent}</span><div><strong>${escapeHtml(label)}</strong><span>${escapeHtml(role)} · ${countLabel}</span></div></${tag}>`;
+      })
+      .join(""));
+  } catch (error) {
+    if (error?.name === "AbortError" || error?.code === "ABORT_ERR") return;
+    if (canCommit()) {
+      const retryAt = socialTopologyCache.get(run.id)?.retryAt ?? Date.now();
+      const seconds = Math.max(1, Math.ceil((retryAt - Date.now()) / 1000));
+      commitMarkup(container, `<div class="empty-state"><span>bus 读取失败，${seconds} 秒后可重试</span></div>`);
+    }
+  }
 }
 
 function renderRouteDecision(route) {
@@ -2542,43 +12897,122 @@ function renderRouteDecision(route) {
 }
 
 function renderTopology(run) {
+  const generation = ++socialTopologyGeneration;
+  cancelSocialTopologyRequestsExcept(run?.orchestrationMode === "social" ? run.id : null);
   if (!run) {
-    elements["session-topology"].innerHTML = `<div class="empty-state"><span>暂无会话</span></div>`;
+    commitMarkup(elements["session-topology"], `<div class="empty-state"><span>暂无会话</span></div>`);
+    return;
+  }
+  if (run.orchestrationMode === "social") {
+    void renderSocialTopology(run, generation); // 请求去重 + 选中 run/渲染代次双门，旧响应不得倒灌
     return;
   }
   const sessions = Array.isArray(run.sessions) ? run.sessions : [];
-  const root = sessions.find((session) => session.parent_session_id == null || session.role === "orchestrator") ?? {
-    name: "Claude 主脑",
+  const coordinatorId = run.coordinatorId || "";
+  const coordinatorName = coordinatorId ? agentLabel(coordinatorId) : "团队主脑";
+  const root = selectPipelineRoot(sessions, coordinatorId) ?? {
+    name: coordinatorName,
+    agentId: coordinatorId || null,
     role: "orchestrator",
     status: run.status,
   };
   const children = sessions.filter((session) => session !== root).slice(0, 5);
   const nodes = [root, ...children];
-  elements["session-topology"].innerHTML = nodes
+  commitMarkup(elements["session-topology"], nodes
     .map((session, index) => {
-      const name = session.name ?? session.agent_name ?? session.agent_id ?? session.adapter ?? (index === 0 ? "Claude 主脑" : `Agent ${index}`);
-      const role = session.role ?? session.kind ?? (index === 0 ? "orchestrator" : "worker");
+      const agentId = sessionAgentId(session);
+      const name = session.name ?? session.agent_name ?? (agentId ? agentLabel(agentId) : null) ?? session.adapter ?? (index === 0 ? coordinatorName : `Agent ${index}`);
+      const role = session === root ? "orchestrator" : session.role ?? session.kind ?? "worker";
       const status = session.status ?? session.state ?? run.status;
       return `<div class="topology-node"><span class="status-dot is-${normalizeStatus(status === "complete" ? "ok" : ACTIVE_RUN_STATES.has(String(status)) ? "pending" : status)}"></span><div><strong>${escapeHtml(name)}</strong><span>${escapeHtml(role)} · ${escapeHtml(runStatusText(status))}</span></div></div>`;
     })
-    .join("");
+    .join(""));
 }
 
 function renderWorkbenchEvents() {
   const run = selectedRun();
-  const events = state.events.filter((event) => !run || event.runId === run.id).slice(0, 30);
+  // 选中 run 时合并磁盘回放历史（fetchRunEvents）——旧 run 的事件早已滚出 SSE 实时窗口，
+  // 只吃 state.events 会让右栏空报"等待事件"（历史在磁盘上明明有）
+  const historical = run ? [...historyEventsForRun(run.id)].reverse() : []; // 磁盘回放旧→新，时间线要新→旧
+  const merged = [];
+  for (const event of [...state.events.filter((item) => !run || item.runId === run.id), ...historical]) {
+    // 实时窗口会把连续 delta 聚合成一个 envelope，而磁盘历史保留原始片段。
+    // 复用聚合项的 ID/sequence 覆盖关系，避免右栏同时显示聚合项和每个原始片段。
+    if (merged.some((tracked) => eventTracksEvent(tracked, event))) continue;
+    merged.push(event);
+    if (merged.length >= 30) break;
+  }
+  const events = merged;
+  // 事件流彩色分类（精致化波次）：类型前缀→色调，告警词→红，一眼分出治理/总线/agent/自动化
+  const eventTone = (type) => {
+    const value = String(type);
+    if (/fail|error|denied|dropped|blocked/i.test(value)) return "red";
+    if (value.startsWith("bus.")) return "aqua";
+    if (value.startsWith("agent.")) return "blue";
+    if (value.startsWith("automation.")) return "amber";
+    if (value.startsWith("run.")) return "rose";
+    if (value === "user.message") return "violet";
+    return "neutral";
+  };
   elements["workbench-event-list"].innerHTML = events.length
     ? events
         .map(
           (event) => `
-          <li class="timeline-item">
+          <li class="timeline-item is-tone-${eventTone(event.type)}">
             <strong>${escapeHtml(event.type)}</strong>
             <span>${escapeHtml(event.summary)}</span>
             <time>${escapeHtml(formatTime(event.timestamp))}</time>
           </li>`,
         )
         .join("")
-    : `<li class="timeline-item"><strong>等待事件</strong><span>SSE 建立后自动刷新</span></li>`;
+    : `<li class="timeline-item"><strong>等待事件</strong><span>${run ? "该任务暂无事件记录" : "SSE 建立后自动刷新"}</span></li>`;
+}
+
+// 配置源语义分组：99 个源平铺必乱——按路径拓扑归 13 组（顺序即展示序），
+// 运行时/密钥面永远沉底；搜索态退化为平铺结果（分组反而碍事）
+const SOURCE_GROUP_META = Object.freeze([
+  { key: "core", label: "治理核心", icon: "book-open" },
+  { key: "claude", label: "Claude 平台", icon: "sparkles" },
+  { key: "codex", label: "Codex 平台", icon: "brain" },
+  { key: "cursor", label: "Cursor 平台", icon: "type" },
+  { key: "agent-skills", label: "平台技能 · .agents", icon: "bot" },
+  { key: "domain-skills", label: "领域技能 · skills/", icon: "puzzle" },
+  { key: "console", label: "控制台", icon: "settings" },
+  { key: "persona", label: "人格与定制", icon: "palette" },
+  { key: "guardrails", label: "守卫层", icon: "shield" },
+  { key: "lilith", label: "Lilith 子系统", icon: "orbit" },
+  { key: "statusline", label: "状态栏", icon: "activity" },
+  { key: "runtime", label: "运行时镜像（只读）", icon: "server" },
+  { key: "other", label: "其他", icon: "folder" },
+]);
+
+function sourceGroupFor(source) {
+  const p = String(source.path ?? "").replace(/\\/g, "/");
+  if (source.secret || ["runtime", "secret", "generated"].includes(source.scope)) return "runtime";
+  if (p.startsWith(".agents/skills/")) return "agent-skills";
+  if (p.startsWith("skills/")) return "domain-skills";
+  if (p.startsWith(".claude/") || p.startsWith(".claude-plugin/")) return "claude";
+  if (p.startsWith(".codex/")) return "codex";
+  if (p.startsWith(".cursor/")) return "cursor";
+  if (p.startsWith("config/control-center/") || p.startsWith("schemas/")) return "console";
+  if (p.startsWith("output-styles/") || p.startsWith("customize/")) return "persona";
+  if (p.startsWith("guardrails/")) return "guardrails";
+  if (p.startsWith("lilith/")) return "lilith";
+  if (p.startsWith("statusline/")) return "statusline";
+  if (p && !p.includes("/")) return "core";
+  return "other";
+}
+
+function sourceItemMarkup(source) {
+  return `
+          <button class="source-item${source.id === state.selectedSourceId ? " is-selected" : ""}" type="button" data-source-id="${escapeHtml(source.id)}">
+            <span class="source-icon">${escapeHtml(formatBadge(source.format))}</span>
+            <span class="source-main">
+              <strong>${escapeHtml(source.name)}</strong>
+              <span>${escapeHtml(source.path)}</span>
+            </span>
+            <span class="source-state-icon is-${escapeHtml(source.status)}" title="${escapeHtml(source.status)}"></span>
+          </button>`;
 }
 
 function renderSources() {
@@ -2587,21 +13021,36 @@ function renderSources() {
     [source.name, source.path, source.scope, source.format].some((value) => String(value).toLowerCase().includes(filter)),
   );
   elements["source-count"].textContent = `${filtered.length}/${state.sources.length}`;
-  elements["source-list"].innerHTML = filtered.length
-    ? filtered
-        .map(
-          (source) => `
-          <button class="source-item${source.id === state.selectedSourceId ? " is-selected" : ""}" type="button" data-source-id="${escapeHtml(source.id)}">
-            <span class="source-icon">${escapeHtml(formatBadge(source.format))}</span>
-            <span class="source-main">
-              <strong>${escapeHtml(source.name)}</strong>
-              <span>${escapeHtml(source.path)}</span>
-            </span>
-            <span class="source-state-icon is-${escapeHtml(source.status)}" title="${escapeHtml(source.status)}"></span>
-          </button>`,
-        )
-        .join("")
-    : emptyMarkup("没有匹配项", filter ? "调整筛选条件" : "配置索引尚未加载");
+  if (!filtered.length) {
+    elements["source-list"].innerHTML = emptyMarkup("没有匹配项", filter ? "调整筛选条件" : "配置索引尚未加载");
+    return;
+  }
+  if (filter) {
+    elements["source-list"].innerHTML = filtered.map(sourceItemMarkup).join("");
+    return;
+  }
+  const buckets = new Map();
+  for (const source of filtered) {
+    const key = sourceGroupFor(source);
+    if (!buckets.has(key)) buckets.set(key, []);
+    buckets.get(key).push(source);
+  }
+  elements["source-list"].innerHTML = SOURCE_GROUP_META.filter((group) => buckets.has(group.key))
+    .map((group) => {
+      const items = buckets.get(group.key);
+      // 含选中源的组强制展开（selection 可见性优先于手动折叠）
+      const expanded = state.sourceGroupsExpanded.has(group.key) || items.some((item) => item.id === state.selectedSourceId);
+      return `<section class="source-group${expanded ? " is-expanded" : ""}">
+        <button class="source-group-header" type="button" data-source-group="${escapeHtml(group.key)}" aria-expanded="${expanded}">
+          <svg class="icon lucide source-group-chevron"><use href="#lucide-chevron-right"></use></svg>
+          <svg class="icon lucide"><use href="#lucide-${escapeHtml(group.icon)}"></use></svg>
+          <span class="source-group-label">${escapeHtml(group.label)}</span>
+          <span class="source-group-count">${items.length}</span>
+        </button>
+        <div class="source-group-items"${expanded ? "" : " hidden"}>${items.map(sourceItemMarkup).join("")}</div>
+      </section>`;
+    })
+    .join("");
 }
 
 async function selectSource(id) {
@@ -2623,15 +13072,18 @@ async function selectSource(id) {
   state.selectedSourceId = id;
   state.config = null;
   state.versions = [];
+  state.configVersionPreview = null;
   state.pendingPlan = null;
   renderSources();
   renderConfig();
   await loadSelectedConfig();
 }
 
+let selectedConfigLoadGeneration = 0;
 async function loadSelectedConfig() {
   const source = state.sources.find((item) => item.id === state.selectedSourceId);
-  if (!source) return;
+  if (!source) return successfulLoadResult(null, { skipped: true });
+  const generation = ++selectedConfigLoadGeneration;
   setConfigBusy(true);
   try {
     const encoded = encodeURIComponent(source.id);
@@ -2640,6 +13092,9 @@ async function loadSelectedConfig() {
       request(`/api/config/${encoded}/versions`),
     ]);
     if (detailResult.status === "rejected") throw detailResult.reason;
+    if (generation !== selectedConfigLoadGeneration || state.selectedSourceId !== source.id) {
+      return successfulLoadResult(null, { stale: true });
+    }
     const raw = detailResult.value?.config ?? detailResult.value?.source ?? detailResult.value ?? {};
     const content = typeof raw === "string" ? raw : raw.content ?? raw.raw ?? raw.text ?? raw.value ?? "";
     const serverReadOnly = raw.read_only ?? raw.readOnly ?? (raw.writable === false ? true : null);
@@ -2664,16 +13119,24 @@ async function loadSelectedConfig() {
       versionsResult.status === "fulfilled"
         ? unwrapList(versionsResult.value, ["versions", "snapshots", "history"])
         : [];
+    state.configVersionPreview = null;
     if (versionsResult.status === "rejected") appendDiagnostic(`版本列表读取失败：${versionsResult.reason?.message}`, "warning");
     setValidationStatus("尚未校验", "neutral");
+    return successfulLoadResult(state.config);
   } catch (error) {
+    if (generation !== selectedConfigLoadGeneration || state.selectedSourceId !== source.id) {
+      return successfulLoadResult(null, { stale: true });
+    }
     state.config = null;
     toast(error.message, "error");
     appendDiagnostic(`配置读取失败 ${source.id}: ${error.message}`, "error");
+    return failedLoadResult(error);
   } finally {
-    setConfigBusy(false);
-    renderSources();
-    renderConfig();
+    if (generation === selectedConfigLoadGeneration) {
+      setConfigBusy(false);
+      renderSources();
+      renderConfig();
+    }
   }
 }
 
@@ -2691,10 +13154,13 @@ function renderConfig() {
     elements["config-editor"].disabled = true;
     elements["readonly-banner"].hidden = true;
     elements["version-list"].innerHTML = emptyMarkup("暂无版本", "选择配置后加载快照");
+    state.configVersionPreview = null;
+    renderConfigVersionPreview();
     elements["config-global-status"].textContent = "等待选择";
     elements["config-global-status"].className = "status-label is-neutral";
     updateConfigControls();
     updateEditorMetrics();
+    renderConfigTopology();
     return;
   }
 
@@ -2734,9 +13200,11 @@ function renderConfig() {
   renderVersions();
   updateConfigControls();
   updateEditorMetrics();
+  renderConfigTopology();
 }
 
 function renderVersions() {
+  const preview = state.configVersionPreview;
   elements["version-list"].innerHTML = state.versions.length
     ? state.versions
         .map((version, index) => {
@@ -2744,19 +13212,93 @@ function renderVersions() {
           const hash = String(version.fromSha256 ?? version.sha256 ?? version.sha ?? version.after_sha256 ?? id);
           const created = version.createdAt ?? version.created_at ?? version.timestamp ?? version.at;
           const reason = version.reason ?? version.message ?? version.actor ?? "配置快照";
+          const selected = preview?.sourceId === state.config?.id && preview?.versionId === id;
           return `
-            <div class="version-row">
+            <div class="version-row${selected ? " is-selected" : ""}">
               <div class="version-main">
                 <strong title="${escapeHtml(hash)}">${escapeHtml(compactHash(hash))}</strong>
                 <span>${escapeHtml(formatDate(created))} · ${escapeHtml(reason)}</span>
               </div>
-              <button class="rollback-button" type="button" data-version-id="${escapeHtml(id)}" title="回滚到此版本" aria-label="回滚到 ${escapeHtml(compactHash(hash))}" ${state.config?.readOnly ? "disabled" : ""}>
-                <svg class="icon"><use href="#icon-history"></use></svg>
+              <button class="rollback-button" type="button" data-version-preview="${escapeHtml(id)}" title="预览并对比此版本" aria-label="预览版本 ${escapeHtml(compactHash(hash))}" aria-pressed="${selected}">
+                ${lucideIcon(selected && preview?.status === "loading" ? "loader-circle" : "file-diff")}
               </button>
             </div>`;
         })
         .join("")
     : emptyMarkup("暂无版本", "保存后会生成可回滚快照");
+  renderConfigVersionPreview();
+}
+
+let configVersionPreviewGeneration = 0;
+async function previewConfigVersion(versionId) {
+  if (!state.config || !versionId) return;
+  const sourceId = state.config.id;
+  const version = state.versions.find(
+    (item, index) => String(item.versionId ?? item.id ?? item.version_id ?? item.snapshot_id ?? item.sha256 ?? index) === String(versionId),
+  );
+  const generation = ++configVersionPreviewGeneration;
+  state.configVersionPreview = { sourceId, versionId: String(versionId), version, status: "loading" };
+  renderVersions();
+  try {
+    const payload = await request(`/api/config/${encodeURIComponent(sourceId)}/versions/${encodeURIComponent(versionId)}/content`);
+    if (generation !== configVersionPreviewGeneration || state.config?.id !== sourceId || state.configVersionPreview?.versionId !== String(versionId)) return;
+    const raw = payload?.version ?? payload;
+    const content = String(raw?.content ?? raw?.raw ?? raw?.text ?? "");
+    const diff = createLocalDiff(content, elements["config-editor"].value);
+    state.configVersionPreview = { sourceId, versionId: String(versionId), version, status: "ok", data: { ...raw, content, diff } };
+  } catch (error) {
+    if (generation !== configVersionPreviewGeneration || state.config?.id !== sourceId || state.configVersionPreview?.versionId !== String(versionId)) return;
+    state.configVersionPreview = { sourceId, versionId: String(versionId), version, status: "error", error: error.message };
+    appendDiagnostic(`历史版本预览失败 ${sourceId} -> ${versionId}: ${error.message}`, "warning");
+  }
+  renderVersions();
+}
+
+function clearConfigVersionPreview() {
+  configVersionPreviewGeneration += 1;
+  state.configVersionPreview = null;
+  renderVersions();
+}
+
+function renderConfigVersionPreview() {
+  const panel = elements["version-preview"];
+  if (!panel) return;
+  const preview = state.configVersionPreview;
+  panel.hidden = !preview;
+  if (!preview) return;
+  const status = elements["version-preview-status"];
+  const rollback = elements["version-preview-rollback"];
+  const meta = elements["version-preview-meta"];
+  const output = elements["version-preview-diff"];
+  if (preview.status === "loading") {
+    status.textContent = "读取中";
+    status.className = "status-label is-neutral";
+    meta.textContent = "正在读取历史原文并生成差异…";
+    output.textContent = "";
+    rollback.disabled = true;
+    rollback.dataset.versionId = "";
+    return;
+  }
+  if (preview.status === "error") {
+    status.textContent = "读取失败";
+    status.className = "status-label is-error";
+    meta.textContent = preview.error ?? "历史版本不可用";
+    output.textContent = "";
+    rollback.disabled = true;
+    rollback.dataset.versionId = "";
+    return;
+  }
+  const version = preview.version ?? {};
+  const data = preview.data ?? {};
+  const hash = data.sha256 ?? version.fromSha256 ?? version.sha256 ?? preview.versionId;
+  const created = version.createdAt ?? version.created_at ?? version.timestamp ?? version.at;
+  const diff = data.diff ?? "无变更";
+  status.textContent = countDiffChanges(diff) ? `${countDiffChanges(diff)} 行变化` : "内容一致";
+  status.className = `status-label is-${countDiffChanges(diff) ? "warning" : "ok"}`;
+  meta.innerHTML = `<span><strong>快照</strong><code title="${escapeHtml(String(hash))}">${escapeHtml(compactHash(hash))}</code></span><span><strong>创建</strong>${escapeHtml(formatDate(created))}</span><span><strong>对比</strong>历史版本 → 当前编辑器</span>`;
+  output.innerHTML = diffMarkup(diff);
+  rollback.disabled = Boolean(state.config?.readOnly || state.configBusy);
+  rollback.dataset.versionId = preview.versionId;
 }
 
 function configIsDirty() {
@@ -2774,8 +13316,19 @@ function updateEditorFromInput() {
   elements["config-edit-state"].textContent = configIsDirty() ? "已修改" : "无变更";
   elements["config-global-status"].textContent = configIsDirty() ? "有未保存变更" : "已加载";
   elements["config-global-status"].className = `status-label is-${configIsDirty() ? "warning" : "ok"}`;
+  if (state.configVersionPreview?.status === "ok") {
+    state.configVersionPreview = {
+      ...state.configVersionPreview,
+      data: {
+        ...state.configVersionPreview.data,
+        diff: createLocalDiff(state.configVersionPreview.data.content, elements["config-editor"].value),
+      },
+    };
+    renderConfigVersionPreview();
+  }
   updateEditorMetrics();
   updateConfigControls();
+  renderConfigTopology();
 }
 
 function updateEditorMetrics() {
@@ -2792,6 +13345,7 @@ function setValidationStatus(text, status = "neutral") {
 function setConfigBusy(busy) {
   state.configBusy = busy;
   updateConfigControls();
+  renderConfigVersionPreview();
 }
 
 function updateConfigControls() {
@@ -2943,14 +13497,18 @@ function countDiffChanges(diff) {
     .filter((line) => (line.startsWith("+") && !line.startsWith("+++")) || (line.startsWith("-") && !line.startsWith("---"))).length;
 }
 
-function renderDiff(diff) {
-  elements["diff-output"].innerHTML = String(diff)
+function diffMarkup(diff) {
+  return String(diff)
     .split(/\r?\n/)
     .map((line) => {
       const className = line.startsWith("+") && !line.startsWith("+++") ? "diff-line-add" : line.startsWith("-") && !line.startsWith("---") ? "diff-line-remove" : "";
       return `<span class="${className}">${escapeHtml(line)}</span>`;
     })
     .join("\n");
+}
+
+function renderDiff(diff) {
+  elements["diff-output"].innerHTML = diffMarkup(diff);
 }
 
 async function applyConfig() {
@@ -2993,6 +13551,8 @@ async function applyConfig() {
       const activation = result?.activation;
       if (activation?.status === "reloaded") {
         toast(`配置已保存并热重载（generation ${activation.generation}）`, "success");
+        await loadBootstrap();
+        await loadTeams({ fresh: true });
       } else if (activation?.status === "restart-required") {
         toast(`配置已保存；${activation.reason}`, "warning", 7000);
       } else {
@@ -3021,6 +13581,10 @@ async function applyConfig() {
 
 async function rollbackConfig(versionId) {
   if (!state.config || state.config.readOnly) return;
+  if (state.configVersionPreview?.status !== "ok" || state.configVersionPreview.versionId !== String(versionId)) {
+    toast("请先成功读取并核对该历史版本", "warning");
+    return;
+  }
   const version = state.versions.find(
     (item, index) => String(item.versionId ?? item.id ?? item.version_id ?? item.snapshot_id ?? item.sha256 ?? index) === String(versionId),
   );
@@ -3034,7 +13598,9 @@ async function rollbackConfig(versionId) {
       ["当前 SHA", compactHash(state.config.sha256)],
       ["策略", "以新事务恢复，不删除历史"],
     ],
-    warning: "回滚会替换当前真源内容，并生成新的审计版本。",
+    warning: configIsDirty()
+      ? "当前编辑器还有未保存内容。回滚会放弃这些编辑、替换真源内容，并生成新的审计版本。"
+      : "回滚会替换当前真源内容，并生成新的审计版本。",
     confirmLabel: "确认回滚",
     danger: true,
   });
@@ -3104,7 +13670,7 @@ function renderRouter() {
         <td><strong>${escapeHtml(candidate.label ?? candidate.id ?? "?")}</strong><br><span class="subtle mono">${escapeHtml(candidate.id ?? "")}</span></td>
         <td class="mono">${escapeHtml(String(candidate.score ?? "--"))}</td>
         <td class="mono">${escapeHtml(String(candidate.capabilityMatch ?? "--"))}</td>
-        <td><span class="status-label is-${healthStatus === "online" ? "ok" : healthStatus === "degraded" ? "warning" : "error"}">${escapeHtml(healthStatus)}</span></td>
+        <td><span class="status-label is-${normalizeStatus(healthStatus)}">${escapeHtml(statusText(healthStatus))}</span></td>
         <td>${escapeHtml(redact(verdict))}</td>
       </tr>`;
     })
@@ -3129,7 +13695,33 @@ function renderModels() {
     : `<tr><td colspan="5" class="subtle">模型注册表尚未加载。</td></tr>`;
 }
 
-async function previewRoute(prompt, kind, risk, currentSource) {
+function captureComposerConfig({ includeRequestedAgents = true } = {}) {
+  const target = activeComposerTarget();
+  return Object.freeze({
+    target: Object.freeze({
+      mode: target.mode,
+      memberId: target.memberId,
+      teamId: target.teamId,
+    }),
+    requestedAgentIds: Object.freeze(includeRequestedAgents ? [...state.requestedAgentIds] : []),
+    permissionMode: elements["task-permission"].value,
+    model: elements["task-model-pick"]?.hidden ? undefined : elements["task-model"]?.value || undefined,
+    effort: elements["task-effort-pick"]?.hidden ? undefined : elements["task-effort"]?.value || undefined,
+    cwd: state.pendingRemote ? undefined : state.pendingCwd || undefined, // 远程位置与 cwd 互斥（后端同口径）
+    remote: state.pendingRemote
+      ? { hostId: state.pendingRemote.hostId, path: state.pendingRemote.path }
+      : undefined, // v41：远程 run 运行位置（hostName/projectId 仅 UI 用，不出机）
+  });
+}
+
+async function previewRoute(
+  prompt,
+  kind,
+  risk,
+  currentSource,
+  composerTarget = activeComposerTarget(),
+  requestedAgentIds = state.requestedAgentIds,
+) {
   const taskType = kind === "auto" ? undefined : kind;
   const payload = await request(API.routerPreview, {
     method: "POST",
@@ -3138,7 +13730,9 @@ async function previewRoute(prompt, kind, risk, currentSource) {
       taskType,
       risk,
       needsCurrentSource: Boolean(currentSource),
-      teamId: state.selectedTeamId, // 预览与正式路由同一团队契约（烛 R10 致命2）
+      teamId: composerTarget.teamId || state.selectedTeamId, // 预览与正式路由同一团队契约
+      startAgentId: composerTarget.memberId || undefined,
+      requestedAgentIds: requestedAgentIds.length ? [...requestedAgentIds] : undefined,
     },
   });
   state.routePreview = normalizeRoute(payload);
@@ -3174,20 +13768,38 @@ async function handleRouterSubmit(event) {
 
 async function createRun(event) {
   event.preventDefault();
+  // 停止模式：活跃 run + 空输入时发送键已切为停止键——级联取消（走既有确认弹窗），不走发送路径
+  if (elements["submit-task-button"]?.dataset.mode === "stop") {
+    void cancelSelectedRun();
+    return;
+  }
   // 胶囊双模式分流：选中任务且非历史预览 → 续聊当前原生会话；否则新建任务
   if (selectedRun() && !state.sessionPreview) return continueSelectedRun(event);
   const prompt = elements["task-input"].value.trim();
   if (!prompt) return;
+  // v3.6：社会模拟是默认内置模式（无需前缀）；/pipeline 为旧拓扑后门
+  const legacy = /^\/pipeline\s+/i.test(prompt);
+  const effectivePrompt = legacy ? prompt.replace(/^\/pipeline\s+/i, "").trim() : prompt;
+  if (!effectivePrompt) return toast("任务内容为空", "warning");
   // 档位对标 CLI：/effort 折叠下拉恒有值；权限折叠下拉（plan/build）；路由风险固定 medium
   const risk = "medium";
-  const effort = elements["task-effort"].value;
-  const permissionMode = elements["task-permission"].value;
-  const fullPrompt = withAttachments(prompt);
+  const fullPrompt = effectivePrompt;
+  const submissionSources = [...state.attachments];
+  const submission = captureComposerConfig({ includeRequestedAgents: !legacy });
+  const composerTarget = submission.target;
+  if (!composerTarget.memberId) return toast("当前团队没有可发送的主脑或成员", "warning");
   elements["submit-task-button"].disabled = true;
 
   let route = null;
   try {
-    route = await previewRoute(fullPrompt, "auto", String(risk), false); // 预览与实际提交同一文本（含附件块）
+    route = await previewRoute(
+      fullPrompt,
+      "auto",
+      String(risk),
+      false,
+      composerTarget,
+      submission.requestedAgentIds,
+    ); // 预览与实际提交消费同一不可变快照
   } catch (error) {
     appendDiagnostic(`任务预路由不可用，将由运行时最终路由：${error.message}`, "warning");
   }
@@ -3201,31 +13813,56 @@ async function createRun(event) {
         risk,
         execute: true,
         collaborationMode: "deep",
-        permissionMode,
-        teamId: state.selectedTeamId, // 会话按所选团队隔离能力配比
+        orchestrationMode: legacy ? "pipeline" : undefined, // v3.6：默认社会模拟；/pipeline 走旧拓扑
+        startAgentId: composerTarget.memberId, // 活动目标标签就是首个直接收件人
+        requestedAgentIds: submission.requestedAgentIds.length ? [...submission.requestedAgentIds] : undefined,
+        permissionMode: submission.permissionMode,
+        teamId: composerTarget.teamId || state.selectedTeamId, // 会话按所选团队隔离能力配比
         maxBudgetUsdPerTurn: 2, // 真实 CLI 带工具轮，0.75 默认必超线；用满 policy 上限（permissions.json 可调）
-        model: elements["task-model"]?.value || undefined, // /model：本会话 claude 主脑模型（空=profile 默认 fable）
-        effort, // /effort：本会话 claude 主脑推理力度（对标 CLI 档位表，默认 high）
-        cwd: state.pendingCwd || undefined, // 会话项目地址（空=控制面默认 repoRoot）
+        model: submission.model, // 当前直接目标的 CLI 模型（空=该 profile 默认）
+        effort: submission.effort, // 当前直接目标的 CLI 推理力度
+        cwd: submission.cwd, // 会话项目地址（空=控制面默认 repoRoot）
+        remote: submission.remote, // v41：远程运行位置 {hostId, path}（与 cwd 互斥；空=本机）
+        sources: submissionSources.length ? submissionSources : undefined,
       },
     });
     const raw = payload?.run ?? payload;
     const run = normalizeRun(raw ?? { prompt, risk, status: "planning" }, 0);
     state.runs = [run, ...state.runs.filter((item) => item.id !== run.id)];
     if (state.sessionPreview) closeSessionPreview({ restoreFocus: false }); // 新任务落地即退出历史预览（烛 R5 致命2）
-    state.selectedRunId = run.id;
     elements["task-input"].value = "";
+    syncSideChatDraftFromComposer();
+    state.requestedAgentIds = [];
+    renderRequestedAgentChips();
     state.attachments = [];
     renderAttachments();
+    openTab(run.id, composerTarget.memberId);
+    // 严格归属制（LO 2026-08-10）：选了目录的任务，项目未归属时自动归属创建团队——
+    // 团队树下只挂归属项目，不自动归属就等于任务在跑、文件夹却在「未归属」组里
+    if (submission.cwd) assignCwdProjectToTeam(submission.cwd, composerTarget.teamId || state.selectedTeamId);
     toast("任务已交给控制面", "success");
     appendDiagnostic(`任务创建 ${run.id}: ${prompt.slice(0, 80)}`);
-    renderRuns();
   } catch (error) {
     toast(error.message, "error");
     appendDiagnostic(`任务创建失败：${error.message}`, "error");
   } finally {
     elements["submit-task-button"].disabled = false;
   }
+}
+
+function buildContinueMessage({ run, prompt, agentId, agentLock, acknowledgeRecovery = false }) {
+  const teamAnswer = Boolean(run.pendingAsk) && agentId === run.pendingAsk.from;
+  const answerToAskId = teamAnswer ? String(run.pendingAsk?.id ?? "").trim() : "";
+  const message = { prompt };
+
+  if (answerToAskId) {
+    Object.assign(message, { messageIntent: "answer", agentId, answerToAskId });
+  } else if (!teamAnswer) {
+    Object.assign(message, { messageIntent: "steer", agentId });
+  }
+  // 无 ID 的 pendingAsk 走旧版 /messages 恢复合同：不发送 intent 或所有权 ID。
+  if (acknowledgeRecovery) message.acknowledgeRecovery = true;
+  return { message, teamAnswer };
 }
 
 async function continueSelectedRun(event) {
@@ -3238,51 +13875,101 @@ async function continueSelectedRun(event) {
   try {
     // 恢复条确认后，本次续聊带服务端要求的 acknowledgeRecovery:true（orchestrator 584-590 的消费点）
     const acknowledge = state.recoveryAckRunId === run.id;
+    const composerTarget = activeComposerTarget();
+    if (!composerTarget.memberId) throw new Error("当前会话没有可发送的团队成员");
+    const agentLock = composerTarget.memberId;
+    const { message, teamAnswer } = buildContinueMessage({
+      run,
+      prompt,
+      agentId: composerTarget.memberId,
+      agentLock,
+      acknowledgeRecovery: acknowledge,
+    });
+    if (state.attachments.length) {
+      await request(`/api/runs/${encodeURIComponent(run.id)}/sources`, {
+        method: "POST",
+        body: { sources: [...state.attachments] },
+      });
+    }
     const payload = await request(`/api/runs/${encodeURIComponent(run.id)}/messages`, {
       method: "POST",
-      body: { prompt: withAttachments(prompt), agentId: elements["followup-agent"].value, ...(acknowledge ? { acknowledgeRecovery: true } : {}) },
+      body: message,
     });
     const updated = normalizeRun(payload?.run ?? payload, 0);
     state.runs = [updated, ...state.runs.filter((item) => item.id !== updated.id)];
     state.recoveryAckRunId = null; // 确认标记一次性消费
     elements["task-input"].value = "";
+    syncSideChatDraftFromComposer();
     state.attachments = [];
     renderAttachments();
     // 排队与即时送达如实区分：活跃 run 的 continue 进 pendingSteer，不是"已完成"
     const queuedDepth = Array.isArray(updated.pendingSteer) ? updated.pendingSteer.length : 0;
-    toast(queuedDepth ? `轮间插话已排队（第 ${queuedDepth} 位），当前轮结束后送达` : "续接消息已完成", "success");
+    toast(queuedDepth
+      ? `轮间插话已排队（第 ${queuedDepth} 位），当前轮结束后送达`
+      : teamAnswer ? "回答已提交" : "续接消息已完成", "success");
     renderRuns();
   } catch (error) {
-    toast(error.message, "error");
+    toast(sendErrorText(error, run), "error");
     appendDiagnostic(`会话续接失败 ${run.id}: ${error.message}`, "error");
   } finally {
     button.disabled = false;
   }
 }
 
+/**
+ * 续接失败的人话文案。服务端错误按约定是英文技术串（statusFor 靠 code 分流），
+ * 直接 toast 出来等于把内部实现丢给人看——ROUND_LIMIT 的原文 "maximum collaboration
+ * rounds reached" 既没说上限是多少，也没说下一步该做什么（LO 2026-08-08 问的就是这条）。
+ */
+function sendErrorText(error, run) {
+  const code = error?.payload?.error?.code ?? error?.code ?? "";
+  if (code === "ROUND_LIMIT") {
+    const used = Number(run?.round) || 0;
+    const cap = Number(run?.maxRounds) || used;
+    return `本任务已用满 ${used}/${cap} 轮协作上限，无法再续接。请「在新任务中继续」——原生会话历史会带过去，不会从零开始。`;
+  }
+  if (code === "INSUFFICIENT_ROUNDS") {
+    return `所选协作拓扑至少需要 ${Number(error?.payload?.error?.minimumRounds) || "更多"} 轮，请提高轮次上限或换更简单的拓扑。`;
+  }
+  return error?.message ?? "续接失败";
+}
+
 async function cancelSelectedRun() {
   const run = selectedRun();
   if (!run || !ACTIVE_RUN_STATES.has(run.status)) return;
+  const members = [...new Set([
+    ...(Array.isArray(run.teamMembers) ? run.teamMembers : []),
+    run.coordinatorId,
+    run.startAgentId,
+    ...sessionAgentIds(run.sessions),
+  ].filter(Boolean))];
+  const memberLabels = members.map((id) => agentLabel(id)).join(" · ") || "当前活跃 CLI";
   const confirmed = await confirmAction({
-    eyebrow: "任务控制",
-    title: "取消当前任务？",
+    eyebrow: "多 CLI 任务控制",
+    title: "取消当前任务并级联中止？",
     rows: [
       ["任务", run.title],
       ["Run ID", run.id],
-      ["当前状态", runStatusText(run.status)],
+      ["当前状态", runStatusText(run.status, run)],
+      ["将中止成员", memberLabels],
+      ["权限模式", run.permissionMode || "plan"],
     ],
-    warning: "控制面将终止本任务仍在运行的 Agent 子进程。已生成的事件和产物会保留。",
-    confirmLabel: "确认取消",
+    warning: "控制面将 abort 本 run 执行树：全部团队成员的 provider 子进程一并中止；挂起的 ask/审批租约作废。已生成的事件、总线与产物保留可回放。",
+    confirmLabel: "确认级联取消",
     danger: true,
   });
   if (!confirmed) return;
   elements["cancel-run-button"].disabled = true;
   try {
-    await request(`/api/runs/${encodeURIComponent(run.id)}/cancel`, { method: "POST", body: { source: "control-center" } });
+    const result = await request(`/api/runs/${encodeURIComponent(run.id)}/cancel`, { method: "POST", body: { source: "control-center" } });
     run.status = "cancelled";
-    toast("取消请求已提交", "success");
-    appendDiagnostic(`任务取消 ${run.id}`);
+    const cascade = result?.cancelCascade?.agents?.length
+      ? result.cancelCascade.agents.map((id) => agentLabel(id)).join(" · ")
+      : memberLabels;
+    toast(`已级联取消：${cascade}`, "success", 4200);
+    appendDiagnostic(`任务级联取消 ${run.id} · ${cascade}`);
     renderRuns();
+    renderSelectedRun();
   } catch (error) {
     toast(error.message, "error");
     appendDiagnostic(`任务取消失败 ${run.id}: ${error.message}`, "error");
@@ -3290,7 +13977,63 @@ async function cancelSelectedRun() {
   }
 }
 
-function normalizeEvent(raw, eventName = "message") {
+// 会话头多 CLI 身份条：一眼看到本 run 谁在场、谁有原生会话
+function renderConversationAgents(run) {
+  const el = byId("conversation-agents");
+  if (!el) return;
+  if (!run) {
+    el.hidden = true;
+    el.innerHTML = "";
+    return;
+  }
+  const members = [...new Set([
+    ...(Array.isArray(run.teamMembers) ? run.teamMembers : []),
+    run.coordinatorId,
+    run.startAgentId,
+    ...(run.turns || []).map((turn) => turn.agentId),
+  ].filter(Boolean))];
+  if (!members.length) {
+    el.hidden = true;
+    el.innerHTML = "";
+    return;
+  }
+  const spoken = new Set((run.turns || []).map((turn) => turn.agentId).filter(Boolean));
+  const sessions = new Set(sessionAgentIds(run.sessions));
+  el.hidden = false;
+  el.innerHTML = members.map((id) => {
+    const cli = agentCli(id);
+    const logo = cli ? cliIconMarkup(cli, "cli-logo") : "";
+    const hasSession = sessions.has(id);
+    const didSpeak = spoken.has(id);
+    const isLeader = id === run.coordinatorId;
+    const isStart = id === run.startAgentId;
+    const isExecutionOwner = id === run.executionOwnerId;
+    const classes = [
+      "conversation-agent-chip",
+      `is-agent-${agentSlug(id)}`,
+      didSpeak ? "is-spoke" : "",
+      hasSession ? "has-session" : "",
+      isLeader ? "is-leader" : "",
+    ].filter(Boolean).join(" ");
+    const title = [
+      agentLabel(id),
+      isLeader ? "leader" : null,
+      isStart ? "直接收件人" : null,
+      isExecutionOwner && run.permissionMode === "build" ? "写入所有者" : null,
+      hasSession ? "有原生会话" : "无原生会话",
+      didSpeak ? "已发言" : "未发言",
+    ].filter(Boolean).join(" · ");
+    const tags = [
+      isLeader ? `<em class="chip-tag">L</em>` : "",
+      isStart ? `<em class="chip-tag is-start">收</em>` : "",
+      isExecutionOwner && run.permissionMode === "build" ? `<em class="chip-tag is-start">写</em>` : "",
+      didSpeak ? `<em class="chip-tag is-spoke">言</em>` : "",
+    ].filter(Boolean).join("");
+    return `<span class="${classes}" title="${escapeHtml(title)}">${logo}<span>${escapeHtml(agentLabel(id))}</span>${tags}</span>`;
+  }).join("");
+}
+
+function normalizeEvent(raw, eventName = "message", { sourceCharacters = 0 } = {}) {
   const envelope = raw?.event ?? raw ?? {};
   const payloadRaw = envelope.data ?? envelope.payload ?? {};
   const payload = payloadRaw && typeof payloadRaw === "object" ? payloadRaw : {};
@@ -3310,7 +14053,12 @@ function normalizeEvent(raw, eventName = "message") {
     "";
   if (isPrivateReasoning) content = "模型推理状态已更新";
   if (!content) content = type;
-  return {
+  const contentText = payloadText(content);
+  // timeline/diagnostic 只需要有界摘要；完整正文已在 data 中保留。这里若先全文 redact，
+  // MiB 级 assistant/tool 事件会在 JSON.parse 后立刻再扫两遍主线程并复制大字符串。
+  const summary = redact(contentText.slice(0, 2 * 1024)).slice(0, 500);
+  const boundedContent = redact(contentText.slice(0, 4 * 1024));
+  const event = {
     id: String(envelope.eventId ?? envelope.event_id ?? envelope.id ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`),
     type,
     timestamp: envelope.occurred_at ?? envelope.timestamp ?? envelope.created_at ?? new Date().toISOString(),
@@ -3319,41 +14067,198 @@ function normalizeEvent(raw, eventName = "message") {
     sessionId: String(envelope.sessionId ?? envelope.session_id ?? payload.sessionId ?? payload.session_id ?? ""),
     agentId: String(envelope.agentId ?? envelope.agent_id ?? payload.agentId ?? payload.agent_id ?? ""),
     correlationId: String(envelope.correlationId ?? envelope.correlation_id ?? ""),
-    summary: redact(String(content)).slice(0, 500),
-    content: redact(String(content)),
+    summary,
+    content: boundedContent,
     data: payload, // 结构化载荷（assistant text+tools / tool.result results / turn round）——对话重建一等来源
-    raw: envelope,
   };
+  const sourceBytes = normalizedEventSourceBytes(sourceCharacters);
+  if (sourceBytes) globalEventBytes.set(event, sourceBytes);
+  return event;
+}
+
+function isDeltaEventType(type) {
+  // Codex app-server 使用 codex.item/agentMessage/delta；旧适配器也可能发 *.delta。
+  return /(?:^|[./])delta$/i.test(String(type ?? ""));
+}
+
+function eventAffectsConversation(event) {
+  if (isDeltaEventType(event.type)) return false; // final assistant.message 才提交正文
+  // Codex 过程可见性：完成态的 item 携带命令/输出/改动，是"它到底做了什么"的唯一来源。
+  // item/started 只喂活跃行（见 codexActivity），不进历史，避免每条命令留两行。
+  // reasoning 完成但无摘要时 progress 只带 id（清活跃记账用）——不落一张空的「推理摘要」历史卡
+  if (event.type === "codex.item/completed") {
+    const progress = event.data?.progress;
+    return Boolean(progress) && !(progress.kind === "reasoning" && !progress.text);
+  }
+  if (["assistant.message", "tool.result", "agent.turn_started", "agent.turn_completed", "tool.event", "user.message"].includes(event.type)) return true;
+  if (event.type === "grok.completed") return Boolean(event.data?.text);
+  if (["agent.error", "adapter.parse_error", "adapter.stderr"].includes(event.type)) return true;
+  return Boolean(GOVERNANCE_EVENTS[event.type]);
+}
+
+const pendingEventRender = {
+  overview: false,
+  diagnostics: false,
+  tabs: false,
+  selectedRun: false,
+  topology: false,
+  workbenchEvents: false,
+  announcementEvent: null,
+  announcementCount: 0,
+};
+let eventRenderFrame = 0;
+// busy 闸等待帧数：正常分批挂载（≤160 条、8 条/批）几秒即完成；超过上限仍 busy 视为
+// 挂载僵死（异常逃出兜底的极端情况）——强制复位放重渲，不再无限空转（LO 2026-08-10）
+const STREAM_BUSY_WAIT_MAX_FRAMES = 600; // ≈10 秒前台帧
+let streamBusyWaitFrames = 0;
+
+function flushEventRenderBatch() {
+  eventRenderFrame = 0;
+  const batch = { ...pendingEventRender };
+  pendingEventRender.overview = false;
+  pendingEventRender.diagnostics = false;
+  pendingEventRender.tabs = false;
+  pendingEventRender.selectedRun = false;
+  pendingEventRender.topology = false;
+  pendingEventRender.workbenchEvents = false;
+  pendingEventRender.announcementEvent = null;
+  pendingEventRender.announcementCount = 0;
+
+  if (batch.diagnostics) renderDiagnosticLog();
+  if (batch.tabs) {
+    renderTabs();
+    persistTabs();
+  }
+  if (batch.overview) renderOverview();
+  const stream = elements["conversation-stream"];
+  const streamMountBusy = stream.getAttribute("aria-busy") === "true";
+  if (batch.selectedRun && streamMountBusy && streamBusyWaitFrames < STREAM_BUSY_WAIT_MAX_FRAMES) {
+    // 分批历史挂载期间不允许 SSE 用半成品 DOM 抢走焦点/滚动快照。挂载结束后的下一帧
+    // 再基于完整 DOM 合并最新事件；selectedRun 标志同时把 burst 压成一次提交。
+    streamBusyWaitFrames += 1;
+    pendingEventRender.selectedRun = true;
+    if (!eventRenderFrame) eventRenderFrame = window.requestAnimationFrame(flushEventRenderBatch);
+  } else if (batch.selectedRun) {
+    if (streamMountBusy) {
+      // 僵死复位：作废旧挂载代际（它的 stillOwned 检查会让它自殁），清闸后走完整重渲
+      appendDiagnostic("会话流挂载闸超时，已强制复位并重渲", "error");
+      conversationRenderGeneration += 1;
+      pendingConversationMarkup.delete(stream);
+      stream.removeAttribute("aria-busy");
+    }
+    streamBusyWaitFrames = 0;
+    renderSelectedRun();
+  }
+  else {
+    streamBusyWaitFrames = 0;
+    if (batch.topology) renderTopology(selectedRun());
+    if (batch.workbenchEvents) renderWorkbenchEvents();
+  }
+
+  const current = selectedRun();
+  const announcement = batch.announcementEvent;
+  if (
+    announcement
+    && current
+    && !state.sessionPreview
+    && (!announcement.runId || announcement.runId === current.id)
+  ) {
+    elements["conversation-live-status"].textContent = batch.announcementCount > 1
+      ? `会话收到 ${batch.announcementCount} 条更新，最新事件 ${announcement.type}`
+      : `会话更新：${announcement.type}`;
+  }
+}
+
+function scheduleEventRender(flags, event) {
+  let hasWork = false;
+  for (const name of ["overview", "diagnostics", "tabs", "selectedRun", "topology", "workbenchEvents"]) {
+    if (flags[name]) {
+      pendingEventRender[name] = true;
+      hasWork = true;
+    }
+  }
+  if (flags.announce) {
+    pendingEventRender.announcementEvent = event;
+    pendingEventRender.announcementCount += 1;
+    hasWork = true;
+  }
+  if (!hasWork) return;
+  if (!eventRenderFrame) eventRenderFrame = window.requestAnimationFrame(flushEventRenderBatch);
 }
 
 function pushEvent(event) {
   const sequence = Number(event.seq);
   if (Number.isSafeInteger(sequence)) state.lastEventSequence = Math.max(state.lastEventSequence, sequence);
   const previous = state.events[0];
-  if (
-    previous &&
-    /\.delta$/.test(event.type) &&
-    previous.type === event.type &&
-    previous.runId === event.runId &&
-    previous.sessionId === event.sessionId &&
-    previous.correlationId === event.correlationId
-  ) {
-    previous.summary = `${previous.summary}${event.summary}`.slice(-500);
-    previous.content = `${previous.content}${event.content}`.slice(-4000);
-    previous.timestamp = event.timestamp;
-    previous.seq = event.seq;
-  } else if (!state.events.some((item) => item.id === event.id)) {
+  const duplicateEvent = state.events.some((item) => eventTracksEvent(item, event));
+  let eventChanged = false;
+  if (!duplicateEvent) freezeLatestConversationWindowForIncoming(event);
+  if (!duplicateEvent && event.runId && !Object.hasOwn(state.runEvents, event.runId)) {
+    bufferInflightRunHistoryEvent(event.runId, event);
+  }
+  if (!duplicateEvent && canMergeDeltaEvent(previous, event)) {
+    mergeDeltaEvent(previous, event);
+    eventChanged = true;
+  } else if (!duplicateEvent) {
     state.events.unshift(event);
-    state.events = state.events.slice(0, 160);
+    const eventBytes = globalEventBytes.get(event) ?? normalizedEventResidentBytes(event);
+    globalEventBytes.set(event, eventBytes);
+    globalEventResidentBytes += eventBytes;
+    while (state.events.length > GLOBAL_EVENT_MAX_COUNT || globalEventResidentBytes > GLOBAL_EVENT_MAX_BYTES) {
+      const dropped = state.events.pop();
+      if (!dropped) break;
+      globalEventResidentBytes = Math.max(0, globalEventResidentBytes - (globalEventBytes.get(dropped) ?? 0));
+    }
+    eventChanged = true;
   }
-  if (/run\.|task\.|session\.|message|tool|route|approval|config\./i.test(event.type)) {
-    appendDiagnostic(`${event.type} ${event.summary}`);
+  // 已完成磁盘回放的 run 必须持续吸收 SSE。否则全局 160 条实时窗口滚动后，磁盘快照
+  // 尾部与实时窗口头部之间会出现确定性缺口。重复/增量语义由缓存 helper 与上面保持一致。
+  if (event.runId && Object.hasOwn(state.runEvents, event.runId)) {
+    appendLiveRunHistoryEvent(event.runId, event);
   }
-  renderOverview();
-  // 只有属于当前选中 run（或全局事件）才重写对话流；无关 run 的事件仅更新事件列表，避免整屏重渲染闪烁
-  if (!state.selectedRunId || !event.runId || event.runId === state.selectedRunId || state.sessionPreview) renderSelectedRun();
-  else renderWorkbenchEvents();
-  if (/run\.(created|updated|completed|failed|cancelled|steer_queued|steer_dropped)|task\.|agent\.turn_completed|assistant\.message/i.test(event.type)) scheduleRunsReload();
+  if (!eventChanged) return; // SSE 重连可能回放边界事件；重复项不触发诊断或 DOM 提交
+  const activityChanged = trackCodexActivity(event);
+  missionControlDock?.observeEvent(event);
+  const delta = isDeltaEventType(event.type);
+  const conversationEvent = eventAffectsConversation(event);
+  const diagnostic = !delta && /run\.|task\.|session\.|message|tool|route|approval|config\./i.test(event.type);
+  if (diagnostic) appendDiagnostic(`${event.type} ${event.summary}`, "info", { render: false });
+  // tab 脏标：非活跃页签的 run 有新事件 → 页签落点（切回即清，sessionStorage 同步）
+  let tabsChanged = false;
+  if (event.runId && conversationEvent) {
+    for (const tab of state.tabs) {
+      if (tab.runId === event.runId && tab.key !== state.activeTabKey && !tab.dirty) {
+        tab.dirty = true;
+        tabsChanged = true;
+      }
+    }
+  }
+  const matchesSelectedRun = Boolean(state.selectedRunId && event.runId === state.selectedRunId && !state.sessionPreview);
+  const selectedRunUpdate = state.view === "workbench" && matchesSelectedRun && (conversationEvent || activityChanged);
+  const topologySignal = event.type === "bus.appended" || event.type === "bus.routed" || event.type === "user.message";
+  const topologyUpdate = state.view === "workbench" && matchesSelectedRun && topologySignal;
+  if (topologySignal && event.runId) invalidateSocialTopology(event.runId);
+  const visibleWorkbenchEvent = state.view === "workbench"
+    && !delta
+    && (state.selectedRunId ? event.runId === state.selectedRunId : true);
+  scheduleEventRender(
+    {
+      overview: state.view === "overview" && !delta,
+      diagnostics: diagnostic && state.view === "security",
+      tabs: tabsChanged,
+      selectedRun: selectedRunUpdate,
+      topology: topologyUpdate && !selectedRunUpdate,
+      workbenchEvents: visibleWorkbenchEvent && !selectedRunUpdate,
+      announce: selectedRunUpdate,
+    },
+    event,
+  );
+  // run 列表重载闸（450ms 防抖）。recovery_required/round_refunded 让恢复条与轮次 meta 即时反映真实
+  // 状态；user.message/agent.turn_started 让"确认恢复后继续"尽快翻页——直接续聊的 HTTP 要等整轮跑完
+  // 才返回（orchestrator continue 返回 tracked），期间 state.runs 停在 recovery_required 旧快照，
+  // 恢复条会被 SSE 重渲染反复挂回（LO 2026-08-09：确认后恢复条一整轮不消失）。
+  if (/run\.(created|updated|completed|failed|cancelled|steer_queued|steer_dropped|waiting_input|budget_exhausted|worktree_created|recovery_required|recovery_acknowledged|round_refunded|control_changed)|task\.|agent\.(turn_started|turn_completed)|user\.message|assistant\.message/i.test(event.type)) scheduleRunsReload();
+  if (/^automation\./.test(event.type)) void loadAutomations().catch(() => {});
   if (/config\.(changed|applied|rolled_back|updated)/i.test(event.type)) scheduleSourcesReload();
   if (/approval\.(pending|resolved|expired)/i.test(event.type)) void loadApprovals().catch(() => {});
 }
@@ -3382,11 +14287,30 @@ function parseSseFrame(frame) {
     else if (field === "id") id = value;
     else if (field === "data") data.push(value);
   }
-  if (!data.length || eventName === "ready") return;
-  const parsed = JSON.parse(data.join("\n"));
-  const event = normalizeEvent(parsed, eventName);
+  if (!data.length) return;
+  const serialized = data.join("\n");
+  const parsed = JSON.parse(serialized);
+  if (eventName === "ready") {
+    applyStreamEpoch(readStreamEpochFromReadyPayload(parsed), { source: "ready" });
+    return;
+  }
+  const event = normalizeEvent(parsed, eventName, { sourceCharacters: serialized.length });
   if (id && event.seq === "--") event.seq = Number(id) || id;
   pushEvent(event);
+}
+
+function applyStreamEpoch(nextEpoch, { source = "sse" } = {}) {
+  const result = nextStreamEpochState(state.streamEpoch, nextEpoch);
+  if (!result.epoch) return false;
+  if (result.resetSequence) {
+    state.lastEventSequence = 0;
+    state.streamEpoch = result.epoch;
+    appendDiagnostic(`事件流已重置（${source} epoch 变更）`, "warning");
+    toast("事件流已重置，从头续订", "warning", 3200);
+    return true;
+  }
+  if (!state.streamEpoch) state.streamEpoch = result.epoch;
+  return false;
 }
 
 async function consumeEvents(controller) {
@@ -3394,9 +14318,11 @@ async function consumeEvents(controller) {
   while (!controller.signal.aborted) {
     try {
       const headers = { Accept: "text/event-stream" };
-      if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
-      const response = await fetch(`${API.events}?after=${state.lastEventSequence}`, { headers, signal: controller.signal });
+      if (getAccessToken()) headers.Authorization = `Bearer ${getAccessToken()}`;
+      const response = await fetch(`${API.events}?after=${state.lastEventSequence}&view=ui`, { headers, signal: controller.signal });
       if (!response.ok || !response.body) throw new Error(`事件通道返回 HTTP ${response.status}`);
+      // RT-03：服务端 stream epoch；变更时游标归零，禁止跨重启盲续
+      applyStreamEpoch(readStreamEpochFromHeaders(response.headers), { source: "header" });
       setEventState("ok");
       const component = state.components.find((item) => item.id === "event-bus");
       if (component) component.status = "ok";
@@ -3442,10 +14368,11 @@ function connectEvents() {
 
 function renderApprovals() {
   const pending = state.approvals.filter((item) => (item.status ?? "pending") === "pending");
-  elements["approval-summary"].textContent = `${pending.length} 项待处理`;
+  const leases = state.leases;
+  const openLeases = leases.filter((item) => item.gateOpen === true).length;
+  elements["approval-summary"].textContent = `${pending.length} 项待处理 · ${openLeases} 个执行租约有效`;
   elements["approval-summary"].className = `status-label is-${pending.length ? "warning" : "ok"}`;
-  elements["approval-list"].innerHTML = pending.length
-    ? pending
+  const approvalRows = pending
         .map((item) => {
           const method = String(item.method ?? "unknown");
           const broadPermission = method === "item/permissions/requestApproval";
@@ -3464,8 +14391,11 @@ function renderApprovals() {
               </div>
             </article>`;
         })
-        .join("")
-    : emptyMarkup("暂无待处理审批", "权限请求会在这里等待显式决定");
+        .join("");
+  const leaseRows = leases.map((lease) => capabilityLeaseMarkup(lease, { inline: false })).join("");
+  elements["approval-list"].innerHTML = approvalRows || leaseRows
+    ? `${approvalRows}${leaseRows}`
+    : emptyMarkup("暂无待处理审批或执行租约", "权限请求会在这里等待显式决定");
 }
 
 async function resolveApproval(id, decision) {
@@ -3526,10 +14456,34 @@ function renderSecurity() {
     })
     .join("");
   renderApprovals();
+  void renderRemoteGates();
 
   const healthErrors = state.components.filter((item) => normalizeStatus(item.status) === "error").length;
   elements["security-summary"].textContent = healthErrors ? `${healthErrors} 项异常` : state.apiState === "ok" ? "门禁已加载" : "检查中";
   elements["security-summary"].className = `status-label is-${healthErrors ? "error" : state.apiState === "ok" ? "ok" : "pending"}`;
+}
+
+async function renderRemoteGates() {
+  const host = byId("remote-gates-list");
+  if (!host) return;
+  try {
+    const data = await request("/api/security/remote-gates");
+    const gates = Array.isArray(data?.gates) ? data.gates : [];
+    state.remoteGates = gates;
+    host.innerHTML = gates.length
+      ? gates.map((gate) => `
+        <article class="remote-gate-card is-${escapeHtml(gate.status || "blocked")}">
+          <div class="remote-gate-main">
+            <strong>${escapeHtml(gate.title || gate.id)}</strong>
+            <span class="remote-gate-status">${escapeHtml(gate.status || "blocked")}</span>
+          </div>
+          <p>${escapeHtml(gate.reason || "未授权")}</p>
+          <span class="subtle">上游参考：${escapeHtml(gate.upstream || "—")}</span>
+        </article>`).join("")
+      : emptyMarkup("远程能力门闩未返回", "控制面 fail-closed");
+  } catch (error) {
+    host.innerHTML = emptyMarkup("远程门闩读取失败", error.message);
+  }
 }
 
 function upsertDiagnostic(list, item) {
@@ -3588,6 +14542,7 @@ async function reloadRuntime() {
       toast(`运行策略已重载（generation ${result.generation}）`, "success");
       appendDiagnostic(`控制面运行策略重载成功 generation=${result.generation}`);
       await loadBootstrap();
+      await loadTeams({ fresh: true });
     } else {
       toast(result?.reason || "当前状态需要重启控制面", "warning", 7000);
       appendDiagnostic(`控制面未热重载: ${result?.reason || result?.status}`, "warning");
@@ -3620,11 +14575,17 @@ function renderDiagnostics() {
 
 function renderDiagnosticLog() {
   if (!elements["diagnostic-log"]) return;
-  elements["diagnostic-log"].textContent = state.diagnosticLog.length ? state.diagnosticLog.join("\n") : "等待控制面事件。";
+  const filter = state.diagnosticLogFilter || "all";
+  const lines = filter === "all"
+    ? state.diagnosticLog
+    : state.diagnosticLog.filter((line) => (line.match(/^\[[^\]]*\]\s*\[([A-Z]+)\]/)?.[1] ?? "").toLowerCase() === filter);
+  elements["diagnostic-log"].textContent = lines.length
+    ? lines.join("\n")
+    : state.diagnosticLog.length ? `当前级别（${filter}）暂无日志。` : "等待控制面事件。";
 }
 
 function renderAll() {
-  renderOverview();
+  if (state.view === "overview") renderOverview();
   renderRuns();
   renderSources();
   renderConfig();
@@ -3633,80 +14594,1125 @@ function renderAll() {
   renderSecurity();
   renderDiagnostics();
   renderDiagnosticLog();
+  renderConfigTopology();
+}
+
+async function refreshSourcesAndSelectedConfig() {
+  await loadSources();
+  if (!state.selectedSourceId || configIsDirty()) return successfulLoadResult(null, { skipped: true });
+  return loadSelectedConfig();
 }
 
 async function refreshCurrentView() {
   elements["refresh-button"].disabled = true;
   const jobs = [];
   if (state.view === "overview") jobs.push(loadHealth(), loadRuns(), loadSources());
-  if (state.view === "workbench") jobs.push(loadRuns(), loadProjects(), loadTeams());
+  if (state.view === "workbench") jobs.push(loadRuns(), loadProjects({ refresh: true }), loadTeams());
   if (state.view === "config") {
-    jobs.push(loadSources());
-    if (state.selectedSourceId && !configIsDirty()) jobs.push(loadSelectedConfig());
+    jobs.push(
+      refreshSourcesAndSelectedConfig(),
+      loadCapabilities(),
+      loadTeams().then(async (teamsResult) => {
+        const providersResult = await loadProviders();
+        return loadResultFailed(teamsResult) ? teamsResult : providersResult;
+      }),
+      runtimeSeatManager?.load({ fresh: true }).then((ok) => ok === false
+        ? failedLoadResult(new Error("运行席位读取失败"))
+        : successfulLoadResult(state.runtimeSeatsData)),
+    );
+    if (window.__forgeCcSwitchPanel?.refresh) jobs.push(window.__forgeCcSwitchPanel.refresh());
   }
   if (state.view === "router") jobs.push(loadBootstrap());
   if (state.view === "security") jobs.push(runDiagnostics(), loadBootstrap(), loadApprovals());
   if (state.view === "observability") { state.obsLoaded = false; jobs.push(loadObservability()); }
   if (state.view === "sessions") jobs.push(loadSessions());
+  if (state.view === "team") {
+    jobs.push(loadTeams().then(async (teamsResult) => {
+      const flowResult = await refreshCollabFlow();
+      return loadResultFailed(teamsResult) ? teamsResult : flowResult;
+    }));
+  }
   const settled = await Promise.allSettled(jobs);
-  const failures = settled.filter((item) => item.status === "rejected");
+  const failures = settled.filter((item) => item.status === "rejected" || loadResultFailed(item.value));
   if (failures.length) toast(`${failures.length} 项刷新失败`, "warning");
   else toast("数据已刷新", "success", 2200);
   elements["refresh-button"].disabled = false;
   renderAll();
 }
 
-function confirmAction({ eyebrow, title, rows = [], warning = "", confirmLabel = "确认", danger = false }) {
+function collectWorkbenchGitDraft(action) {
+  return new Promise((resolveDraft) => {
+    const dialog = byId("workbench-git-dialog");
+    const title = byId("workbench-git-title");
+    const note = byId("workbench-git-note");
+    const field = byId("workbench-git-message-field");
+    const message = byId("workbench-git-message");
+    const planButton = byId("workbench-git-plan-button");
+    if (!dialog || !message) return resolveDraft(null);
+    const committing = action === "commit";
+    dialog.returnValue = "";
+    title.textContent = committing ? "提交已暂存变更" : "推送当前分支";
+    note.textContent = committing
+      ? "协作台只提交暂存区，不会自动执行 git add。"
+      : "协作台只推送当前分支到已配置 upstream，不会设置上游或 force push。";
+    field.hidden = !committing;
+    message.required = committing;
+    message.value = "";
+    planButton.textContent = committing ? "检查提交计划" : "检查推送计划";
+    dialog.addEventListener("close", () => {
+      resolveDraft(dialog.returnValue === "plan"
+        ? { action, message: committing ? message.value.trim() : "" }
+        : null);
+    }, { once: true });
+    dialog.showModal();
+    if (committing) message.focus({ preventScroll: true });
+  });
+}
+
+async function runWorkbenchGitAction(action) {
+  const draft = await collectWorkbenchGitDraft(action);
+  if (!draft) return;
+  try {
+    const run = selectedRun() && !state.sessionPreview ? selectedRun() : null;
+    const plan = await request(API.workbenchGitPlan, {
+      method: "POST",
+      body: { runId: run?.id || undefined, action, message: draft.message },
+    });
+    const changes = plan.changes || {};
+    const confirmed = await confirmAction({
+      eyebrow: "Git 双阶段确认",
+      title: action === "commit" ? "确认提交暂存区" : "确认推送当前分支",
+      rows: [
+        ["仓库", plan.repository || "当前仓库"],
+        ["分支", plan.branch || "detached"],
+        [action === "commit" ? "暂存变更" : "上游", action === "commit" ? `${changes.staged || 0} 个文件` : plan.upstream || "未配置"],
+        ["计划有效期", formatTime(plan.expiresAt)],
+      ],
+      warning: action === "commit"
+        ? "只提交计划签名时的暂存内容；暂存区变化会使计划失效。"
+        : "只执行普通 git push；HEAD 或 upstream 变化会使计划失效。",
+      confirmLabel: action === "commit" ? "提交" : "推送",
+      confirmationText: plan.confirmation,
+      danger: true,
+    });
+    if (!confirmed) return;
+    const result = await request(API.workbenchGitExecute, {
+      method: "POST",
+      body: { planId: plan.planId, confirmation: plan.confirmation },
+    });
+    toast(result.summary || (action === "commit" ? "提交完成" : "推送完成"), "success", 5000);
+    workbenchEnvironmentPanel?.refresh?.();
+  } catch (error) {
+    toast(`Git 操作未执行：${error.message}`, "error", 7000);
+  }
+}
+
+// 外链统一出口：先开 about:blank 再断 opener 后 replace——绝不把本控制面的 window 引用交给外站。
+// 右栏浏览器页与「在浏览器中打开」对话框共用这一条路径，避免两处安全实现漂移。
+function openExternalUrl(href) {
+  try {
+    const target = new URL(href);
+    if (!new Set(["http:", "https:"]).has(target.protocol)) throw new Error("只允许 HTTP(S) 地址");
+    const opened = window.open("about:blank", "_blank");
+    if (!opened) {
+      toast("浏览器拦截了新标签页，请允许此站点打开窗口", "warning", 5000);
+      return false;
+    }
+    opened.opener = null;
+    opened.location.replace(target.href);
+    return true;
+  } catch (error) {
+    toast(`无法打开地址：${error.message}`, "error");
+    return false;
+  }
+}
+
+function openWorkbenchBrowser(initialUrl = "") {
+  const dialog = byId("workbench-browser-dialog");
+  const input = byId("workbench-browser-url");
+  if (!dialog || !input) return;
+  dialog.returnValue = "";
+  input.value = initialUrl || "https://";
+  dialog.addEventListener("close", () => {
+    if (dialog.returnValue !== "open") return;
+    openExternalUrl(input.value);
+  }, { once: true });
+  dialog.showModal();
+  input.focus({ preventScroll: true });
+  input.select();
+}
+
+function setMissionSideChat(open) {
+  const panel = byId("mission-side-chat");
+  const input = byId("mission-side-chat-input");
+  if (!panel || !input) return;
+  panel.hidden = !open;
+  if (!open) return;
+  syncSideChatTarget();
+  input.value = elements["task-input"]?.value || "";
+  input.focus({ preventScroll: true });
+}
+
+function syncSideChatDraftFromComposer() {
+  const panel = byId("mission-side-chat");
+  const input = byId("mission-side-chat-input");
+  if (!panel || panel.hidden || !input || document.activeElement === input) return;
+  input.value = elements["task-input"]?.value || "";
+}
+
+// 换 run 不触发标签激活，但审阅/文件页的内容是随 run 走的——必须主动让当前页重新对账。
+// railPanels 内部按 runId 缓存，重复调用不会产生多余请求。
+function syncRailToActiveRun() {
+  const activeId = railTools?.activeId();
+  if (activeId) railPanels?.activate(activeId);
+}
+
+function handleWorkbenchEnvironmentAction(action, payload = {}) {
+  const run = selectedRun() && !state.sessionPreview ? selectedRun() : null;
+  if (action === "commit" || action === "push") {
+    void runWorkbenchGitAction(action);
+    return;
+  }
+  if (action === "pull-request") {
+    if (payload.url) openWorkbenchBrowser(payload.url);
+    else toast("当前分支没有可打开的 Pull Request", "warning");
+    return;
+  }
+  if (action === "terminal") {
+    byId("global-terminal-toggle")?.click(); // 终端是底部抽屉（LO 图4：左图标开下侧终端）
+    return;
+  }
+  if (action === "browser") {
+    if (railTools) railTools.open("browser");
+    else openWorkbenchBrowser();
+    return;
+  }
+  if (action === "files") {
+    if (railTools) railTools.open("files");
+    else if (!missionControlDock?.openWorkspace?.()) toast("先选择一个任务，再打开其受控项目文件", "warning");
+    return;
+  }
+  if (action === "sources-add") {
+    // 环境舱的来源 ➕ 与 Composer 附件是同一条链路：只有一处真相，避免两套附件状态漂移
+    elements["attach-button"]?.click();
+    return;
+  }
+  if (action === "review" || action === "changes") {
+    if (!run) {
+      toast("先选择一个任务，再打开审阅产物", "warning");
+      return;
+    }
+    // 审阅现在是右栏独立工具页（参考图形态）；无 railTools 时退回产物页内的 diff 折叠
+    if (railTools) {
+      railTools.open("review");
+      if (!run.worktreePath) toast("该任务没有隔离 worktree；审阅页只显示工作树状态", "info", 4500);
+      return;
+    }
+    missionControlDock?.activateTab?.("artifacts");
+    if (run.worktreePath) void toggleRunDiff(run.id);
+    else toast("该任务没有隔离 worktree diff；已打开任务产物与文件入口", "info", 4500);
+    return;
+  }
+  if (action === "side-chat") setMissionSideChat(byId("mission-side-chat")?.hidden !== false);
+}
+
+function confirmAction({
+  eyebrow,
+  title,
+  rows = [],
+  warning = "",
+  confirmLabel = "确认",
+  danger = false,
+  checkbox = null,
+  confirmationText = null,
+}) {
   return new Promise((resolve) => {
     const dialog = elements["action-dialog"];
     elements["dialog-eyebrow"].textContent = eyebrow;
     elements["dialog-title"].textContent = title;
     elements["dialog-body"].innerHTML = `
       <dl>${rows.map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd>`).join("")}</dl>
-      ${warning ? `<div class="dialog-warning">${escapeHtml(warning)}</div>` : ""}`;
+      ${warning ? `<div class="dialog-warning">${escapeHtml(warning)}</div>` : ""}
+      ${checkbox ? `<label class="dialog-check"><input type="checkbox" id="dialog-check-input"${checkbox.checked ? " checked" : ""} /><span>${escapeHtml(checkbox.label)}</span></label>` : ""}
+      ${confirmationText ? `<label class="field dialog-confirmation-field"><span class="field-label">输入 ${escapeHtml(confirmationText)} 确认</span><input id="dialog-confirmation-input" autocomplete="off" spellcheck="false" /></label>` : ""}`;
     elements["dialog-confirm-button"].textContent = confirmLabel;
     elements["dialog-confirm-button"].className = `button ${danger ? "danger" : "primary"}`;
     elements["dialog-confirm-button"].value = "confirm";
-    const closeHandler = () => resolve(dialog.returnValue === "confirm");
+    elements["dialog-confirm-button"].disabled = Boolean(confirmationText);
+    if (confirmationText) {
+      const confirmationInput = byId("dialog-confirmation-input");
+      confirmationInput?.addEventListener("input", () => {
+        elements["dialog-confirm-button"].disabled = confirmationInput.value !== confirmationText;
+      });
+    }
+    const closeHandler = () => {
+      const confirmed = dialog.returnValue === "confirm";
+      // 带复选框时回结构化结果，不破坏既有布尔调用方
+      resolve(checkbox ? { confirmed, checked: confirmed && (byId("dialog-check-input")?.checked ?? false) } : confirmed);
+    };
     dialog.addEventListener("close", closeHandler, { once: true });
-    if (typeof dialog.showModal === "function") dialog.showModal();
-    else resolve(window.confirm(title));
+    if (typeof dialog.showModal === "function") {
+      dialog.showModal();
+      if (confirmationText) byId("dialog-confirmation-input")?.focus({ preventScroll: true });
+    }
+    else resolve(checkbox ? { confirmed: window.confirm(title), checked: false } : window.confirm(title));
   });
 }
 
-async function fetchRunEvents(runId) {
-  if (!runId) return;
-  state.runEvents = state.runEvents || {};
-  try {
-    const payload = await request(`/api/runs/${encodeURIComponent(runId)}/events`);
-    state.runEvents[runId] = (payload.events || []).map((raw) => normalizeEvent(raw));
-    if (state.selectedRunId === runId) renderSelectedRun();
-  } catch {
-    // per-run 历史回放失败不阻塞实时视图（实时 SSE 仍工作）
+const RUN_HISTORY_MAX_RUNS = 6;
+const RUN_HISTORY_MAX_EVENTS = 15_000;
+const RUN_HISTORY_MAX_EVENTS_PER_RUN = 5_000; // 与服务端审计回放上限一致，不截短单次审计
+const RUN_HISTORY_MAX_INFLIGHT = 6;
+const RUN_HISTORY_MAX_BYTES = 20 * 1024 * 1024;
+const RUN_HISTORY_MAX_BYTES_PER_RUN = 16 * 1024 * 1024;
+const RUN_HISTORY_MAX_WIRE_BYTES = RUN_HISTORY_MAX_BYTES_PER_RUN + 128 * 1024; // JSON wrapper/comma allowance
+const RUN_HISTORY_JSON_FALLBACK_MAX_BYTES = 512 * 1024;
+const RUN_HISTORY_PARSE_SLICE_BYTES = 32 * 1024;
+const RUN_HISTORY_PARSE_SLICE_MS = 4;
+const MERGED_DELTA_TRACKED_ID_LIMIT = 256;
+const runHistoryLru = new Map();
+const runHistoryInflight = new Map(); // runId → { promise, controller, order, pendingEvents, pendingHead, pendingBytes }
+const runHistoryEventBytes = new WeakMap();
+const mergedDeltaEventIds = new WeakMap();
+const mergedDeltaSequenceRanges = new WeakMap();
+const runHistoryTextEncoder = new TextEncoder();
+let runHistoryRequestOrder = 0;
+
+function utf8Bytes(value) {
+  return runHistoryTextEncoder.encode(String(value ?? "")).byteLength;
+}
+
+function estimateUiValueResidentBytes(value, depth = 0) {
+  if (value == null) return 8;
+  if (typeof value === "string") return value.length * 2 + 16;
+  if (typeof value === "number" || typeof value === "boolean") return 16;
+  if (depth >= 8) return 64;
+  if (Array.isArray(value)) {
+    let bytes = 32 + value.length * 8;
+    for (const item of value) bytes += estimateUiValueResidentBytes(item, depth + 1);
+    return bytes;
   }
+  if (typeof value !== "object") return String(value).length * 2 + 16;
+  let bytes = 64;
+  for (const [key, item] of Object.entries(value)) {
+    bytes += key.length * 2 + 24 + estimateUiValueResidentBytes(item, depth + 1);
+  }
+  return bytes;
+}
+
+function normalizedEventResidentBytes(event) {
+  const known = runHistoryEventBytes.get(event);
+  if (known != null) return known;
+  const bytes = NORMALIZED_EVENT_FIXED_OVERHEAD + estimateUiValueResidentBytes(event);
+  runHistoryEventBytes.set(event, bytes);
+  return bytes;
+}
+
+function serializedRunHistoryEventBytes(event) {
+  return normalizedEventResidentBytes(event);
+}
+
+function eventIdsForTracking(event) {
+  const mergedIds = mergedDeltaEventIds.get(event);
+  return mergedIds ? [...mergedIds] : [event?.id];
+}
+
+function eventTracksId(event, id) {
+  if (!event || id == null) return false;
+  return event.id === id || Boolean(mergedDeltaEventIds.get(event)?.has(id));
+}
+
+function eventSequenceRange(event) {
+  const tracked = mergedDeltaSequenceRanges.get(event);
+  if (tracked) return tracked;
+  const sequence = Number(event?.seq);
+  return Number.isSafeInteger(sequence) ? { min: sequence, max: sequence } : null;
+}
+
+function eventTracksEvent(tracked, incoming) {
+  if (!tracked || !incoming) return false;
+  if (eventIdsForTracking(incoming).some((id) => eventTracksId(tracked, id))) return true;
+  // sequence 只在同一 delta 流内才有去重语义。不同 run/session/correlation 都可能从
+  // 相同序号起步，跨流套 range 会把合法事件吞掉。
+  if (!sameDeltaStream(tracked, incoming)) return false;
+  const sequence = Number(incoming.seq);
+  const range = eventSequenceRange(tracked);
+  return Number.isSafeInteger(sequence) && Boolean(range && sequence >= range.min && sequence <= range.max);
+}
+
+function sameDeltaStream(left, right) {
+  return Boolean(
+    left
+    && isDeltaEventType(right.type)
+    && left.type === right.type
+    && left.runId === right.runId
+    && left.sessionId === right.sessionId
+    && left.correlationId === right.correlationId
+  );
+}
+
+function canMergeDeltaEvent(target, incoming) {
+  if (!sameDeltaStream(target, incoming)) return false;
+  const targetRange = eventSequenceRange(target);
+  const incomingRange = eventSequenceRange(incoming);
+  if (targetRange || incomingRange) {
+    // range 只代表已经证实连续的片段。10,12,11 必须保留三片，不能先把 10-12
+    // 当成闭区间再把迟到的 11 误判为重放。
+    return Boolean(targetRange && incomingRange && incomingRange.min === targetRange.max + 1);
+  }
+  const trackedIds = mergedDeltaEventIds.get(target);
+  const trackedCount = trackedIds?.size ?? (target?.id == null ? 0 : 1);
+  const newIds = eventIdsForTracking(incoming)
+    .filter((id) => id != null && !eventTracksId(target, id));
+  // 无 sequence 时只能靠显式 ID 去重。达到 256 后开启下一聚合项，避免淘汰最早 ID
+  // 后的重放再次拼进尾部，也让每个聚合 envelope 的元数据保持严格有界。
+  return trackedCount + newIds.length <= MERGED_DELTA_TRACKED_ID_LIMIT;
+}
+
+function mergeDeltaEvent(target, incoming) {
+  let mergedIds = mergedDeltaEventIds.get(target);
+  if (!mergedIds) {
+    mergedIds = new Set([target.id]);
+    mergedDeltaEventIds.set(target, mergedIds);
+  }
+  for (const id of eventIdsForTracking(incoming)) {
+    if (id != null) mergedIds.add(id);
+  }
+  while (mergedIds.size > MERGED_DELTA_TRACKED_ID_LIMIT) {
+    mergedIds.delete(mergedIds.values().next().value);
+  }
+  const targetRange = eventSequenceRange(target);
+  const incomingRange = eventSequenceRange(incoming);
+  if (targetRange || incomingRange) {
+    mergedDeltaSequenceRanges.set(target, {
+      min: Math.min(targetRange?.min ?? incomingRange.min, incomingRange?.min ?? targetRange.min),
+      max: Math.max(targetRange?.max ?? incomingRange.max, incomingRange?.max ?? targetRange.max),
+    });
+  }
+  target.summary = `${target.summary}${incoming.summary}`.slice(-500);
+  target.content = `${target.content}${incoming.content}`.slice(-4000);
+  target.timestamp = incoming.timestamp;
+  target.seq = incoming.seq;
+}
+
+function touchRunHistory(runId) {
+  if (!Object.hasOwn(state.runEvents, runId)) return;
+  runHistoryLru.delete(runId);
+  runHistoryLru.set(runId, Date.now());
+}
+
+function historyEventsForRun(runId) {
+  const events = state.runEvents[runId] ?? [];
+  if (events.length) touchRunHistory(runId);
+  return events;
+}
+
+function evictRunHistory(runId, { abort = true } = {}) {
+  const inflight = runHistoryInflight.get(runId);
+  if (abort && inflight) {
+    // 先撤销所有权再 abort：close 后同 tick 重开必须创建新请求，旧 Promise 也无权写回。
+    if (runHistoryInflight.get(runId) === inflight) runHistoryInflight.delete(runId);
+    inflight.controller.abort();
+  }
+  delete state.runEvents[runId];
+  runHistoryLru.delete(runId);
+}
+
+function runHistoryIsReferenced(runId) {
+  return state.selectedRunId === runId || state.tabs.some((tab) => tab.runId === runId);
+}
+
+function trimRunHistoryInflight() {
+  while (runHistoryInflight.size >= RUN_HISTORY_MAX_INFLIGHT) {
+    const candidates = [...runHistoryInflight.entries()].sort(([leftId, left], [rightId, right]) => {
+      const referenceOrder = Number(runHistoryIsReferenced(leftId)) - Number(runHistoryIsReferenced(rightId));
+      if (referenceOrder) return referenceOrder; // 无引用请求优先回收
+      const selectedOrder = Number(leftId === state.selectedRunId) - Number(rightId === state.selectedRunId);
+      if (selectedOrder) return selectedOrder; // 当前可见请求最后回收
+      return left.order - right.order;
+    });
+    const candidate = candidates[0];
+    if (!candidate) break;
+    const [runId, inflight] = candidate;
+    if (runHistoryInflight.get(runId) === inflight) runHistoryInflight.delete(runId);
+    inflight.controller.abort();
+  }
+}
+
+function trimRunHistoryCache() {
+  let total = [...runHistoryLru.keys()].reduce((sum, runId) => sum + (state.runEvents[runId]?.length ?? 0), 0);
+  let totalBytes = [...runHistoryLru.keys()].reduce(
+    (sum, runId) => sum + Number(state.runEvents[runId]?.historyBytes ?? 0),
+    0,
+  );
+  while (
+    runHistoryLru.size > RUN_HISTORY_MAX_RUNS
+    || total > RUN_HISTORY_MAX_EVENTS
+    || totalBytes > RUN_HISTORY_MAX_BYTES
+  ) {
+    const candidate = [...runHistoryLru.keys()].find((runId) => runId !== state.selectedRunId);
+    if (!candidate) break; // 单个选中 run 同时受 5000 条与 16 MiB 上限约束
+    total -= state.runEvents[candidate]?.length ?? 0;
+    totalBytes -= Number(state.runEvents[candidate]?.historyBytes ?? 0);
+    evictRunHistory(candidate);
+  }
+}
+
+function releaseRunHistoryIfUnreferenced(runId) {
+  if (!runId || state.selectedRunId === runId || state.tabs.some((tab) => tab.runId === runId)) return;
+  evictRunHistory(runId);
+  releaseConversationWindows(runId);
+}
+
+async function normalizeHistoryEvents(rawEvents, signal = null) {
+  const events = [];
+  const conversationEvents = [];
+  const conversationMessages = [];
+  let historyBytes = 0;
+  let sliceBytes = 0;
+  let sliceStartedAt = performance.now();
+  for (let index = 0; index < rawEvents.length; index += 1) {
+    if (signal?.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError");
+    const before = historyBytes;
+    historyBytes = appendNormalizedHistoryEvent(events, conversationEvents, conversationMessages, rawEvents[index], historyBytes);
+    sliceBytes += historyBytes - before;
+    if (index + 1 < rawEvents.length && (
+      sliceBytes >= RUN_HISTORY_PARSE_SLICE_BYTES
+      || performance.now() - sliceStartedAt >= RUN_HISTORY_PARSE_SLICE_MS
+    )) {
+      await yieldToMainThread();
+      sliceBytes = 0;
+      sliceStartedAt = performance.now();
+    }
+  }
+  return attachConversationEvents(events, conversationEvents, conversationMessages, historyBytes);
+}
+
+function attachConversationEvents(events, conversationEvents, conversationMessages, historyBytes = null) {
+  const eventIds = new Set();
+  for (const event of events) {
+    for (const id of eventIdsForTracking(event)) {
+      if (id != null) eventIds.add(id);
+    }
+  }
+  const bytes = historyBytes ?? events.reduce((sum, event) => sum + serializedRunHistoryEventBytes(event), 0);
+  Object.defineProperties(events, {
+    conversationEvents: { value: conversationEvents, enumerable: false },
+    conversationMessages: { value: conversationMessages, enumerable: false },
+    eventIds: { value: eventIds, enumerable: false },
+    historyBytes: { value: bytes, writable: true, enumerable: false },
+  });
+  return events;
+}
+
+function appendNormalizedHistoryEvent(events, conversationEvents, conversationMessages, rawEvent, historyBytes, sourceCharacters = 0) {
+  if (events.length >= RUN_HISTORY_MAX_EVENTS_PER_RUN) {
+    throw new ApiError(`任务历史响应超过 ${RUN_HISTORY_MAX_EVENTS_PER_RUN} 条事件上限`);
+  }
+  const event = normalizeEvent(rawEvent, "message", { sourceCharacters });
+  // 预算按实际驻留的 normalized envelope 计量。normalizeEvent 会保留 data，同时生成
+  // content/summary；按 wire 行字节计量会把大 text/status 的复制放大漏掉一半。
+  const eventBytes = Math.max(normalizedEventSourceBytes(sourceCharacters), normalizedEventResidentBytes(event));
+  runHistoryEventBytes.set(event, eventBytes);
+  if (eventBytes > RUN_HISTORY_MAX_BYTES_PER_RUN || historyBytes + eventBytes > RUN_HISTORY_MAX_BYTES_PER_RUN) {
+    throw new ApiError(`任务历史响应超过 ${RUN_HISTORY_MAX_BYTES_PER_RUN / 1024 / 1024} MiB 浏览器缓存上限`);
+  }
+  events.push(event);
+  // 保留完整审计数组给窗口计数/诊断；会话重建只需带 UI 语义的事件，
+  // heartbeat 等噪声不应在每次 renderSelectedRun 时再次经过分支、去重和排序。
+  if (eventAffectsConversation(event)) {
+    conversationEvents.push(event);
+    const message = conversationMessageFromEvent(event);
+    if (message) insertConversationMessageSorted(conversationMessages, message);
+  }
+  return historyBytes + eventBytes;
+}
+
+function adjustConversationWindowsAfterDrop(runId, droppedMessages) {
+  if (!droppedMessages.length) return;
+  const prefix = `${runId}\u0000`;
+  for (const [key, start] of conversationWindowStarts.entries()) {
+    if (!key.startsWith(prefix)) continue;
+    const rawAgentId = key.slice(prefix.length);
+    const agentId = rawAgentId === "all" ? null : rawAgentId;
+    const shift = droppedMessages.filter((message) => messageMatchesAgentPage(message, agentId)).length;
+    if (shift) conversationWindowStarts.set(key, Math.max(0, (Number(start) || 0) - shift));
+  }
+}
+
+function dropOldestRunHistoryEvent(events) {
+  const dropped = events.shift();
+  if (!dropped) return { bytes: 0, conversationMessage: null };
+  for (const id of eventIdsForTracking(dropped)) events.eventIds?.delete(id);
+  const bytes = serializedRunHistoryEventBytes(dropped);
+  events.historyBytes = Math.max(0, Number(events.historyBytes ?? 0) - bytes);
+  const conversationEvents = events.conversationEvents ?? [];
+  const conversationIndex = conversationEvents.indexOf(dropped);
+  const conversationMessage = conversationIndex >= 0
+    ? events.conversationMessages.find((message) => message.key === dropped.id) ?? conversationMessageFromEvent(dropped)
+    : null;
+  if (conversationIndex >= 0) {
+    conversationEvents.splice(conversationIndex, 1);
+    removeRunHistoryMessageIndexes(events, dropped);
+  }
+  return { bytes, conversationMessage };
+}
+
+function bufferInflightRunHistoryEvent(runId, event) {
+  const inflight = runHistoryInflight.get(runId);
+  if (!inflight || inflight.controller.signal.aborted || Object.hasOwn(state.runEvents, runId)) return false;
+  const bufferedEvent = { ...event };
+  const eventBytes = serializedRunHistoryEventBytes(bufferedEvent);
+  if (eventBytes > RUN_HISTORY_MAX_BYTES_PER_RUN || inflight.pendingBytes + eventBytes > RUN_HISTORY_MAX_BYTES_PER_RUN) {
+    if (runHistoryInflight.get(runId) === inflight) runHistoryInflight.delete(runId);
+    inflight.controller.abort();
+    appendDiagnostic(`任务历史实时尾部 ${runId} 超过 16 MiB，已取消回放并保留实时窗口`, "warning", { render: false });
+    return false;
+  }
+  inflight.pendingEvents.push({ event: bufferedEvent, bytes: eventBytes });
+  inflight.pendingBytes += eventBytes;
+  while (inflight.pendingEvents.length - inflight.pendingHead > RUN_HISTORY_MAX_EVENTS_PER_RUN) {
+    const dropped = inflight.pendingEvents[inflight.pendingHead++];
+    inflight.pendingBytes -= dropped.bytes;
+  }
+  if (inflight.pendingHead > 1024 && inflight.pendingHead * 2 > inflight.pendingEvents.length) {
+    inflight.pendingEvents.splice(0, inflight.pendingHead);
+    inflight.pendingHead = 0;
+  }
+  return true;
+}
+
+function appendLiveRunHistoryEvent(runId, event, { trim = true } = {}) {
+  const events = state.runEvents[runId];
+  if (!events) return false;
+  const incomingIds = eventIdsForTracking(event).filter((id) => id != null);
+  if (incomingIds.some((id) => events.eventIds?.has(id))) return false;
+  const conversationEvents = events.conversationEvents ?? [];
+  const eventBytes = serializedRunHistoryEventBytes(event);
+  // per-run 历史始终保留原始 SSE envelope。全局窗口可以聚合 delta 以降低渲染成本，
+  // 但审计缓存必须逐事件对账，才能正确合并与 HTTP 快照部分重叠的实时尾部。
+  const cachedEvent = { ...event };
+  if (incomingIds.length > 1) mergedDeltaEventIds.set(cachedEvent, new Set(incomingIds));
+  runHistoryEventBytes.set(cachedEvent, eventBytes);
+  if (eventBytes > RUN_HISTORY_MAX_BYTES_PER_RUN) {
+    appendDiagnostic(`任务历史事件 ${runId} 单条超过 16 MiB，已跳过该事件并保留现有缓存`, "warning", { render: false });
+    return false;
+  }
+
+  let droppedCount = 0;
+  const droppedConversationMessages = [];
+  let droppedForBytes = false;
+  while (
+    events.length >= RUN_HISTORY_MAX_EVENTS_PER_RUN
+    || Number(events.historyBytes ?? 0) + eventBytes > RUN_HISTORY_MAX_BYTES_PER_RUN
+  ) {
+    const overByteBudget = Number(events.historyBytes ?? 0) + eventBytes > RUN_HISTORY_MAX_BYTES_PER_RUN;
+    const dropped = dropOldestRunHistoryEvent(events);
+    if (!dropped.bytes) break;
+    droppedCount += 1;
+    if (dropped.conversationMessage) droppedConversationMessages.push(dropped.conversationMessage);
+    droppedForBytes ||= overByteBudget;
+  }
+  adjustConversationWindowsAfterDrop(runId, droppedConversationMessages);
+  if (droppedForBytes) {
+    appendDiagnostic(`任务历史缓存 ${runId} 已裁剪最旧 ${droppedCount} 条，继续保留 16 MiB 滑动尾部`, "warning", { render: false });
+  }
+
+  const sequence = Number(event.seq);
+  const lastSequence = Number(events.at(-1)?.seq);
+  const conversationEvent = eventAffectsConversation(cachedEvent);
+  if (events.length && Number.isFinite(sequence) && Number.isFinite(lastSequence) && sequence < lastSequence) {
+    let index = events.findIndex((candidate) => Number(candidate.seq) > sequence);
+    if (index < 0) index = events.length;
+    events.splice(index, 0, cachedEvent);
+    if (conversationEvent) {
+      let conversationIndex = conversationEvents.findIndex((candidate) => Number(candidate.seq) > sequence);
+      if (conversationIndex < 0) conversationIndex = conversationEvents.length;
+      conversationEvents.splice(conversationIndex, 0, cachedEvent);
+      appendRunHistoryMessageIndexes(events, cachedEvent);
+    }
+  } else {
+    events.push(cachedEvent);
+    if (conversationEvent) {
+      conversationEvents.push(cachedEvent);
+      appendRunHistoryMessageIndexes(events, cachedEvent);
+    }
+  }
+  for (const id of incomingIds) events.eventIds?.add(id);
+  events.historyBytes += eventBytes;
+
+  touchRunHistory(runId);
+  if (trim) trimRunHistoryCache();
+  return true;
+}
+
+function mergeRealtimeTailIntoHistory(runId, events, inflight) {
+  state.runEvents[runId] = events;
+  touchRunHistory(runId);
+  const liveTail = inflight.pendingEvents
+    .slice(inflight.pendingHead)
+    .map((entry) => entry.event)
+    .sort((left, right) => Number(left.seq) - Number(right.seq));
+  for (const event of liveTail) {
+    if (!Object.hasOwn(state.runEvents, runId)) break;
+    appendLiveRunHistoryEvent(runId, event, { trim: false });
+  }
+  if (Object.hasOwn(state.runEvents, runId)) trimRunHistoryCache();
+  return state.runEvents[runId] ?? [];
+}
+
+async function readBoundedResponseText(response, maxBytes, signal) {
+  if (!response.body) {
+    const text = await response.text();
+    if (utf8Bytes(text) > maxBytes) throw new ApiError("任务历史 JSON 响应超过兼容上限");
+    return text;
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const parts = [];
+  let bytes = 0;
+  let bytesSinceYield = 0;
+  try {
+    while (true) {
+      if (signal.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError");
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      bytesSinceYield += value.byteLength;
+      if (bytes > maxBytes) throw new ApiError("任务历史 JSON 响应超过兼容上限");
+      parts.push(decoder.decode(value, { stream: true }));
+      if (bytesSinceYield >= RUN_HISTORY_PARSE_SLICE_BYTES) {
+        await yieldToMainThread();
+        bytesSinceYield = 0;
+      }
+    }
+    parts.push(decoder.decode());
+    return parts.join("");
+  } catch (error) {
+    await reader.cancel(error).catch(() => {});
+    throw error;
+  }
+}
+
+async function requestRunEventHistory(runId, signal) {
+  const headers = new Headers({ Accept: "application/x-ndjson, application/json;q=0.9" });
+  if (getAccessToken()) headers.set("Authorization", `Bearer ${getAccessToken()}`);
+  let response;
+  try {
+    response = await fetch(`/api/runs/${encodeURIComponent(runId)}/events?view=ui`, { headers, signal });
+  } catch (error) {
+    throw new ApiError(`无法连接控制面：${error?.message ?? error}`);
+  }
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    const detail = payload?.error?.message ?? payload?.error?.code ?? payload?.message ?? `HTTP ${response.status}`;
+    throw new ApiError(String(detail), response.status, payload);
+  }
+
+  const contentType = response.headers.get("content-type") ?? "";
+  const declaredLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > RUN_HISTORY_MAX_WIRE_BYTES) {
+    throw new ApiError("任务历史响应超过浏览器传输上限");
+  }
+  if (!contentType.toLowerCase().includes("application/x-ndjson") || !response.body) {
+    if (Number.isFinite(declaredLength) && declaredLength > RUN_HISTORY_JSON_FALLBACK_MAX_BYTES) {
+      throw new ApiError("任务历史 JSON 响应过大；控制面必须返回增量 NDJSON");
+    }
+    const text = await readBoundedResponseText(response, RUN_HISTORY_JSON_FALLBACK_MAX_BYTES, signal);
+    let payload;
+    try {
+      payload = JSON.parse(text);
+    } catch (error) {
+      throw new ApiError(`任务历史 JSON 格式无效：${error.message}`);
+    }
+    return normalizeHistoryEvents((payload?.events || []).slice(-RUN_HISTORY_MAX_EVENTS_PER_RUN), signal);
+  }
+
+  const events = [];
+  const conversationEvents = [];
+  const conversationMessages = [];
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let carry = "";
+  let parsedBytesSinceYield = 0;
+  let parseSliceStartedAt = performance.now();
+  let wireBytes = 0;
+  let historyBytes = 0;
+  const parseLines = async (lines) => {
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      if (signal.aborted) throw signal.reason ?? new DOMException("Aborted", "AbortError");
+      const before = historyBytes;
+      historyBytes = appendNormalizedHistoryEvent(
+        events,
+        conversationEvents,
+        conversationMessages,
+        JSON.parse(line),
+        historyBytes,
+        line.length,
+      );
+      parsedBytesSinceYield += historyBytes - before;
+      if (
+        parsedBytesSinceYield >= RUN_HISTORY_PARSE_SLICE_BYTES
+        || performance.now() - parseSliceStartedAt >= RUN_HISTORY_PARSE_SLICE_MS
+      ) {
+        parsedBytesSinceYield = 0;
+        await yieldToMainThread();
+        parseSliceStartedAt = performance.now();
+      }
+    }
+  };
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      wireBytes += value.byteLength;
+      if (wireBytes > RUN_HISTORY_MAX_BYTES_PER_RUN) throw new ApiError("任务历史流超过浏览器传输上限");
+      const lines = `${carry}${decoder.decode(value, { stream: true })}`.split("\n");
+      carry = lines.pop() ?? "";
+      await parseLines(lines);
+    }
+    carry += decoder.decode();
+    if (carry.trim()) await parseLines([carry]);
+    return attachConversationEvents(events, conversationEvents, conversationMessages, historyBytes);
+  } catch (error) {
+    await reader.cancel(error).catch(() => {});
+    if (error instanceof ApiError || error?.name === "AbortError") throw error;
+    throw new ApiError(`任务历史流格式无效：${error.message}`);
+  }
+}
+
+function fetchRunEvents(runId) {
+  if (!runId) return Promise.resolve([]);
+  if (Object.hasOwn(state.runEvents, runId)) {
+    touchRunHistory(runId);
+    return Promise.resolve(state.runEvents[runId]);
+  }
+  const existing = runHistoryInflight.get(runId);
+  if (existing) return existing.promise;
+  trimRunHistoryInflight();
+  const controller = new AbortController();
+  const inflight = {
+    promise: null,
+    controller,
+    order: ++runHistoryRequestOrder,
+    pendingEvents: [],
+    pendingHead: 0,
+    pendingBytes: 0,
+  };
+  const promise = requestRunEventHistory(runId, controller.signal)
+    .then(async (events) => {
+      if (controller.signal.aborted || runHistoryInflight.get(runId) !== inflight) return [];
+      events = mergeRealtimeTailIntoHistory(runId, events, inflight);
+      if (state.view === "workbench" && state.selectedRunId === runId && !state.sessionPreview) {
+        // 流式末批可能与首屏 160 条 DOM 提交落在同一 macrotask；先让浏览器处理输入/绘制，
+        // 再渲染。延后期间 tab 若被关闭或切走，下面的 ownership 检查会直接丢弃旧提交。
+        await yieldToMainThread();
+        if (!controller.signal.aborted && runHistoryInflight.get(runId) === inflight
+          && state.view === "workbench" && state.selectedRunId === runId && !state.sessionPreview) {
+          renderSelectedRun({ preserveStreamState: false });
+        }
+      }
+      return events;
+    })
+    .catch((error) => {
+      if (!controller.signal.aborted && runHistoryInflight.get(runId) === inflight) {
+        appendDiagnostic(`任务历史回放失败 ${runId}: ${error.message}`, "warning");
+      }
+      return [];
+    })
+    .finally(() => {
+      if (runHistoryInflight.get(runId) === inflight) runHistoryInflight.delete(runId);
+    });
+  inflight.promise = promise;
+  runHistoryInflight.set(runId, inflight);
+  return promise;
+}
+
+// 产物 diff 面板开合：重复点击同一 run 收起；展开时按需拉取（面板态不进 run 持久化，纯视图态）
+async function toggleRunDiff(runId) {
+  if (state.runDiffView?.runId === runId) {
+    state.runDiffView = null;
+    renderSelectedRun();
+    return;
+  }
+  state.runDiffView = { runId, status: "loading" };
+  renderSelectedRun();
+  try {
+    const data = await request(`${API.runs}/${encodeURIComponent(runId)}/diff`);
+    if (state.runDiffView?.runId !== runId) return; // 等待期间已换 run/收起——迟到响应直接丢弃
+    state.runDiffView = { runId, status: "ok", data };
+  } catch (error) {
+    if (state.runDiffView?.runId !== runId) return;
+    state.runDiffView = { runId, status: "error", error: error.message };
+  }
+  renderSelectedRun();
+}
+
+// ===== 浏览器式 tab 页签 + 成员 agent 独立页（LO 的信息架构） =====
+// 项目 → 会话 → 成员页；每个可发送页签都绑定唯一真实成员。
+// 会话行默认打开执行所有者；成员条/拓扑点击开对应成员页（只看 ta、直接问 ta）。
+// 多页并存于 tab 栏实时切换，非活跃页有新消息落脏标。页签 sessionStorage 持久化（刷新不丢）。
+const TABS_KEY = "514cc-conv-tabs";
+
+function runRecipientIds(run) {
+  return [...new Set([
+    ...(Array.isArray(run?.teamMembers) ? run.teamMembers : []),
+    run?.executionOwnerId,
+    run?.startAgentId,
+    run?.coordinatorId,
+    ...sessionAgentIds(run?.sessions),
+  ].map((id) => String(id || "").trim()).filter(Boolean))];
+}
+
+function defaultRunRecipient(run) {
+  const members = runRecipientIds(run);
+  return [run?.executionOwnerId, run?.startAgentId, run?.coordinatorId, ...members]
+    .map((id) => String(id || "").trim())
+    .find((id) => id && members.includes(id)) || null;
+}
+
+function runRecipient(run, requestedAgentId = null) {
+  const members = runRecipientIds(run);
+  const requested = String(requestedAgentId || "").trim();
+  return requested && members.includes(requested) ? requested : defaultRunRecipient(run);
+}
+
+function tabKeyOf(runId, agentId) {
+  return `${runId}::${agentId}`;
+}
+
+function activeTab() {
+  return state.tabs.find((tab) => tab.key === state.activeTabKey) ?? null;
+}
+
+function activeAgentId() {
+  return activeTab()?.agentId ?? null;
+}
+
+function persistTabs() {
+  try {
+    sessionStorage.setItem(TABS_KEY, JSON.stringify({ tabs: state.tabs, active: state.activeTabKey }));
+  } catch {
+    // 隐私模式等写失败：页签退化为内存态，不阻断使用
+  }
+}
+
+function restoreTabs() {
+  const runIds = new Set(state.runs.map((run) => run.id));
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(TABS_KEY) ?? "null");
+    if (saved) {
+      const restored = new Map();
+      for (const tab of saved.tabs ?? []) {
+        if (!runIds.has(tab.runId)) continue;
+        const run = state.runs.find((item) => item.id === tab.runId);
+        const agentId = runRecipient(run, tab.agentId);
+        if (!agentId) continue;
+        const key = tabKeyOf(tab.runId, agentId);
+        const previous = restored.get(key);
+        restored.set(key, {
+          ...tab,
+          key,
+          agentId,
+          title: run?.title ?? tab.title,
+          dirty: Boolean(previous?.dirty || tab.dirty),
+        });
+      }
+      state.tabs = [...restored.values()];
+      const savedActive = (saved.tabs ?? []).find((tab) => tab.key === saved.active);
+      const activeRun = savedActive && state.runs.find((run) => run.id === savedActive.runId);
+      const activeAgentId = activeRun ? runRecipient(activeRun, savedActive.agentId) : null;
+      const migratedActiveKey = activeAgentId ? tabKeyOf(activeRun.id, activeAgentId) : null;
+      state.activeTabKey = state.tabs.some((tab) => tab.key === migratedActiveKey) ? migratedActiveKey : state.tabs.at(-1)?.key ?? null;
+      const tab = activeTab();
+      if (tab) state.selectedRunId = tab.runId;
+    }
+  } catch {
+    state.tabs = [];
+    state.activeTabKey = null;
+  }
+  if (state.deepLinkRunId && runIds.has(state.deepLinkRunId)) {
+    const runId = state.deepLinkRunId;
+    state.deepLinkRunId = null;
+    openTab(runId);
+  }
+}
+
+function openTab(runId, agentId = null) {
+  const run = state.runs.find((item) => item.id === runId);
+  if (!run) return;
+  const recipientId = runRecipient(run, agentId);
+  if (!recipientId) {
+    toast("当前会话没有可发送的真实成员", "error");
+    return;
+  }
+  const key = tabKeyOf(runId, recipientId);
+  if (!state.tabs.some((tab) => tab.key === key)) {
+    state.tabs.push({ key, runId, agentId: recipientId, title: run.title, dirty: false });
+  }
+  activateTab(key);
+}
+
+function focusRenderedTab(key) {
+  requestAnimationFrame(() => {
+    elements["conv-tabs"]
+      ?.querySelector(`[data-tab-activate="${CSS.escape(key)}"]`)
+      ?.focus({ preventScroll: true });
+  });
+}
+
+function activateTab(key, { focusTab = false } = {}) {
+  const tab = state.tabs.find((item) => item.key === key);
+  if (!tab) return;
+  tab.dirty = false;
+  state.activeTabKey = key;
+  state.selectedRunId = tab.runId;
+  state.selectionClearedByUser = false;
+  state.sessionPreview = null; // 切页即离开历史预览
+  state.runDiffView = null; // 切页收起产物面板
+  persistTabs();
+  renderTabs();
+  renderMemberStrip();
+  void syncModelPick();
+  renderRuns(); // 左栏选中态跟随 tab
+  if (state.view !== "workbench") setView("workbench");
+  void fetchRunEvents(tab.runId);
+  if (focusTab) focusRenderedTab(key);
+}
+
+function closeTab(key, { restoreFocus = false } = {}) {
+  const index = state.tabs.findIndex((tab) => tab.key === key);
+  if (index < 0) return;
+  const closedRunId = state.tabs[index].runId;
+  state.tabs.splice(index, 1);
+  if (state.activeTabKey === key) {
+    // 删除后原右邻仍占同一 index；没有右邻时才退到左邻。
+    const next = state.tabs[index] ?? state.tabs[index - 1] ?? null;
+    if (next) {
+      activateTab(next.key, { focusTab: restoreFocus });
+      releaseRunHistoryIfUnreferenced(closedRunId);
+      return;
+    }
+    state.activeTabKey = null;
+    state.selectedRunId = null;
+    state.selectionClearedByUser = true;
+  }
+  persistTabs();
+  renderTabs();
+  renderMemberStrip();
+  renderRuns();
+  releaseRunHistoryIfUnreferenced(closedRunId);
+  if (restoreFocus) {
+    const fallback = state.tabs[Math.min(index, state.tabs.length - 1)] ?? state.tabs[index - 1] ?? null;
+    if (fallback) focusRenderedTab(fallback.key);
+    else elements["task-input"]?.focus({ preventScroll: true });
+  }
+}
+
+function renderTabs() {
+  const bar = elements["conv-tabs"];
+  if (!bar) return;
+  bar.hidden = state.tabs.length === 0;
+  bar.innerHTML = state.tabs
+    .map((tab, index) => {
+      const active = tab.key === state.activeTabKey;
+      const roving = active || (!state.activeTabKey && index === 0);
+      const agent = agentLabel(tab.agentId);
+      const slug = ` is-agent-${agentSlug(tab.agentId)}`;
+      const tabId = `conv-tab-${index}`;
+      return `<div class="conv-tab${active ? " is-active" : ""}${slug}" role="presentation">
+        <button class="conv-tab-main" id="${tabId}" type="button" role="tab"
+          aria-selected="${active}" aria-controls="conversation-stream" tabindex="${roving ? 0 : -1}"
+          data-tab-activate="${escapeHtml(tab.key)}" title="${escapeHtml(tab.title)} · 直接发送给 ${escapeHtml(agent)}">
+          <span class="conv-tab-agent">${escapeHtml(agent)}</span>
+          <span class="conv-tab-title">${escapeHtml(tab.title)}</span>
+          ${tab.dirty ? '<span class="conv-tab-dirty" aria-label="有新消息"></span>' : ""}
+        </button>
+        <button class="conv-tab-close" type="button" data-tab-close="${escapeHtml(tab.key)}" aria-label="关闭「${escapeHtml(tab.title)}」页签">×</button>
+      </div>`;
+    })
+    .join("");
+  const panel = elements["conversation-stream"];
+  const activeIndex = state.tabs.findIndex((tab) => tab.key === state.activeTabKey);
+  panel?.setAttribute("aria-labelledby", activeIndex >= 0 ? `conv-tab-${activeIndex}` : "conversation-title");
+}
+
+function selectComposerTarget(agentId = null, { focusInput = true } = {}) {
+  const target = activeComposerTarget();
+  const normalized = agentId && target.members.includes(agentId) ? agentId : null;
+  const nextDirectTarget = normalized || target.coordinatorId;
+  if (!target.run && nextDirectTarget && state.requestedAgentIds.includes(nextDirectTarget)) {
+    removeRequestedAgent(nextDirectTarget, { focusInput: false });
+  }
+  if (target.run) {
+    openTab(target.run.id, nextDirectTarget);
+  } else {
+    rememberComposerControlDraft(target);
+    state.composerTargetAgentId = nextDirectTarget;
+    renderMemberStrip();
+    void syncModelPick();
+  }
+  if (focusInput) elements["task-input"]?.focus({ preventScroll: true });
+}
+
+function keepActiveComposerTargetVisible(strip) {
+  requestAnimationFrame(() => {
+    if (!strip?.isConnected) return;
+    const active = strip.querySelector('[data-composer-target][aria-checked="true"]');
+    if (!active) return;
+    const stripRect = strip.getBoundingClientRect();
+    const activeRect = active.getBoundingClientRect();
+    if (activeRect.left < stripRect.left) strip.scrollLeft += activeRect.left - stripRect.left - 4;
+    else if (activeRect.right > stripRect.right) strip.scrollLeft += activeRect.right - stripRect.right + 4;
+  });
+}
+
+// 唯一发送目标条：只呈现真实逻辑成员；活动成员就是直接收件人。
+function renderMemberStrip() {
+  const strip = elements["member-strip"];
+  if (!strip) return;
+  const target = activeComposerTarget();
+  const { members } = target;
+  if (!members.length) {
+    strip.hidden = true;
+    strip.innerHTML = "";
+    syncComposerTargetUi(target);
+    return;
+  }
+  const current = target.memberId;
+  const chip = (agentId, label, title) => {
+    const active = (agentId ?? null) === current;
+    const slug = agentId ? ` is-agent-${agentSlug(agentId)}` : "";
+    const cli = agentId ? agentCli(agentId) : null;
+    const icon = cli ? `${cliIconMarkup(cli)} ` : "";
+    return `<button class="member-chip${active ? " is-active" : ""}${slug}" type="button" role="radio"
+      aria-checked="${active}" tabindex="${active ? 0 : -1}" data-composer-target="${escapeHtml(agentId ?? "")}" title="${escapeHtml(title)}">${icon}${escapeHtml(label)}</button>`;
+  };
+  strip.hidden = false;
+  strip.innerHTML = `<span class="member-strip-label">直接发送</span>`
+    + members.map((id) => chip(id, agentLabel(id), `直接发送给 ${agentLabel(id)}，使用其 CLI 专属配置`)).join("");
+  syncComposerTargetUi(target);
+  keepActiveComposerTargetVisible(strip);
 }
 
 function selectRun(id) {
   if (!id) return;
-  state.sessionPreview = null; // 选任务即离开历史预览
   markSelectedSessionLink(null, null);
-  state.selectedRunId = id;
   const run = state.runs.find((item) => item.id === id);
   if (run?.unread) void patchRunMeta(id, { unread: false }); // 打开即已读
-  renderRuns();
-  if (state.view !== "workbench") setView("workbench");
-  void fetchRunEvents(id); // 拉 per-run 完整历史事件（不受全局最近窗口限制）
+  openTab(id); // 会话行默认进入真实执行所有者，不创建可发送的伪群聊页
 }
 
 const NAV_MOBILE_QUERY = window.matchMedia("(max-width: 820px)");
 
-// 抽屉可访问性（烛 R2）：离屏侧栏关闭时必须移出 Tab 顺序与 a11y 树（inert），
-// 否则移动键盘用户会聚焦到不可见控件。桌面态侧栏常显——永不 inert。
+// 全尺寸导航均为按需抽屉；离屏时必须同时移出 Tab 顺序与 a11y 树。
 function syncNavAccessibility() {
   const sidebar = byId("sidebar");
   if (!sidebar) return;
   const isOpen = document.querySelector(".app-shell")?.classList.contains("nav-open");
-  const shouldHide = NAV_MOBILE_QUERY.matches && !isOpen;
+  const shouldHide = !isOpen;
   sidebar.inert = shouldHide;
   sidebar.setAttribute("aria-hidden", String(shouldHide));
 }
@@ -3727,7 +15733,7 @@ function setNavDrawer(open, { restoreFocus = true } = {}) {
   syncNavAccessibility();
   if (open) {
     byId("sidebar")?.querySelector(".nav-item")?.focus?.({ preventScroll: true });
-  } else if (restoreFocus && NAV_MOBILE_QUERY.matches) {
+  } else if (restoreFocus) {
     byId("mobile-menu-button")?.focus?.({ preventScroll: true });
   }
 }
@@ -3735,21 +15741,46 @@ function setNavDrawer(open, { restoreFocus = true } = {}) {
 function bindEvents() {
   byId("mobile-menu-button")?.addEventListener("click", () => setNavDrawer(!navDrawerOpen()));
   byId("nav-backdrop")?.addEventListener("click", () => setNavDrawer(false));
-  NAV_MOBILE_QUERY.addEventListener("change", (event) => {
-    if (!event.matches && navDrawerOpen()) {
-      // 抽屉开着跨到桌面断点：侧栏即将 display:none，焦点会随之消失——
-      // 关抽屉并把焦点迁到顶栏当前导航项（烛 R8 建议）
-      setNavDrawer(false, { restoreFocus: false });
-      document.querySelector(".topbar-nav .topnav-item.is-active")?.focus?.({ preventScroll: true });
-    } else if (event.matches && document.activeElement?.closest(".topbar-nav")) {
-      // 反向：焦点在即将隐藏的顶栏导航上缩到移动断点——迁到汉堡（烛 R9 建议）
-      byId("mobile-menu-button")?.focus?.({ preventScroll: true });
-    }
-    syncNavAccessibility();
+  byId("mission-side-chat-close")?.addEventListener("click", () => setMissionSideChat(false));
+  byId("mission-side-chat-input")?.addEventListener("input", (event) => {
+    if (!elements["task-input"] || elements["task-input"].value === event.target.value) return;
+    elements["task-input"].value = event.target.value;
+    elements["task-input"].dispatchEvent(new Event("input", { bubbles: true }));
   });
+  byId("mission-side-chat-form")?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const sideInput = byId("mission-side-chat-input");
+    if (!sideInput?.value.trim() || !elements["task-input"]) return;
+    elements["task-input"].value = sideInput.value;
+    elements["task-input"].dispatchEvent(new Event("input", { bubbles: true }));
+    elements["submit-task-button"]?.click();
+  });
+  NAV_MOBILE_QUERY.addEventListener("change", syncNavAccessibility);
   syncNavAccessibility();
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && navDrawerOpen()) setNavDrawer(false); // 仅抽屉打开时响应 Esc（烛 R3）
+    if (state.view !== "workbench" || event.defaultPrevented) return;
+    const mod = event.ctrlKey || event.metaKey;
+    if (mod && event.shiftKey && event.key.toLowerCase() === "g") {
+      event.preventDefault();
+      handleWorkbenchEnvironmentAction("review");
+    } else if (mod && event.altKey && !event.shiftKey && event.key.toLowerCase() === "b") {
+      event.preventDefault();
+      handleWorkbenchEnvironmentAction("browser");
+    } else if (mod && event.altKey && !event.shiftKey && event.key.toLowerCase() === "f") {
+      event.preventDefault();
+      handleWorkbenchEnvironmentAction("files");
+    } else if (mod && event.altKey && event.key.toLowerCase() === "s") {
+      event.preventDefault();
+      setMissionSideChat(true);
+    }
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || event.defaultPrevented || !navDrawerOpen()) return;
+    // dialog / 命令面板位于导航上方，由更高层先消费 Escape。
+    if (document.querySelector("dialog[open], .cmd-palette-overlay.is-open")) return;
+    // 导航高于 Mission Control：消费本次 Escape，避免底层抽屉同轮折叠。
+    event.preventDefault();
+    setNavDrawer(false);
   });
 
   document.addEventListener("click", (event) => {
@@ -3760,87 +15791,699 @@ function bindEvents() {
     }
     const jump = event.target.closest("[data-view-jump]");
     if (jump) setView(jump.dataset.viewJump);
+    const configSurface = event.target.closest("[data-config-surface]");
+    if (configSurface) setConfigSurface(configSurface.dataset.configSurface);
+    const configSurfaceJump = event.target.closest("[data-config-surface-jump]");
+    if (configSurfaceJump) setView("config", { configSurface: configSurfaceJump.dataset.configSurfaceJump });
+    const capabilitySource = event.target.closest("[data-capability-source-id]");
+    if (capabilitySource) void openCapabilitySource(capabilitySource.dataset.capabilitySourceId);
+    const archivedToggle = event.target.closest("#archived-toggle");
+    if (archivedToggle) {
+      state.archivedExpanded = !state.archivedExpanded;
+      renderRailMetaSections(); // 折叠态不保留归档会话 DOM
+      return;
+    }
+    const runMenu = event.target.closest("[data-run-menu]");
+    if (runMenu) {
+      const item = state.runs.find((run) => run.id === runMenu.dataset.runMenu);
+      if (item) showContextMenuFromTrigger(runMenu, runContextItems(item));
+      return;
+    }
+    const projectMenu = event.target.closest("[data-project-menu]");
+    if (projectMenu) {
+      const project = findProjectById(projectMenu.dataset.projectMenu);
+      if (project) showContextMenuFromTrigger(projectMenu, projectContextItems(project));
+      return;
+    }
+    // 配置图谱「配置目标」切换与远程面板动作（v41 波四）
+    const configHostChip = event.target.closest("[data-config-host]");
+    if (configHostChip) selectConfigHost(configHostChip.dataset.configHost || null);
+    const configProjectChip = event.target.closest("[data-config-project]");
+    if (configProjectChip) selectConfigProject(configProjectChip.dataset.configProject);
+    const configRemoteProviderApp = event.target.closest("[data-config-remote-provider-app]");
+    if (configRemoteProviderApp) setConfigRemoteProviderApp(configRemoteProviderApp.dataset.configRemoteProviderApp);
+    const configRemoteWorkbenchTab = event.target.closest("[data-config-remote-workbench-tab]");
+    if (configRemoteWorkbenchTab) {
+      setConfigRemoteWorkbenchTab(configRemoteWorkbenchTab.dataset.configRemoteWorkbenchTab);
+      return;
+    }
+    const configRemoteResourceTab = event.target.closest("[data-config-remote-resource-tab]");
+    if (configRemoteResourceTab) {
+      setConfigRemoteResourceTab(configRemoteResourceTab.dataset.configRemoteResourceTab);
+      return;
+    }
+    const configRemoteRuntimeMode = event.target.closest("[data-config-remote-runtime-mode]");
+    if (configRemoteRuntimeMode) {
+      setConfigRemoteRuntimeMode(configRemoteRuntimeMode.dataset.configRemoteRuntimeMode);
+      return;
+    }
+    const configRemoteCli = event.target.closest("[data-config-remote-cli]");
+    if (configRemoteCli) {
+      setConfigRemoteSelectedCli(configRemoteCli.dataset.configRemoteCli);
+      return;
+    }
+    const configRemoteProxyDiagnose = event.target.closest("[data-config-remote-proxy-diagnose]");
+    if (configRemoteProxyDiagnose) {
+      void diagnoseConfigRemoteProxy(configRemoteProxyDiagnose.dataset.configRemoteProxyDiagnose);
+      return;
+    }
+    const configRemoteSyncRefresh = event.target.closest("[data-config-remote-sync-refresh]");
+    if (configRemoteSyncRefresh) {
+      loadConfigRemoteSyncPlan(configRemoteSyncRefresh.dataset.configRemoteSyncRefresh, { force: true });
+      renderConfigRemotePanel();
+      return;
+    }
+    const configRemoteProviderApply = event.target.closest("[data-config-remote-provider-apply]");
+    if (configRemoteProviderApply) {
+      const [app, providerId] = String(configRemoteProviderApply.dataset.configRemoteProviderApply).split("::");
+      if (app && providerId) void applyConfigRemoteProvider(app, providerId).catch(() => {});
+      return;
+    }
+    const configRemoteProviderAdd = event.target.closest("[data-config-remote-provider-add]");
+    if (configRemoteProviderAdd) {
+      void openProviderDialog(null, { app: configRemoteProviderAdd.dataset.configRemoteProviderAdd });
+      return;
+    }
+    const configRemoteProviderEdit = event.target.closest("[data-config-remote-provider-edit]");
+    if (configRemoteProviderEdit) {
+      const provider = providerById(configRemoteProviderEdit.dataset.configRemoteProviderEdit);
+      if (provider) void openProviderDialog(provider);
+      return;
+    }
+    const configRemoteProviderDelete = event.target.closest("[data-config-remote-provider-delete]");
+    if (configRemoteProviderDelete) {
+      void deleteProvider(configRemoteProviderDelete.dataset.configRemoteProviderDelete);
+      return;
+    }
+    const configRemoteProviderCheck = event.target.closest("[data-config-remote-provider-check]");
+    if (configRemoteProviderCheck) {
+      void checkProviderHealth(configRemoteProviderCheck.dataset.configRemoteProviderCheck);
+      return;
+    }
+    const configRemoteProviderSpeed = event.target.closest("[data-config-remote-provider-speed]");
+    if (configRemoteProviderSpeed) {
+      void speedTestProvider(configRemoteProviderSpeed.dataset.configRemoteProviderSpeed);
+      return;
+    }
+    const configRemoteProviderUsage = event.target.closest(".config-remote-provider-deck [data-provider-usage]");
+    if (configRemoteProviderUsage) {
+      void queryProviderUsageNow(configRemoteProviderUsage.dataset.providerUsage);
+      return;
+    }
+    const configRemoteTeamApply = event.target.closest("[data-config-remote-team-apply]");
+    if (configRemoteTeamApply) {
+      const teamId = configRemoteTeamApply.closest(".config-remote-team-apply")?.querySelector("[data-config-remote-team]")?.value;
+      if (teamId) void applyConfigRemoteTeam(teamId).catch((error) => toast(`团队方案执行失败：${error.message}`, "error", 7000));
+      return;
+    }
+    const configRemoteProviderSource = event.target.closest("[data-config-remote-provider-source]");
+    if (configRemoteProviderSource) void openConfigRemoteProviderSource(configRemoteProviderSource.dataset.configRemoteProviderSource);
+    if (event.target.closest("[data-config-host-manage]")) setView("hosts");
+    // 远程能力未授权：直接送到门闩清单，而不是让用户对着一行技术文案发呆
+    if (event.target.closest("[data-config-open-gates]")) {
+      setView("security");
+      requestAnimationFrame(() => byId("remote-gates-list")?.scrollIntoView({ block: "center", behavior: "smooth" }));
+      return;
+    }
+    const configHostProbe = event.target.closest("[data-config-host-probe]");
+    if (configHostProbe) void probeConfigHost(configHostProbe.dataset.configHostProbe);
+    const configInstallCli = event.target.closest("[data-config-install-cli]");
+    if (configInstallCli) {
+      const [hostId, toolId] = String(configInstallCli.dataset.configInstallCli).split(":");
+      if (hostId && toolId) void installConfigCli(hostId, toolId);
+    }
+    const configHostSync = event.target.closest("[data-config-host-sync]");
+    if (configHostSync) {
+      const syncHost = (state.configHosts ?? []).find((entry) => entry.id === configHostSync.dataset.configHostSync);
+      if (syncHost) void openConfigSyncDialog(syncHost);
+    }
+    const configTargetTerminal = event.target.closest("[data-config-target-terminal]");
+    if (configTargetTerminal && state.configHostId) void openConfigTargetTerminal(state.configHostId);
+    const configTargetRefresh = event.target.closest("[data-config-target-refresh]");
+    if (configTargetRefresh && state.configHostId) void refreshConfigRemoteTarget(state.configHostId);
+    // v41 波五：远程三面图谱——刷新图谱 / 真源文件展开
+    const configTargetGraph = event.target.closest("[data-config-target-graph]");
+    if (configTargetGraph && state.configHostId) void loadConfigHostGraph(state.configHostId, { force: true });
+    const configGraphFile = event.target.closest("[data-config-graph-file]");
+    if (configGraphFile && state.configHostId) void toggleConfigGraphFile(configGraphFile.dataset.configGraphFile);
+    const configRemoteSourceReload = event.target.closest("[data-config-remote-source-reload]");
+    if (configRemoteSourceReload) {
+      void reloadConfigRemoteSource(configRemoteSourceReload.dataset.configRemoteSourceReload);
+      return;
+    }
+    const configRemoteSourceSave = event.target.closest("[data-config-remote-source-save]");
+    if (configRemoteSourceSave) {
+      void saveConfigRemoteSource(configRemoteSourceSave.dataset.configRemoteSourceSave);
+      return;
+    }
+    // 远端真源安全网：保存前差异 / 备份对比 / 从备份恢复
+    const configRemoteSourceDiff = event.target.closest("[data-config-remote-source-diff]");
+    if (configRemoteSourceDiff) {
+      toggleConfigRemoteSourceDiff(configRemoteSourceDiff.dataset.configRemoteSourceDiff);
+      return;
+    }
+    const configRemoteBackupCompare = event.target.closest("[data-config-remote-backup-compare]");
+    if (configRemoteBackupCompare) {
+      void toggleConfigRemoteBackupCompare(
+        configRemoteBackupCompare.dataset.configRemoteBackupSource,
+        configRemoteBackupCompare.dataset.configRemoteBackupCompare,
+      );
+      return;
+    }
+    const configRemoteBackupRestore = event.target.closest("[data-config-remote-backup-restore]");
+    if (configRemoteBackupRestore) {
+      void restoreConfigRemoteBackup(
+        configRemoteBackupRestore.dataset.configRemoteBackupSource,
+        configRemoteBackupRestore.dataset.configRemoteBackupRestore,
+      );
+      return;
+    }
+    const configRecoveryReconcile = event.target.closest("[data-config-recovery-reconcile]");
+    if (configRecoveryReconcile) {
+      void reconcileConfigRemoteRecovery(configRecoveryReconcile.dataset.configRecoveryReconcile);
+      return;
+    }
+    if (event.target.closest("[data-config-recovery-reload]")) {
+      void loadConfigRemoteRecoveries().finally(() => renderConfigRemotePanel());
+      return;
+    }
     const run = event.target.closest("[data-run-select]");
     if (run) selectRun(run.dataset.runSelect);
     const teamOption = event.target.closest("[data-team-select]");
     if (teamOption) selectTeam(teamOption.dataset.teamSelect);
     const projectToggle = event.target.closest("[data-project-toggle]");
     if (projectToggle) toggleProject(projectToggle.dataset.projectToggle, projectToggle);
+    // Codex 式「展开显示」：整列表重渲染为全量（焦点让位给列表首个可交互行——按钮本身被替换，无处归还）
+    const showMore = event.target.closest("[data-sessions-showmore]");
+    if (showMore) {
+      const project = findProjectById(showMore.dataset.sessionsShowmore);
+      const list = showMore.closest("ul");
+      if (project && list) {
+        state.showAllSessions.add(project.id);
+        // 远程项目没有本地原生会话，整列重渲必须走 run 台账聚合（否则被刷成「无历史对话」）
+        list.innerHTML = project.remoteProject
+          ? remoteProjectSessionItems(project) || `<li class="project-empty">${REMOTE_PROJECT_EMPTY_HINT}</li>`
+          : sessionGroupsMarkup(project, visibleTreeSessions(project)) || `<li class="project-empty">无历史对话</li>`;
+        list.querySelector(".run-group-toggle, .cli-group-toggle, .session-link")?.focus({ preventScroll: true });
+      }
+    }
+    const teamToggle = event.target.closest("[data-team-toggle]");
+    if (teamToggle) {
+      // 团队节点：折叠时释放整棵项目子树；展开时才按当前模型创建。
+      const id = teamToggle.dataset.teamToggle;
+      const wasExpanded = state.expandedTeams.has(id);
+      if (wasExpanded) state.expandedTeams.delete(id);
+      else state.expandedTeams.add(id);
+      teamToggle.setAttribute("aria-expanded", String(!wasExpanded));
+      const list = byId(teamToggle.getAttribute("aria-controls"));
+      if (list) {
+        if (wasExpanded) list.replaceChildren();
+        else if (id === UNASSIGNED_TEAM_NODE_ID) {
+          // 未归属虚拟组不在 model.teams 里，走通用查找会误报「团队已不存在」（2026-08-11 拍平后唯一 team-toggle 消费者）
+          const model = projectTreeModel();
+          list.innerHTML = model.unassignedProjects.map((project, itemIndex) => projectNodeMarkup(project, `u-${itemIndex}`)).join("")
+            || `<li class="project-empty">无未归属项目</li>`;
+        } else {
+          const model = projectTreeModel();
+          const index = model.teams.findIndex((team) => team.id === id);
+          const team = model.teams[index];
+          list.innerHTML = team
+            ? teamChildrenMarkup(team, index, model.projectsByTeam.get(id) ?? [], model.looseByTeam.get(id) ?? [])
+            : `<li class="project-empty">团队已不存在</li>`;
+        }
+        list.hidden = wasExpanded;
+      }
+    }
+    // 协作会话组折叠：成员行是静态 markup，只需 hidden 切换 + aria 同步（不做全量重渲染，保焦点）
+    const runGroupToggle = event.target.closest("[data-run-group-toggle]");
+    if (runGroupToggle) {
+      const id = runGroupToggle.dataset.runGroupToggle;
+      const wasCollapsed = state.collapsedRunGroups.has(id);
+      if (wasCollapsed) state.collapsedRunGroups.delete(id);
+      else state.collapsedRunGroups.add(id);
+      runGroupToggle.setAttribute("aria-expanded", String(wasCollapsed));
+      const members = byId(runGroupToggle.getAttribute("aria-controls"));
+      if (members) members.hidden = !wasCollapsed;
+    }
+    // CLI 分组折叠：同协作组纪律（hidden 切换 + aria 同步，不做全量重渲染）
+    const cliGroupToggle = event.target.closest("[data-cli-group-toggle]");
+    if (cliGroupToggle) {
+      const key = cliGroupToggle.dataset.cliGroupToggle;
+      const wasCollapsed = state.collapsedCliGroups.has(key);
+      if (wasCollapsed) state.collapsedCliGroups.delete(key);
+      else state.collapsedCliGroups.add(key);
+      cliGroupToggle.setAttribute("aria-expanded", String(wasCollapsed));
+      const members = byId(cliGroupToggle.getAttribute("aria-controls"));
+      if (members) members.hidden = !wasCollapsed;
+    }
+    const pinnedProject = event.target.closest("[data-pinned-project]");
+    if (pinnedProject) {
+      // 置顶区项目内联展开：与项目树同一交互，展开态独立记账
+      const id = pinnedProject.dataset.pinnedProject;
+      const wasExpanded = state.expandedPinnedProjects.has(id);
+      if (wasExpanded) state.expandedPinnedProjects.delete(id);
+      else state.expandedPinnedProjects.add(id);
+      pinnedProject.setAttribute("aria-expanded", String(!wasExpanded));
+      const list = byId(pinnedProject.getAttribute("aria-controls"));
+      if (list) {
+        if (wasExpanded) list.replaceChildren();
+        else {
+          const project = findProjectById(id);
+          // 置顶远程项目同样走 run 台账聚合（无本地原生会话）
+          const items = project
+            ? (project.remoteProject ? remoteProjectSessionItems(project) : sessionGroupsMarkup(project, visibleTreeSessions(project)))
+            : "";
+          list.innerHTML = items || (project?.remoteProject
+            ? `<li class="project-empty">${REMOTE_PROJECT_EMPTY_HINT}</li>`
+            : `<li class="project-empty">无历史对话</li>`);
+        }
+        list.hidden = wasExpanded;
+      }
+    }
+    const projectNewSession = event.target.closest("[data-project-newsession]");
+    if (projectNewSession && !projectNewSession.disabled) {
+      const project = findProjectById(projectNewSession.dataset.projectNewsession);
+      if (project?.remoteProject) {
+        // v41 波二：远程项目「写」= 在此远端目录建 agent 会话（remote run，SSH 桥执行）——
+        // 不再只是开终端；终端入口保留在项目右键菜单
+        state.selectedRunId = null;
+        state.selectionClearedByUser = true;
+        state.activeTabKey = null;
+        persistTabs();
+        renderTabs();
+        state.sessionPreview = null;
+        state.pendingCwd = null;
+        state.pendingRemote = {
+          hostId: project.remote.hostId,
+          path: project.remote.path,
+          hostName: project.remote.hostName || project.remote.hostId,
+          projectId: project.id,
+        };
+        state.agentPickerOpen = true; // 新建会话先选直接发送目标（官方徽标悬浮卡）
+        renderRuns();
+        elements["task-input"].focus();
+        toast(`已切到新任务模式（远程 ${state.pendingRemote.hostName} · ${project.remote.path}）——请选择直接发送目标`, "success");
+      } else if (project?.path) {
+        // 行尾「写」图标：在此项目目录下新建会话（cwd 已定，跳过选址对话框）→ 会话区弹 agent 徽标选择器
+        state.selectedRunId = null;
+        state.selectionClearedByUser = true;
+        state.activeTabKey = null;
+        persistTabs();
+        renderTabs();
+        state.sessionPreview = null;
+        state.pendingCwd = project.path;
+        state.pendingRemote = null; // 本地项目与远程位置互斥
+        state.agentPickerOpen = true; // 新建会话先选直接发送目标（官方徽标悬浮卡）
+        renderRuns();
+        elements["task-input"].focus();
+        toast(`已切到新任务模式（项目地址 ${project.path}）——请选择直接发送目标`, "success");
+      }
+    }
+    // agent 徽标选择器：选定直接收件人标签并联动 CLI 专属控制目录。
+    const pickAgent = event.target.closest("[data-pick-agent]");
+    if (pickAgent) {
+      const agentId = pickAgent.dataset.pickAgent;
+      selectComposerTarget(agentId, { focusInput: false });
+      state.agentPickerOpen = false;
+      renderSelectedRun();
+      elements["task-input"].focus({ preventScroll: true });
+      toast(`直接发送给 ${agentLabel(agentId)}——已切换其 CLI 配置`, "success", 2600);
+    }
     const sessionLink = event.target.closest("[data-session-project][data-session-id]");
-    if (sessionLink) void openSessionPreview(sessionLink.dataset.sessionProject, sessionLink.dataset.sessionId);
+    if (sessionLink) void openSessionPreview(sessionLink.dataset.sessionProject, sessionLink.dataset.sessionId, sessionLink.dataset.sessionCli ?? "claude", sessionLink.dataset.sessionScope ?? "");
     const previewClose = event.target.closest("[data-preview-close]");
     if (previewClose) closeSessionPreview();
+    const sourceGroupHeader = event.target.closest("[data-source-group]");
+    if (sourceGroupHeader) {
+      const key = sourceGroupHeader.dataset.sourceGroup;
+      if (state.sourceGroupsExpanded.has(key)) state.sourceGroupsExpanded.delete(key);
+      else state.sourceGroupsExpanded.add(key);
+      renderSources();
+    }
     const source = event.target.closest("[data-source-id]");
     if (source) void selectSource(source.dataset.sourceId);
-    const rollback = event.target.closest("[data-version-id]");
-    if (rollback) void rollbackConfig(rollback.dataset.versionId);
+    const versionPreview = event.target.closest("[data-version-preview]");
+    if (versionPreview) {
+      void previewConfigVersion(versionPreview.dataset.versionPreview);
+      return;
+    }
     const approval = event.target.closest("[data-approval-id][data-approval-decision]");
     if (approval) void resolveApproval(approval.dataset.approvalId, approval.dataset.approvalDecision);
     // 协作台会话流内联审批：跳过二次弹窗，哈希随决议回传校验
     const inlineApproval = event.target.closest("[data-inline-approval-id][data-inline-approval-decision]");
     if (inlineApproval) void resolveInlineApproval(inlineApproval.dataset.inlineApprovalId, inlineApproval.dataset.inlineApprovalDecision);
+    const leaseRevoke = event.target.closest("[data-lease-revoke-run]");
+    if (leaseRevoke) void revokeCapabilityLease(leaseRevoke.dataset.leaseRevokeRun);
     const recoveryAck = event.target.closest("[data-recovery-ack]");
     if (recoveryAck) acknowledgeRecovery();
+    // ask 回答卡：先切到提问成员标签，再聚焦输入框；否则发送会成为 steer。
+    const focusAnswer = event.target.closest("[data-focus-answer]");
+    if (focusAnswer) selectComposerTarget(focusAnswer.dataset.focusAnswer, { focusInput: true });
+    // 欢迎空态快捷模板：填进 composer 不自动提交（可同步切换直接发送目标）
+    const quickTemplate = event.target.closest("[data-quick-template]");
+    if (quickTemplate) {
+      applyQuickTemplate(quickTemplate.dataset.quickTemplate, quickTemplate.dataset.quickStartAgent || "");
+    }
+    const welcomeCat = event.target.closest("[data-welcome-cat]");
+    if (welcomeCat) {
+      state.welcomeCategory = welcomeCat.dataset.welcomeCat || "all";
+      renderSelectedRun();
+    }
+    // （旧命令面板 <dialog> 已退役：条目点击由 command-palette.js 模块内部委托）
+    // @ 提及菜单
+    const mentionItem = event.target.closest("[data-mention-id]");
+    if (mentionItem) {
+      event.preventDefault();
+      applyMention(mentionItem.dataset.mentionId);
+    }
+    // / 斜杠命令菜单
+    const slashItem = event.target.closest("[data-slash-id]");
+    if (slashItem) {
+      event.preventDefault();
+      applySlashCommand(slashItem.dataset.slashId);
+    }
+    const automationEdit = event.target.closest("[data-automation-edit]");
+    if (automationEdit) openAutomationManager(automationEdit.dataset.automationEdit);
+    const automationHistoryRun = event.target.closest("[data-automation-history-run]");
+    if (automationHistoryRun) {
+      closeAutomationManager();
+      const runId = automationHistoryRun.dataset.automationHistoryRun;
+      if (state.runs.some((run) => run.id === runId)) selectRun(runId);
+      else toast("该运行已不在会话列表（可能已清除）", "info");
+    }
+    // 失败任务重发：prompt 回填 composer 新任务模式
+    const retry = event.target.closest("[data-retry-run]");
+    if (retry) retryRun(retry.dataset.retryRun);
+    // 产物 diff：终态+有 worktree 的 run 展开/收起产物面板（内容服务端脱敏）
+    const runDiff = event.target.closest("[data-run-diff]");
+    if (runDiff) void toggleRunDiff(runDiff.dataset.runDiff);
+    const settlementWorktree = event.target.closest("[data-settlement-continue-worktree]");
+    if (settlementWorktree) {
+      const run = state.runs.find((item) => item.id === settlementWorktree.dataset.settlementContinueWorktree);
+      if (run) void continueRunInWorktree(run);
+    }
+    const settlementCopy = event.target.closest("[data-settlement-copy-path]");
+    if (settlementCopy) {
+      const path = settlementCopy.dataset.settlementCopyPath || "";
+      void navigator.clipboard.writeText(path).then(
+        () => toast("工作树路径已复制", "success", 1800),
+        (error) => toast(`复制失败：${error.message}`, "error"),
+      );
+    }
+    const settlementGit = event.target.closest("[data-settlement-copy-git]");
+    if (settlementGit) {
+      const text = settlementGit.dataset.settlementCopyGit || "";
+      void navigator.clipboard.writeText(text).then(
+        () => toast("git 命令已复制", "success", 1800),
+        (error) => toast(`复制失败：${error.message}`, "error"),
+      );
+    }
+    const settlementReveal = event.target.closest("[data-settlement-reveal]");
+    if (settlementReveal) {
+      const path = settlementReveal.dataset.settlementReveal || "";
+      // 浏览器沙箱无法真正 open explorer；复制路径并提示
+      void navigator.clipboard.writeText(path).then(
+        () => toast("路径已复制——请在资源管理器地址栏粘贴打开", "info", 2800),
+        (error) => toast(`复制失败：${error.message}`, "error"),
+      );
+    }
+    const copyResume = event.target.closest("[data-copy-resume]");
+    if (copyResume) {
+      const cmd = copyResume.dataset.copyResume || "";
+      void navigator.clipboard.writeText(cmd).then(
+        () => toast("恢复命令已复制", "success", 1800),
+        (error) => toast(`复制失败：${error.message}`, "error"),
+      );
+    }
+    const loadEarlier = event.target.closest("[data-load-earlier]");
+    if (loadEarlier) loadEarlierConversation();
+    const loadNewer = event.target.closest("[data-load-newer]");
+    if (loadNewer) loadNewerConversation();
+    const returnLatest = event.target.closest("[data-return-latest]");
+    if (returnLatest) returnToLatestConversation();
+    // tab 页签：激活 / 关闭
+    const tabActivate = event.target.closest("[data-tab-activate]");
+    if (tabActivate) activateTab(tabActivate.dataset.tabActivate, { focusTab: true });
+    const tabClose = event.target.closest("[data-tab-close]");
+    if (tabClose) closeTab(tabClose.dataset.tabClose, { restoreFocus: true });
+    const composerCliTab = event.target.closest("[data-composer-cli-tab]");
+    if (composerCliTab) setComposerCliTab(composerCliTab.dataset.composerCliTab, { focus: true });
+    const composerCliCommand = event.target.closest("[data-composer-cli-command]");
+    if (composerCliCommand) applyComposerCliCommand(composerCliCommand.dataset.composerCliCommand);
+    const composerCliAction = event.target.closest("[data-composer-cli-action]");
+    if (composerCliAction) void runComposerCliAction(composerCliAction.dataset.composerCliAction);
+    // 目标标签只含真实成员，它是唯一直接收件人入口。
+    const composerTarget = event.target.closest("[data-composer-target]");
+    if (composerTarget) selectComposerTarget(composerTarget.dataset.composerTarget);
+    const requestedAgentRemove = event.target.closest("[data-requested-agent-remove]");
+    if (requestedAgentRemove) removeRequestedAgent(requestedAgentRemove.dataset.requestedAgentRemove);
+    // 拓扑参与者卡：点击=开该成员独立页（与成员条同语义）
+    const topologyAgent = event.target.closest("[data-topology-agent]");
+    if (topologyAgent && state.selectedRunId) openTab(state.selectedRunId, topologyAgent.dataset.topologyAgent);
+    // 配置图谱能力面：MCP 隔离启停
+    const mcpToggle = event.target.closest("[data-mcp-toggle]");
+    if (mcpToggle) void toggleMcp(mcpToggle);
+    // 代码块一键复制（取同容器 pre 的已转义文本——内容已过 redact+escape 链）
+    const copyCode = event.target.closest("[data-copy-code]");
+    if (copyCode) {
+      const pre = copyCode.parentElement?.querySelector("pre");
+      if (pre) {
+        void navigator.clipboard.writeText(pre.textContent ?? "").then(
+          () => toast("代码已复制", "success", 1800),
+          (error) => toast(`复制失败：${error.message}`, "error"),
+        );
+      }
+    }
+    // v3.7 自动化行操作：立即跑 / 启停 / 删除 / 点主体跳上次运行
+    const automationRun = event.target.closest("[data-automation-run]");
+    if (automationRun) void triggerAutomation(automationRun.dataset.automationRun);
+    const automationToggle = event.target.closest("[data-automation-toggle]");
+    if (automationToggle) void toggleAutomation(automationToggle.dataset.automationToggle);
+    const automationRemove = event.target.closest("[data-automation-remove]");
+    if (automationRemove) void removeAutomation(automationRemove.dataset.automationRemove);
+    const automationOpen = event.target.closest("[data-automation-open]");
+    if (automationOpen) openAutomationLastRun(automationOpen.dataset.automationOpen);
   });
 
   document.addEventListener("keydown", (event) => {
+    // 命令面板快捷键与面板内导航由 command-palette.js 模块自绑定（v4.0 Forge），这里不再重复处理。
+
+    // Composer 菜单键盘事件由 textarea 自己独占，避免冒泡后一次方向键移动两项。
+
     const row = event.target.closest?.("[data-run-select][role='button']"); // 合成事件 target 可为 document
     if (row && (event.key === "Enter" || event.key === " ")) {
       event.preventDefault();
       selectRun(row.dataset.runSelect);
+      return;
     }
+    const targetRadio = event.target.closest?.("[role='radio'][data-composer-target]");
+    if (targetRadio && ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+      const radios = [...elements["member-strip"].querySelectorAll("[role='radio'][data-composer-target]")];
+      if (!radios.length) return;
+      event.preventDefault();
+      const current = Math.max(0, radios.indexOf(targetRadio));
+      const nextIndex = event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? radios.length - 1
+          : event.key === "ArrowRight"
+            ? (current + 1) % radios.length
+            : (current - 1 + radios.length) % radios.length;
+      selectComposerTarget(radios[nextIndex].dataset.composerTarget);
+      requestAnimationFrame(() => elements["member-strip"]?.querySelector(`[data-composer-target="${CSS.escape(radios[nextIndex].dataset.composerTarget)}"]`)?.focus({ preventScroll: true }));
+      return;
+    }
+    const cliTab = event.target.closest?.("[role='tab'][data-composer-cli-tab]");
+    if (cliTab && ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+      const tabs = [...elements["composer-cli-console"].querySelectorAll("[role='tab'][data-composer-cli-tab]")];
+      if (!tabs.length) return;
+      event.preventDefault();
+      const current = Math.max(0, tabs.indexOf(cliTab));
+      const nextIndex = event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? tabs.length - 1
+          : event.key === "ArrowRight"
+            ? (current + 1) % tabs.length
+            : (current - 1 + tabs.length) % tabs.length;
+      setComposerCliTab(tabs[nextIndex].dataset.composerCliTab, { focus: true });
+      return;
+    }
+    const tab = event.target.closest?.("[role='tab'][data-tab-activate]");
+    if (!tab || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    const tabs = [...elements["conv-tabs"].querySelectorAll("[role='tab'][data-tab-activate]")];
+    if (!tabs.length) return;
+    event.preventDefault();
+    const current = Math.max(0, tabs.indexOf(tab));
+    const nextIndex = event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? tabs.length - 1
+        : event.key === "ArrowRight"
+          ? (current + 1) % tabs.length
+          : (current - 1 + tabs.length) % tabs.length;
+    activateTab(tabs[nextIndex].dataset.tabActivate, { focusTab: true });
   });
 
   // 侧栏右键菜单：会话（三分区共用）与项目树（document 级委托一次覆盖）
   document.addEventListener("contextmenu", (event) => {
-    const runButton = event.target.closest(".run-rail-list [data-run-select]");
+    // data-run-select 通用匹配：run 轨道 + 项目树协作聚合组头/成员行共用同一 run 菜单——
+    // 早前限定 .run-rail-list，聚合组右键落不到任何分支，弹浏览器默认菜单（LO 2026-08-10）
+    const runButton = event.target.closest("[data-run-select]");
     if (runButton) {
       const run = state.runs.find((item) => item.id === runButton.dataset.runSelect);
       if (run) {
         event.preventDefault();
-        showContextMenu(runContextItems(run), event.clientX, event.clientY);
+        showContextMenu(runContextItems(run), event.clientX, event.clientY, { restoreFocus: runButton });
+      }
+      return;
+    }
+    // 聚合组折叠 chevron 本身不带 data-run-select，右键同样归属该 run 的菜单
+    const groupToggle = event.target.closest("[data-run-group-toggle]");
+    if (groupToggle) {
+      const run = state.runs.find((item) => item.id === groupToggle.dataset.runGroupToggle);
+      if (run) {
+        event.preventDefault();
+        showContextMenu(runContextItems(run), event.clientX, event.clientY, { restoreFocus: groupToggle });
       }
       return;
     }
     const sessionLink = event.target.closest("[data-session-project][data-session-id]");
     if (sessionLink) {
-      const project = (state.projectsData?.projects ?? []).find((item) => item.id === sessionLink.dataset.sessionProject);
+      const project = findProjectById(sessionLink.dataset.sessionProject);
       if (project) {
         event.preventDefault();
-        showContextMenu(sessionContextItems(project, sessionLink.dataset.sessionId), event.clientX, event.clientY);
+        showContextMenu(sessionContextItems(project, sessionLink.dataset.sessionId, sessionLink.dataset.sessionCli ?? "claude", sessionLink.dataset.sessionScope ?? ""), event.clientX, event.clientY, { restoreFocus: sessionLink });
       }
       return;
     }
     const projectToggle = event.target.closest("[data-project-toggle]");
     if (projectToggle) {
-      const project = (state.projectsData?.projects ?? []).find((item) => item.id === projectToggle.dataset.projectToggle);
+      const project = findProjectById(projectToggle.dataset.projectToggle);
       if (project) {
         event.preventDefault();
-        showContextMenu(projectContextItems(project), event.clientX, event.clientY);
+        showContextMenu(projectContextItems(project), event.clientX, event.clientY, { restoreFocus: projectToggle });
+      }
+      return;
+    }
+    const pinnedProject = event.target.closest("[data-pinned-project]");
+    if (pinnedProject) {
+      const project = findProjectById(pinnedProject.dataset.pinnedProject);
+      if (project) {
+        event.preventDefault();
+        showContextMenu(projectContextItems(project), event.clientX, event.clientY, { restoreFocus: pinnedProject });
       }
     }
   });
 
   window.addEventListener("hashchange", () => {
-    const view = location.hash.slice(1);
-    if (VIEW_TITLES[view]) setView(view, { updateHash: false, focus: false });
+    const route = parseForgeRoute();
+    if (!FORGE_VIEW_TITLES[route.view]) return;
+    if (route.view === "config" && route.configSurface === "capabilities" && route.memberId) {
+      void openMemberConfigTarget({
+        surface: "capabilities",
+        memberId: route.memberId,
+        runtimeProfileId: route.runtimeProfileId,
+      });
+      return;
+    }
+    if (route.view === "config" && route.configSurface === "sources" && route.runtimeProfileId) {
+      void openMemberConfigTarget({
+        surface: "runtime",
+        memberId: route.memberId,
+        runtimeProfileId: route.runtimeProfileId,
+      });
+      return;
+    }
+    setView(route.view, { updateHash: false, focus: false, configSurface: route.configSurface });
   });
 
   elements["refresh-button"].addEventListener("click", () => void refreshCurrentView());
   elements["task-form"].addEventListener("submit", createRun);
+  elements["composer-cli-console-toggle"]?.addEventListener("click", () => setComposerCliOpen(!state.composerCliOpen));
+  elements["composer-cli-default-save"]?.addEventListener("click", () => void saveComposerCliDefaults());
+  elements["composer-cli-open-seat"]?.addEventListener("click", () => void openComposerCliSeat());
+  elements["composer-cli-open-capabilities"]?.addEventListener("click", () => void openComposerCliCapabilities());
+  elements["composer-cli-open-connection"]?.addEventListener("click", () => void openComposerCliConnection());
+  for (const controlId of ["task-model", "task-effort", "task-permission"]) {
+    elements[controlId]?.addEventListener("change", () => {
+      // 续聊：模型/Effort/权限都是 run 级热改（模型与 Effort 每轮原生可改，权限限白名单迁移），
+      // 直接 PATCH，下一轮生效；失败由 applyRunControlChange 回滚 select
+      if (selectedRun() && !state.sessionPreview) {
+        void applyRunControlChange(controlId, elements[controlId].value);
+        if (controlId === "task-permission") syncPermissionPill();
+        return;
+      }
+      rememberComposerControlDraft();
+      renderComposerCliConsole();
+      if (controlId === "task-permission") syncPermissionPill();
+    });
+  }
+  // 权限 pill：镜像 task-permission 原 select，点选即改 select 并走既有 change 链路。
+  const permissionPill = elements["permission-pill"];
+  const permissionMenu = elements["permission-menu"];
+  permissionPill?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    setPermissionMenuOpen(permissionMenu?.hidden !== false);
+  });
+  permissionMenu?.addEventListener("click", (event) => {
+    const option = event.target.closest("[data-permission-option]");
+    if (!option) return;
+    const select = elements["task-permission"];
+    if (!select) return;
+    select.value = option.dataset.permissionOption;
+    select.dispatchEvent(new Event("change"));
+    setPermissionMenuOpen(false);
+    syncPermissionPill();
+  });
+  permissionMenu?.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    setPermissionMenuOpen(false);
+    permissionPill?.focus({ preventScroll: true });
+  });
+  document.addEventListener("click", (event) => {
+    if (!permissionMenu || permissionMenu.hidden) return;
+    if (event.target.closest("#task-permission-pick")) return;
+    setPermissionMenuOpen(false);
+  });
+  elements["save-automation-button"]?.addEventListener("click", () => void saveAutomationFromComposer());
   elements["composer-new-task"].addEventListener("click", () => {
-    // 退出续聊模式：取消选中任务，胶囊回到新任务形态
+    // 退出续聊模式：保留当前成员选择作为新任务直接收件人，页签栏仍可切回。
+    const currentTarget = activeComposerTarget();
+    state.composerTargetAgentId = currentTarget.memberId;
     state.selectedRunId = null;
+    state.selectionClearedByUser = true;
+    state.activeTabKey = null;
+    persistTabs();
+    renderTabs();
+    renderMemberStrip();
+    void syncModelPick();
     elements["task-input"].value = "";
     renderRuns();
     elements["task-input"].focus({ preventScroll: true });
   });
   elements["new-session-button"].addEventListener("click", openSessionDialog);
+  elements["new-task-row"].addEventListener("click", openSessionDialog); // Codex 式全宽入口，与 + 同路
+  elements["team-newsession-button"]?.addEventListener("click", openSessionDialog); // Codex 式分区头「+」，同路
+  elements["rail-search-row"]?.addEventListener("click", () => openForgePalette()); // Codex 式搜索行 → 命令面板
+  // Codex 式「项目 ▾」：团队分区头折叠整棵项目树（DOM 手术，不重渲染；折叠态内存级）
+  elements["team-tree-toggle"]?.addEventListener("click", () => {
+    state.teamTreeCollapsed = !state.teamTreeCollapsed;
+    elements["team-tree-toggle"].setAttribute("aria-expanded", String(!state.teamTreeCollapsed));
+    const tree = elements["workbench-project-tree"];
+    if (tree) tree.hidden = state.teamTreeCollapsed;
+  });
+  elements["composer-team"].addEventListener("change", () => selectTeam(elements["composer-team"].value)); // 创建会话时直接选从属团队
+  elements["start-agent"].addEventListener("change", () => selectComposerTarget(elements["start-agent"].value)); // 隐藏兼容桥：旧模块采用建议时汇入唯一目标源
   elements["composer-cwd"].addEventListener("click", () => {
     if (!elements["composer-cwd"].disabled) openSessionDialog();
   });
   elements["session-form"].addEventListener("submit", confirmSessionDialog);
-  elements["session-cwd-input"].addEventListener("input", updateSessionCwdHint);
+  elements["session-cwd-input"].addEventListener("input", () => {
+    updateSessionCwdHint();
+    renderSessionDirpick();
+    syncSessionNameFromCwd();
+  });
   elements["session-close-button"].addEventListener("click", () => elements["session-dialog"].close());
   elements["session-cancel-button"].addEventListener("click", () => elements["session-dialog"].close());
   elements["attach-button"].addEventListener("click", async () => {
@@ -3865,25 +16508,72 @@ function bindEvents() {
     state.attachments.splice(Number(detach.dataset.detach), 1);
     renderAttachments();
   });
-  elements["session-browse-button"].addEventListener("click", async () => {
-    // 弹本机资源管理器目录选择框（服务端原生对话框，可拿绝对路径）
-    const button = elements["session-browse-button"];
+  // 会话向导：源文件夹选择区（原生目录框，与会话对话框旧「浏览…」同接口）
+  elements["session-dirpick"].addEventListener("click", async () => {
+    const button = elements["session-dirpick"];
     button.disabled = true;
-    button.textContent = "选择中…";
     try {
       const result = await request("/api/system/pick-directory", { method: "POST" });
       if (result.path) {
         elements["session-cwd-input"].value = result.path;
         updateSessionCwdHint();
+        renderSessionDirpick();
+        syncSessionNameFromCwd();
       }
     } catch (error) {
       toast(`目录选择失败：${error.message}`, "error");
     } finally {
       button.disabled = false;
-      button.textContent = "浏览…";
     }
   });
-  elements["task-model"]?.addEventListener("change", renderStatusline);
+  // 步骤导航与类型卡片（远程卡按台账可用性动态启停，点击记录类型）
+  elements["session-next-button"].addEventListener("click", () => {
+    setSessionDialogStep("info");
+    (state.sessionDialogType === "remote" ? elements["session-remote-host"] : elements["session-cwd-input"]).focus();
+  });
+  elements["session-prev-button"].addEventListener("click", () => setSessionDialogStep("type"));
+  for (const card of elements["session-step-type"].querySelectorAll("[data-session-type]")) {
+    card.addEventListener("click", () => {
+      if (card.disabled) return;
+      selectSessionDialogType(card.dataset.sessionType);
+    });
+  }
+  elements["session-name-input"].addEventListener("input", () => {
+    elements["session-name-input"].dataset.touched = "1";
+  });
+  // 远程项目表单：主机切换重置路径回默认 home 并重列；路径/上级/目录点选都汇入同一浏览状态机
+  elements["session-remote-host"].addEventListener("change", () => {
+    elements["session-remote-path"].value = "";
+    void loadRemoteBrowser({ force: true });
+    syncRemoteNameFromPath();
+  });
+  elements["session-remote-path"].addEventListener("change", () => {
+    void loadRemoteBrowser({ force: true });
+    syncRemoteNameFromPath();
+  });
+  elements["session-remote-up"].addEventListener("click", () => {
+    const input = elements["session-remote-path"];
+    input.value = remotePathParent(input.value.trim() || "/");
+    void loadRemoteBrowser({ force: true });
+    syncRemoteNameFromPath();
+  });
+  elements["session-remote-browser"].addEventListener("click", (event) => {
+    const item = event.target.closest("[data-remote-cd]");
+    if (!item) return;
+    const input = elements["session-remote-path"];
+    input.value = remotePathJoin(input.value.trim() || "/", item.dataset.remoteCd);
+    void loadRemoteBrowser({ force: true });
+    syncRemoteNameFromPath();
+  });
+  elements["session-remote-name"].addEventListener("input", () => {
+    elements["session-remote-name"].dataset.touched = "1";
+  });
+  for (const id of ["task-model", "task-effort", "task-permission"]) {
+    elements[id]?.addEventListener("change", () => {
+      renderStatusline();
+      renderComposerCliConsole();
+    });
+  }
   elements["cancel-run-button"].addEventListener("click", cancelSelectedRun);
   elements["router-form"].addEventListener("submit", handleRouterSubmit);
   elements["source-filter"].addEventListener("input", (event) => {
@@ -3906,14 +16596,113 @@ function bindEvents() {
   elements["sessions-refresh-button"].addEventListener("click", () => void loadSessions());
   elements["sessions-summaries-toggle"].addEventListener("change", () => void loadSessions());
   elements["clear-runs-button"]?.addEventListener("click", () => void clearFinishedRuns());
-  elements["manage-teams-button"]?.addEventListener("click", () => openTeamDialog(currentTeam()));
-  elements["team-new-button"]?.addEventListener("click", () => fillTeamForm(null));
-  elements["team-close-button"]?.addEventListener("click", closeTeamDialog);
-  elements["team-cancel-button"]?.addEventListener("click", closeTeamDialog);
+  elements["manage-teams-button"]?.addEventListener("click", () => void openTeamWorkspace(currentTeam()));
+  elements["team-new-button"]?.addEventListener("click", async () => {
+    if (!await confirmDiscardTeamDraft()) return;
+    memberLibrary?.setSurface("orchestration", { focus: false });
+    fillTeamForm(null);
+    elements["team-name-input"]?.focus();
+  });
+  renderTeamPresetSelect();
+  elements["team-preset-select"]?.addEventListener("change", () => {
+    const presetId = elements["team-preset-select"].value;
+    if (presetId) void applyTeamPreset(presetId);
+    else renderTeamPresetSelect();
+  });
+  elements["team-export-button"]?.addEventListener("click", () => void exportEditingTeam());
+  elements["team-import-button"]?.addEventListener("click", () => elements["team-import-file"]?.click());
+  elements["team-import-file"]?.addEventListener("change", () => {
+    const file = elements["team-import-file"].files?.[0];
+    elements["team-import-file"].value = ""; // 允许重复选同一文件
+    if (file) void importTeamPack(file);
+  });
+  elements["team-switch-select"]?.addEventListener("change", async () => {
+    const id = elements["team-switch-select"].value;
+    if (!await confirmDiscardTeamDraft()) {
+      renderTeamSwitcher(teamById(state.editingTeamId));
+      return;
+    }
+    fillTeamForm(state.teams.find((item) => item.id === id) ?? null);
+  });
+  elements["team-activate-button"]?.addEventListener("click", activateEditingTeam);
+  elements["team-apply-providers-button"]?.addEventListener("click", () => {
+    if (state.editingTeamId) void applyTeamProviders(state.editingTeamId);
+  });
+  elements["team-edit-button"]?.addEventListener("click", () => {
+    memberLibrary?.setSurface("orchestration", { focus: false });
+    elements["team-form"]?.scrollIntoView({ block: "start", behavior: "smooth" });
+    requestAnimationFrame(() => {
+      const target = elements["team-name-input"]?.disabled ? elements["team-form-title"] : elements["team-name-input"];
+      if (target === elements["team-form-title"]) target?.setAttribute("tabindex", "-1");
+      target?.focus?.({ preventScroll: true });
+    });
+  });
+  elements["team-cancel-button"]?.addEventListener("click", resetTeamForm);
+  // 芯片墙失败态「重试」：清错误后重拉目录，勾选意图取 teamChipsPending（失败时已暂存），钩子负责回填
+  elements["team-settings-panel"]?.addEventListener("click", (event) => {
+    if (!event.target.closest("[data-chips-retry]")) return;
+    state.capabilitiesError = null;
+    const pending = state.teamChipsPending ?? { skills: [], mcp: [], readOnly: false };
+    renderTeamChips(pending.skills, pending.mcp, pending.readOnly);
+  });
   elements["team-form"]?.addEventListener("submit", (event) => void saveTeamForm(event));
+  elements["team-members-list"]?.addEventListener("change", (event) => {
+    const card = event.target.closest(".team-member-option");
+    if (!card) return;
+    const checkbox = card.querySelector('input[type="checkbox"]');
+    const radio = card.querySelector('input[name="team-coordinator"]');
+    if (event.target === radio && radio.checked) {
+      if (checkbox && !checkbox.checked) checkbox.checked = true;
+      elements["team-form"].dataset.coordinator = radio.value;
+    }
+    if (event.target === checkbox && !checkbox.checked && radio?.checked) {
+      radio.checked = false;
+      elements["team-form"].dataset.coordinator = "";
+      toast("已移除原主脑，请为团队重新指定主脑", "warning", 4200);
+    }
+    updateTeamRosterSummary();
+    memberLibrary?.updateTeamToggle();
+  });
+  elements["team-members-list"]?.addEventListener("click", (event) => {
+    const groupToggle = event.target.closest("[data-toggle-member-group]");
+    if (groupToggle) {
+      const brand = groupToggle.closest(".tm-group")?.dataset.groupBrand;
+      if (!brand) return;
+      if (teamMemberGroupCollapsed.has(brand)) teamMemberGroupCollapsed.delete(brand);
+      else teamMemberGroupCollapsed.add(brand);
+      applyTeamMemberFilter();
+      return;
+    }
+    const edit = event.target.closest("[data-edit-team-member]");
+    if (!edit) return;
+    event.preventDefault();
+    event.stopPropagation();
+    void memberLibrary?.open(edit.dataset.editTeamMember);
+  });
+  elements["team-members-search"]?.addEventListener("input", (event) => {
+    event.stopPropagation(); // 搜索框不是团队草稿字段，绝不能让 form 的 input 监听误标脏
+    teamMembersQuery = elements["team-members-search"].value || "";
+    applyTeamMemberFilter();
+  });
+  elements["team-members-search"]?.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && elements["team-members-search"].value) {
+      elements["team-members-search"].value = "";
+      teamMembersQuery = "";
+      applyTeamMemberFilter();
+      event.stopPropagation();
+    }
+  });
+  elements["team-member-create-button"]?.addEventListener("click", () => void memberLibrary?.createNew());
+  elements["team-form"]?.addEventListener("input", markTeamFormDirty);
+  elements["team-form"]?.addEventListener("change", markTeamFormDirty);
   elements["team-delete-button"]?.addEventListener("click", () => void deleteEditingTeam());
-  state.selectedTeamId = sessionStorage.getItem(TEAM_KEY) || BUILTIN_TEAM_ID;
+  // LO 2026-08-04：团队选择持久化到 localStorage（退出客户端重进后恢复上次团队）；旧 sessionStorage 值迁移一次
+  state.selectedTeamId = localStorage.getItem(TEAM_KEY) || sessionStorage.getItem(TEAM_KEY) || BUILTIN_TEAM_ID;
+  localStorage.setItem(TEAM_KEY, state.selectedTeamId);
   initProjectSummariesToggle();
+  initSubagentsToggle();
+  initRecentOnlyToggle();
+  initShowHiddenToggle();
   elements["obs-handoff-body"].addEventListener("click", (event) => {
     const row = event.target.closest("[data-handoff]");
     if (row) void openHandoff(row.dataset.handoff);
@@ -3926,25 +16715,819 @@ function bindEvents() {
       toast(`复制失败：${error.message}`, "error");
     }
   });
+  elements["diagnostic-log-filter"]?.addEventListener("change", (event) => {
+    state.diagnosticLogFilter = event.target.value;
+    renderDiagnosticLog();
+  });
+  elements["capabilities-refresh-button"]?.addEventListener("click", () => void loadCapabilities({ fresh: true }));
+  elements["config-surface-remote"]?.addEventListener("keydown", handleConfigRemoteTabKey);
+  elements["version-preview-close"]?.addEventListener("click", clearConfigVersionPreview);
+  elements["version-preview-rollback"]?.addEventListener("click", () => {
+    const versionId = elements["version-preview-rollback"].dataset.versionId;
+    if (versionId) void rollbackConfig(versionId);
+  });
+  elements["config-topology-tabs"]?.addEventListener("keydown", (event) => {
+    if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+    const tabs = [...elements["config-topology-tabs"].querySelectorAll("[data-config-surface]")];
+    const current = Math.max(0, tabs.indexOf(document.activeElement));
+    const next = event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? tabs.length - 1
+        : (current + (event.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
+    event.preventDefault();
+    setConfigSurface(tabs[next].dataset.configSurface);
+    tabs[next].focus();
+  });
+  // 供应商方案：面板委托（启用/编辑/删除/检查/测速/排序/故障转移/用量卡片按钮）+ 对话框 + 应用团队方案
+  elements["provider-columns"]?.addEventListener("click", (event) => {
+    const appTab = event.target.closest("[data-provider-app-tab]");
+    if (appTab) {
+      setProviderActiveApp(appTab.dataset.providerAppTab);
+      return;
+    }
+    const addButton = event.target.closest("[data-provider-add-app]");
+    if (addButton) {
+      openProviderDialog(null, { app: addButton.dataset.providerAddApp || null });
+      return;
+    }
+    // 官方登录虚拟行「存为档案」：开新增对话框并预填端点/官方分类，凭据仍留 CLI 托管
+    const archiveOfficial = event.target.closest("[data-provider-archive-official]");
+    if (archiveOfficial) {
+      const app = archiveOfficial.dataset.providerArchiveOfficial;
+      const liveInfo = state.providersData?.live?.[app] ?? {};
+      const label = PROVIDER_APP_META.find((entry) => entry.app === app)?.label ?? app;
+      openProviderDialog(null, {
+        app,
+        prefill: {
+          name: `${label} 官方`,
+          baseUrl: liveInfo.baseUrl ?? "",
+          category: "official",
+          notes: "官方登录态认亲档案——OAuth 凭据由 CLI 托管（managed 块），此处仅存端点用于统一管理与 live 认亲。",
+        },
+      });
+      return;
+    }
+    const switchButton = event.target.closest("[data-provider-switch]");
+    if (switchButton) {
+      const [app, providerId] = String(switchButton.dataset.providerSwitch).split("::");
+      void switchProvider(app, providerId);
+      return;
+    }
+    // 备份时间线：展开/刷新/对比/回退/删除
+    if (event.target.closest("[data-provider-backups-toggle]")) {
+      toggleProviderBackups();
+      return;
+    }
+    if (event.target.closest("[data-provider-backups-refresh]")) {
+      state.providerBackupCache.clear();
+      void loadProviderBackups({ fresh: true });
+      return;
+    }
+    const backupCompare = event.target.closest("[data-provider-backup-compare]");
+    if (backupCompare) {
+      toggleProviderBackupCompare(backupCompare.dataset.providerBackupCompare);
+      return;
+    }
+    const backupRestore = event.target.closest("[data-provider-backup-restore]");
+    if (backupRestore) {
+      void restoreProviderBackup(backupRestore.dataset.providerBackupRestore);
+      return;
+    }
+    const backupDelete = event.target.closest("[data-provider-backup-delete]");
+    if (backupDelete) {
+      void deleteProviderBackup(backupDelete.dataset.providerBackupDelete);
+      return;
+    }
+    const editButton = event.target.closest("[data-provider-edit]");
+    if (editButton) {
+      const provider = providerById(editButton.dataset.providerEdit);
+      if (provider) openProviderDialog(provider);
+      return;
+    }
+    const deleteButton = event.target.closest("[data-provider-delete]");
+    if (deleteButton) {
+      void deleteProvider(deleteButton.dataset.providerDelete);
+      return;
+    }
+    const checkButton = event.target.closest("[data-provider-check]");
+    if (checkButton) {
+      void checkProviderHealth(checkButton.dataset.providerCheck);
+      return;
+    }
+    const speedButton = event.target.closest("[data-provider-speed]");
+    if (speedButton) {
+      void speedTestProvider(speedButton.dataset.providerSpeed);
+      return;
+    }
+    const usageButton = event.target.closest("[data-provider-usage]");
+    if (usageButton) {
+      void queryProviderUsageNow(usageButton.dataset.providerUsage);
+      return;
+    }
+    const moveButton = event.target.closest("[data-provider-move]");
+    if (moveButton) {
+      const [app, providerId, direction] = String(moveButton.dataset.providerMove).split("::");
+      void moveProvider(app, providerId, Number(direction));
+      return;
+    }
+    const failoverAdd = event.target.closest("[data-provider-failover-add]");
+    if (failoverAdd) {
+      const [app, providerId] = String(failoverAdd.dataset.providerFailoverAdd).split("::");
+      void failoverSetMembership(app, providerId, true);
+      return;
+    }
+    const failoverRemove = event.target.closest("[data-provider-failover-remove]");
+    if (failoverRemove) {
+      const [app, providerId] = String(failoverRemove.dataset.providerFailoverRemove).split("::");
+      void failoverSetMembership(app, providerId, false);
+    }
+  });
+  document.addEventListener("input", (event) => {
+    const editor = event.target.closest("[data-config-remote-source-editor]");
+    if (!editor) return;
+    const fileId = editor.dataset.configRemoteSourceEditor;
+    const key = `${configRemoteTargetKey()}:${fileId}`;
+    const cache = state.configHostSourceCache.get(key);
+    const data = cache?.status === "ok" ? cache.data : null;
+    if (!data?.editable) return;
+    const dirty = editor.value !== (data.content ?? "");
+    state.configHostSourceDrafts.set(key, { content: editor.value, digest: data.digest, dirty });
+    const shell = editor.closest(".config-remote-source-editor-shell");
+    const save = shell?.querySelector("[data-config-remote-source-save]");
+    if (save) save.disabled = !dirty;
+    const status = shell?.querySelector(".config-remote-source-editor-actions .subtle");
+    if (status) status.textContent = `${data.exists ? `SHA-256 ${String(data.digest).slice(0, 12)}…` : "新建文件"}${dirty ? " · 未保存" : ""}`;
+  });
+  elements["provider-columns"]?.addEventListener("change", (event) => {
+    const toggle = event.target.closest("[data-failover-toggle]");
+    if (toggle) void failoverToggleAuto(toggle.dataset.failoverToggle, toggle.checked);
+  });
+  // app 图标条：切换聚焦应用（一次只看一个应用的供应商列表）
+  elements["provider-app-bar"]?.addEventListener("click", (event) => {
+    const tab = event.target.closest("[data-provider-app-tab]");
+    if (tab) setProviderActiveApp(tab.dataset.providerAppTab);
+  });
+  // 行式列表拖拽排序：dragstart 记档案 id → dragover 标插入位 → drop 落 appOrder
+  elements["provider-columns"]?.addEventListener("dragstart", (event) => {
+    const row = event.target.closest("[data-provider-row]");
+    if (!row || !event.dataTransfer) return;
+    providerDragId = row.dataset.providerRow;
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", providerDragId);
+    row.classList.add("is-dragging");
+  });
+  elements["provider-columns"]?.addEventListener("dragover", (event) => {
+    if (!providerDragId) return;
+    event.preventDefault(); // 允许 drop（含落到列表空白 = 排到末尾）
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+    const row = event.target.closest("[data-provider-row]");
+    if (!row || row.dataset.providerRow === providerDragId) return;
+    const rect = row.getBoundingClientRect();
+    const after = event.clientY - rect.top > rect.height / 2;
+    row.classList.toggle("is-dragover-before", !after);
+    row.classList.toggle("is-dragover-after", after);
+  });
+  elements["provider-columns"]?.addEventListener("drop", (event) => {
+    if (!providerDragId) return;
+    event.preventDefault();
+    const row = event.target.closest("[data-provider-row]");
+    const targetId = row?.dataset.providerRow ?? null;
+    const insertAfter = row ? row.classList.contains("is-dragover-after") : true;
+    const dragId = providerDragId;
+    clearProviderDragState();
+    if (!targetId || targetId === dragId) return;
+    void dropProviderRow(dragId, targetId, insertAfter);
+  });
+  elements["provider-columns"]?.addEventListener("dragend", clearProviderDragState);
+  elements["provider-add-button"]?.addEventListener("click", () => openProviderDialog(null, { app: providerActiveApp() }));
+  elements["provider-form"]?.addEventListener("submit", (event) => void saveProviderForm(event));
+  elements["provider-cancel-button"]?.addEventListener("click", closeProviderDialog);
+  elements["provider-close-button"]?.addEventListener("click", closeProviderDialog);
+  elements["provider-delete-button"]?.addEventListener("click", () => {
+    if (state.editingProviderId) void deleteProvider(state.editingProviderId);
+  });
+  elements["provider-apply-team-button"]?.addEventListener("click", () => void applyTeamProviders());
+  // 供应商工具：一个带文字标签的溢出菜单（复用全站 showContextMenuFromTrigger），不再是 6 个猜谜图标
+  elements["provider-tools-button"]?.addEventListener("click", (event) => {
+    const storeBlocked = state.providersData?.storeStatus?.state === "blocked";
+    showContextMenuFromTrigger(event.currentTarget, [
+      {
+        label: state.providerSortMode ? "完成排序" : "调整档案顺序",
+        icon: "sort",
+        disabled: storeBlocked,
+        action: () => {
+          state.providerSortMode = !state.providerSortMode;
+          renderProviders();
+        },
+      },
+      {
+        label: state.providerBackupsOpen ? "收起发布备份" : "查看发布备份并回退（单个 live 文件）",
+        icon: "history",
+        action: () => toggleProviderBackups(),
+      },
+      {
+        // 这项原先只藏在「工作台 → 资源 → 备份」子页签里，没入口找不到
+        label: "整套配置备份与恢复（档案 + Prompt + MCP…）",
+        icon: "archive",
+        action: () => void window.__forgeCcSwitchPanel?.openTab?.("resources", { resourceTab: "backups", run: "backups" }),
+      },
+      "---",
+      { label: "导入供应商配置（JSON）", icon: "upload", disabled: storeBlocked, action: () => importProvidersFromFile() },
+      { label: "导出供应商配置（默认掩码 Key）", icon: "download", action: () => void exportProviders() },
+      { label: "从 ccswitch:// 深链接导入", icon: "link", disabled: storeBlocked, action: () => openProviderDeeplink() },
+      "---",
+      { label: "应用通用配置（五开关 + 通用片段）", icon: "settings", action: () => openCommonConfigDialog() },
+      { label: "环境变量冲突检查", icon: "shield", action: () => void checkProviderEnvConflicts() },
+    ]);
+  });
+  elements["provider-sort-exit"]?.addEventListener("click", () => {
+    state.providerSortMode = false;
+    renderProviders();
+  });
+  // 对话框：分区 tab + 端点管理 + 模板联动 + 脚本测试
+  elements["provider-dialog"]?.addEventListener("click", (event) => {
+    const tab = event.target.closest("[data-provider-tab]");
+    if (tab) {
+      setProviderDialogTab(tab.dataset.providerTab);
+      return;
+    }
+    const endpointRemove = event.target.closest("[data-endpoint-remove]");
+    if (endpointRemove) {
+      state.providerDialogEndpoints.splice(Number(endpointRemove.dataset.endpointRemove), 1);
+      renderProviderEndpoints();
+      return;
+    }
+    const endpointUse = event.target.closest("[data-endpoint-use]");
+    if (endpointUse) {
+      const entry = state.providerDialogEndpoints[Number(endpointUse.dataset.endpointUse)];
+      if (entry) {
+        const previous = elements["provider-baseurl-input"].value.trim();
+        elements["provider-baseurl-input"].value = entry.url;
+        state.providerDialogEndpoints.splice(Number(endpointUse.dataset.endpointUse), 1);
+        if (previous) state.providerDialogEndpoints.push({ url: previous, addedAt: new Date().toISOString(), lastUsed: null });
+        renderProviderEndpoints();
+      }
+    }
+  });
+  elements["provider-endpoint-add-button"]?.addEventListener("click", addProviderEndpoint);
+  elements["provider-endpoint-input"]?.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      addProviderEndpoint();
+    }
+  });
+  elements["provider-endpoint-test-button"]?.addEventListener("click", () => void testProviderEndpoints());
+  elements["provider-usage-template"]?.addEventListener("change", () => void applyUsageTemplate());
+  elements["provider-usage-test-button"]?.addEventListener("click", () => void testUsageScriptNow());
+  elements["provider-model-test-button"]?.addEventListener("click", () => void testProviderModelNow());
+  // 预设选择器：搜索过滤 + 网格点选自动填充
+  elements["provider-preset-search"]?.addEventListener("input", (event) => {
+    state.providerPresetQuery = event.target.value;
+    renderProviderPresetGrid();
+  });
+  elements["provider-preset-grid"]?.addEventListener("click", (event) => {
+    const card = event.target.closest("[data-preset-key]");
+    if (!card) return;
+    // 再点已选中的卡片 = 取消预设（选错了要能退回来，不必关窗重开）
+    if (state.providerPresetSelected?.key === card.dataset.presetKey) {
+      clearProviderPreset();
+      return;
+    }
+    const [app, ...nameParts] = card.dataset.presetKey.split(":");
+    const preset = (state.providerPresets?.[app] ?? []).find((entry) => entry.name === nameParts.join(":"));
+    if (preset) applyProviderPreset(app, preset);
+  });
+  elements["provider-preset-clear-button"]?.addEventListener("click", () => clearProviderPreset());
+  elements["provider-reset-button"]?.addEventListener("click", resetProviderDialog);
+  // 通用配置对话框：开关 ↔ JSON 双向同步 + 三应用 tab + 保存
+  elements["common-config-close-button"]?.addEventListener("click", () => elements["common-config-dialog"].close());
+  elements["common-config-cancel-button"]?.addEventListener("click", () => elements["common-config-dialog"].close());
+  elements["common-config-form"]?.addEventListener("submit", (event) => void saveCommonConfigForm(event));
+  elements["common-config-dialog"]?.addEventListener("click", (event) => {
+    const tab = event.target.closest("[data-common-tab]");
+    if (tab) setCommonConfigTab(tab.dataset.commonTab);
+  });
+  elements["common-config-claude"]?.addEventListener("input", syncCommonTogglesFromJson);
+  for (const def of COMMON_TOGGLE_DEFS) {
+    elements[def.id]?.addEventListener("change", () => applyCommonToggleToJson(def));
+  }
+  // 行号编辑器：供应商对话框「配置预览」区块 + 通用配置对话框 Claude JSON
+  providerCommonJsonEditorHandle = attachJsonEditor(elements["provider-common-json-editor"]);
+  commonClaudeJsonEditorHandle = attachJsonEditor(elements["common-config-claude-editor"]);
+  // 供应商对话框「配置预览」：表单任一字段变化防抖重跑干跑预览（服务端掩码；手改不盖）
+  elements["provider-dialog"]?.addEventListener("input", refreshProviderConfigPreview);
+  elements["provider-dialog"]?.addEventListener("change", refreshProviderConfigPreview);
+  elements["provider-preview-tabs"]?.addEventListener("click", (event) => {
+    const tab = event.target.closest("[data-preview-tab]");
+    if (!tab) return;
+    providerPreviewState.active = Number(tab.dataset.previewTab) || 0;
+    renderProviderPreview();
+  });
+  // 聚焦取明文 → 可编辑；手改进 edits（保存时以 rawConfig 补丁落档案）
+  elements["provider-common-json"]?.addEventListener("focus", () => void maybeRevealProviderPreview());
+  elements["provider-common-json"]?.addEventListener("input", () => {
+    const current = providerPreviewCurrent();
+    if (!current || current.removed) return;
+    if (providerPreviewState.revealed[current.path] === undefined) return; // 未取明文前只读（readOnly 已挡，双保险）
+    providerPreviewState.edits[current.path] = elements["provider-common-json"].value;
+    providerPreviewState.rawDirty = true;
+    refreshProviderConfigPreview();
+  });
+  elements["provider-preview-reset-button"]?.addEventListener("click", () => {
+    const current = providerPreviewCurrent();
+    if (!current) return;
+    providerPreviewState.resets.add(current.path);
+    delete providerPreviewState.edits[current.path];
+    delete providerPreviewState.revealed[current.path];
+    providerPreviewState.rawDirty = true;
+    renderProviderPreview();
+    refreshProviderConfigPreview();
+    toast("已重置为投影——保存后生效", "info", 3000);
+  });
+  elements["provider-edit-common-button"]?.addEventListener("click", openCommonConfigDialog);
+  elements["provider-deeplink-preview-button"]?.addEventListener("click", () => void previewProviderDeeplink());
+  elements["provider-deeplink-form"]?.addEventListener("submit", (event) => void importProviderDeeplink(event));
+  elements["provider-deeplink-close-button"]?.addEventListener("click", () => elements["provider-deeplink-dialog"].close());
+  elements["provider-deeplink-cancel-button"]?.addEventListener("click", () => elements["provider-deeplink-dialog"].close());
+  elements["provider-deeplink-input"]?.addEventListener("input", () => {
+    state.providerDeeplinkPreview = null;
+    elements["provider-deeplink-import-button"].disabled = true;
+    elements["provider-deeplink-preview"].textContent = "链接已改变，请重新预览。";
+  });
+  window.addEventListener("forge:ccswitch-deeplink", (event) => {
+    const url = typeof event.detail === "string" ? event.detail : event.detail?.url;
+    if (url) void enqueueCcSwitchDeeplink(url);
+  });
+  const pendingCcSwitchDeeplinks = Array.isArray(window.__FORGE_CCSWITCH_DEEPLINKS__)
+    ? window.__FORGE_CCSWITCH_DEEPLINKS__.splice(0)
+    : [];
+  for (const entry of pendingCcSwitchDeeplinks) {
+    const url = typeof entry === "string" ? entry : entry?.url;
+    if (url) void enqueueCcSwitchDeeplink(url);
+  }
+  elements["cap-skills-body"]?.addEventListener("change", (event) => {
+    const checkbox = event.target.closest("[data-skill-toggle]");
+    if (checkbox) void toggleAgentSkill(checkbox);
+  });
+  // Skill 矩阵：筛选 / 整行 / 整列 / 全量批量。行按全部成员，列与全量按当前筛选命中项。
+  elements["cap-skills-filter"]?.addEventListener("input", (event) => {
+    state.capabilityFilter = event.target.value;
+    renderCapabilities();
+  });
+  elements["cap-skills-body"]?.addEventListener("click", (event) => {
+    const row = event.target.closest("[data-cap-row-toggle]");
+    if (!row) return;
+    const code = row.dataset.capRowToggle;
+    const enabled = skillMatrixTargets({ skillCode: code, enabled: true }).length > 0;
+    void applySkillMatrixBulk(skillMatrixTargets({ skillCode: code, enabled }), enabled, `Skill「${code}」× 全部成员`);
+  });
+  elements["cap-skills-head"]?.addEventListener("click", (event) => {
+    const column = event.target.closest("[data-cap-column-toggle]");
+    if (!column) return;
+    const memberId = column.dataset.capColumnToggle;
+    const enabled = skillMatrixTargets({ memberId, enabled: true }).length > 0;
+    void applySkillMatrixBulk(skillMatrixTargets({ memberId, enabled }), enabled, `成员「${agentLabel(memberId)}」× 当前列出的 Skill`);
+  });
+  byId("cap-skills-filter")?.closest(".cap-matrix-toolbar")?.addEventListener("click", (event) => {
+    const bulk = event.target.closest("[data-cap-bulk]");
+    if (!bulk) return;
+    const enabled = bulk.dataset.capBulk === "enable";
+    const filtered = String(state.capabilityFilter ?? "").trim();
+    void applySkillMatrixBulk(
+      skillMatrixTargets({ enabled }),
+      enabled,
+      filtered ? `筛选「${filtered}」命中的 Skill × 全部成员` : "全部 Skill × 全部成员",
+    );
+  });
+  // composer 成熟产品键位：Enter 发送、Shift+Enter 换行；@ 提及 / 斜杠命令激活时拦截
+  const taskInput = elements["task-input"];
+  if (taskInput) {
+    taskInput.addEventListener("keydown", (event) => {
+      if ((state.mentionActive || state.slashActive) && event.key === "Escape" && !event.isComposing) {
+        event.preventDefault();
+        event.stopPropagation();
+        hideMentionMenu();
+        hideSlashMenu();
+        return;
+      }
+      if ((state.mentionActive || state.slashActive) && (event.key === "Enter" || event.key === "Tab") && !event.isComposing) {
+        if (state.mentionActive) {
+          const pick = state.mentionCandidates?.[state.mentionIndex];
+          if (pick) {
+            event.preventDefault();
+            applyMention(pick.id);
+            return;
+          }
+        }
+        if (state.slashActive) {
+          const pick = state.slashCandidates?.[state.slashIndex];
+          if (pick) {
+            event.preventDefault();
+            applySlashCommand(pick.id);
+            return;
+          }
+        }
+        event.stopPropagation();
+      }
+      if ((state.mentionActive || state.slashActive) && (event.key === "ArrowDown" || event.key === "ArrowUp") && !event.isComposing) {
+        event.preventDefault();
+        event.stopPropagation();
+        const delta = event.key === "ArrowDown" ? 1 : -1;
+        if (state.mentionActive) {
+          const list = state.mentionCandidates ?? [];
+          if (!list.length) return;
+          state.mentionIndex = Math.max(0, Math.min(list.length - 1, (state.mentionIndex ?? 0) + delta));
+          byId("mention-menu")?.querySelectorAll(".mention-item").forEach((el, index) => {
+            el.classList.toggle("is-active", index === state.mentionIndex);
+          });
+        } else {
+          const list = state.slashCandidates ?? [];
+          if (!list.length) return;
+          state.slashIndex = Math.max(0, Math.min(list.length - 1, (state.slashIndex ?? 0) + delta));
+          syncSlashActiveOption();
+        }
+        return;
+      }
+      if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+        event.preventDefault();
+        elements["submit-task-button"]?.click();
+      }
+    });
+    taskInput.addEventListener("input", () => {
+      taskInput.style.height = "auto";
+      taskInput.style.height = `${Math.min(taskInput.scrollHeight, 220)}px`;
+      state.requestedAgentIds = pruneRequestedAgentIds(state.requestedAgentIds, taskInput.value, agentLabel);
+      renderRequestedAgentChips();
+      renderMentionMenu();
+      renderSlashMenu();
+      syncSideChatDraftFromComposer();
+      syncSubmitButtonMode(); // 输入有无决定发送/停止双态
+    });
+    taskInput.addEventListener("click", () => {
+      renderMentionMenu();
+      renderSlashMenu();
+    });
+    taskInput.addEventListener("blur", () => {
+      window.setTimeout(() => {
+        if (document.activeElement === taskInput || document.activeElement?.closest?.("#mention-menu, #slash-menu")) return;
+        hideMentionMenu();
+        hideSlashMenu();
+      }, 120);
+    });
+    byId("slash-menu")?.addEventListener("pointerdown", (event) => event.preventDefault());
+  }
+
+  byId("automations-manage-button")?.addEventListener("click", () => openAutomationManager());
+  byId("automation-close-button")?.addEventListener("click", () => closeAutomationManager());
+  byId("automation-form-close")?.addEventListener("click", () => closeAutomationManager());
+  byId("automation-form")?.addEventListener("submit", (event) => void saveAutomationEdits(event));
+  byId("automation-edit-select")?.addEventListener("change", () => fillAutomationManager(byId("automation-edit-select").value));
+  byId("automation-run-now-button")?.addEventListener("click", () => {
+    const id = byId("automation-edit-select")?.value;
+    if (id) void triggerAutomation(id);
+  });
+  byId("automation-cancel-run-button")?.addEventListener("click", () => {
+    const id = byId("automation-edit-select")?.value;
+    if (id) void cancelAutomationRun(id);
+  });
+
+  // 命令面板：旧 <dialog> 已退役，顶栏 chip 直接调 v4.0 Forge 面板（command-palette.js）
+  byId("command-palette-trigger")?.addEventListener("click", () => openForgePalette());
 
   window.addEventListener("beforeunload", (event) => {
     state.eventController?.abort();
-    if (!configIsDirty()) return;
+    missionControlDock?.destroy();
+    if (!hasUnsavedConfigChanges()) return;
     event.preventDefault();
     event.returnValue = "";
   });
 }
 
+// ─── v4.0 新增辅助函数 ──────────────────────────────────────
+
+function toggleTheme() {
+  applyTheme(document.documentElement.dataset.theme === "dark" ? "light" : "dark");
+}
+
+function focusTaskInput() {
+  const input = byId("task-input");
+  if (input) {
+    setView("workbench");
+    requestAnimationFrame(() => input.focus());
+  }
+}
+
+async function refreshAll() {
+  await Promise.allSettled([
+    loadHealth(),
+    loadRuns(),
+    loadProjects(),
+    loadTeams(),
+  ]);
+}
+
+function refreshTeamData() {
+  const team = teamById(state.selectedTeamId) || state.teams.find((item) => item.builtin) || state.teams[0] || null;
+  updateTeamData(buildTeamPanelData({
+    team,
+    runs: state.runs,
+    components: state.components,
+    catalog: state.bootstrap?.teamCatalog,
+  }));
+}
+
+async function loadDeltaData() {
+  // v4.0：delta-timeline 模块自取数（refreshDeltaTimeline 内部 fetch 并容错），此处置只负责触发
+  try {
+    await refreshDeltaTimeline();
+  } catch {
+    // 静默失败
+  }
+}
+
 async function start() {
-  initializeAccessToken();
   cacheElements();
+  await mountLucideSprite();
+  remapLegacyIconUses(document);
+  workbenchEnvironmentPanel = createWorkbenchEnvironmentPanel({
+    root: byId("mission-environment-panel"),
+    // 任务工具已由 railTools 接管（右栏标签条 ➕ 菜单与空态选择器），环境舱只管自己的动作
+    toolsRoot: null,
+    loadEnvironment: (runId, signal) => request(
+      `${API.workbenchEnvironment}${runId ? `?runId=${encodeURIComponent(runId)}` : ""}`,
+      { signal },
+    ),
+    onAction: handleWorkbenchEnvironmentAction,
+    getAttachments: () => state.attachments,
+    icon: (name) => lucideIcon(name, "icon lucide"),
+    escapeHtml,
+    renderAgentAvatar: (agentId) => cliIconMarkup(agentCli(agentId), "cli-logo")
+      || `<i>${escapeHtml(AGENT_SHORT[agentId] || String(agentId).slice(0, 2))}</i>`,
+    agentLabel,
+  });
+  const railRoot = byId("mission-control-dock");
+  railPanels = createRailPanels({
+    root: railRoot,
+    request,
+    runsEndpoint: API.runs,
+    icon: (name) => lucideIcon(name, "icon lucide"),
+    escapeHtml,
+    getRunId: () => (state.sessionPreview ? null : selectedRun()?.id ?? null),
+    getRun: () => (state.sessionPreview ? null : selectedRun()),
+    openSystemBrowser: openExternalUrl,
+    notify: toast,
+  });
+  railTools = createRailTools({
+    root: railRoot,
+    icon: (name) => lucideIcon(name, "icon lucide"),
+    escapeHtml,
+    // 只接 onActivate：open() 之后必然跟一次 activate，两处都接会让同一个页发两遍请求、互相 abort
+    onActivate: (id) => railPanels?.activate(id),
+    // 终端是底部抽屉、侧边对话是右栏浮层：两者都不占标签，只转发动作
+    onExternal: (id) => {
+      if (id === "terminal") byId("global-terminal-toggle")?.click();
+      if (id === "side-chat") setMissionSideChat(byId("mission-side-chat")?.hidden !== false);
+    },
+  });
+  missionControlDock = createMissionControlDock({
+    root: byId("mission-control-dock"),
+    loadSnapshot: (runId, signal) => request(`${API.runs}/${encodeURIComponent(runId)}/mission`, { signal }),
+    loadWorkspace: (runId, path, signal) => request(
+      `${API.runs}/${encodeURIComponent(runId)}/workspace?path=${encodeURIComponent(path ?? "")}`,
+      { signal },
+    ),
+    onArtifactAction: (artifact, snapshot) => {
+      if (artifact.kind === "diff") void toggleRunDiff(snapshot.runId);
+    },
+    environmentPanel: workbenchEnvironmentPanel,
+    // 无选中 run 时仍展示异构 CLI 团队健康——514 特色空态，不是空白灰区
+    loadIdleRoster: () => {
+      const team = teamById(state.selectedTeamId) || state.teams.find((item) => item.builtin) || state.teams[0];
+      const members = team?.members?.length
+        ? team.members
+        : ["claude-fable", "codex-technical", "grok-search", "grok-build", "kimi-frontend", "pi-resident"];
+      const healthList = Array.isArray(state.health?.components)
+        ? state.health.components
+        : Array.isArray(state.components) ? state.components : [];
+      const healthById = new Map(healthList.map((item) => [String(item.id ?? item.name ?? "").toLowerCase(), item]));
+      return {
+        teamName: team?.name || "514cc",
+        coordinatorId: team?.coordinator || members[0],
+        members: members.map((id) => {
+          const cli = agentCli(id);
+          const health = healthById.get(String(id).toLowerCase())
+            || healthById.get(String(cli || "").toLowerCase())
+            || null;
+          const status = health?.status || health?.state || (health?.available === false ? "offline" : "unknown");
+          return {
+            id,
+            label: agentLabel(id),
+            role: id === (team?.coordinator || members[0]) ? "leader" : (AGENT_ROLE_BLURB[id] || "member"),
+            cli: cliLabel(cli),
+            status,
+            detail: health?.detail || health?.message || null,
+          };
+        }),
+      };
+    },
+  });
+  await initializeAccessToken(); // 一次性 bootstrap 必须先兑换，后续 API 与 SSE 才能携带当前 tab 会话态
+  workbenchEnvironmentPanel?.selectRun?.(null);
+  mountCcSwitchPanel({ root: byId("ccswitch-workbench"), notify: toast, confirmAction, cliIconMarkup });
+  restoreConfigRemoteRecoveries(); // 远端未解事务必须早于任何配置视图和写入口恢复，刷新不能绕过阻断
+  await loadConfigRemoteRecoveries(); // dataRoot 账本是真源；不可读时远端写入口 fail-closed
+  restorePendingProjects(); // 必须早于 setView 触发的异步项目扫描，pending 深链才不会被误报不存在
   initializeTheme();
+  try { state.composerCliOpen = localStorage.getItem(COMPOSER_CLI_OPEN_KEY) === "1"; } catch { state.composerCliOpen = false; }
   bindEvents();
-  const initialView = location.hash.slice(1);
-  setView(VIEW_TITLES[initialView] ? initialView : "workbench", { updateHash: false, focus: false });
+  // 活跃轮走时：只改 time 节点文本，不重绘会话流；submitted 期间没有中间 checkpoint，
+  // 这是用户判断"还在跑"还是"已经停了"的唯一依据。
+  window.setInterval(tickLiveElapsed, 1000);
+
+  memberLibrary = createMemberLibrary({
+    state,
+    request,
+    apiPath: API.teamMembers,
+    escapeHtml,
+    toast,
+    confirmAction,
+    onCatalogChanged: async () => {
+      await invalidateCapabilitiesCatalog();
+      reconcileTeamFormCatalog("member-catalog-refresh");
+      refreshTeamData();
+      renderTeamPulse();
+      runtimeSeatManager?.refreshBindings?.(); // 成员增删/改绑后，席位编辑器绑定区块同步
+    },
+    teamMemberState: (memberId) => {
+      const input = [...(elements["team-members-list"]?.querySelectorAll('input[type="checkbox"]') || [])]
+        .find((candidate) => candidate.value === memberId);
+      const editing = teamById(state.editingTeamId);
+      return {
+        available: Boolean(teamFormInitialized && input && !teamFormBusy && !editing?.builtin),
+        included: Boolean(input?.checked),
+      };
+    },
+    onToggleTeamMember: async (memberId, include) => {
+      const input = [...(elements["team-members-list"]?.querySelectorAll('input[type="checkbox"]') || [])]
+        .find((candidate) => candidate.value === memberId);
+      if (!input || input.disabled) {
+        toast("当前团队草稿无法修改该成员", "warning");
+        return;
+      }
+      input.checked = include;
+      const card = input.closest(".team-member-option");
+      const coordinator = card?.querySelector('input[name="team-coordinator"]');
+      if (!include && coordinator?.checked) {
+        coordinator.checked = false;
+        elements["team-form"].dataset.coordinator = "";
+        toast("已移除原主脑，请重新指定团队主脑", "warning", 4200);
+      }
+      markTeamFormDirty();
+      updateTeamRosterSummary();
+    },
+    onOpenConfig: (target) => void openMemberConfigTarget(target),
+    cliIconMarkup,
+    onOpenTeam: (teamId) => {
+      const team = teamById(teamId);
+      if (team) void openTeamWorkspace(team);
+      else toast("该团队已不存在", "warning");
+    },
+    onMemberSaved: (memberId) => {
+      // 新建成员保存成功（目录已刷新、列表已重渲）→ 自动勾入当前团队草稿；内置只读团队不勾。
+      if (!teamFormInitialized || teamById(state.editingTeamId)?.builtin) return;
+      const input = [...(elements["team-members-list"]?.querySelectorAll('input[type="checkbox"]') || [])]
+        .find((candidate) => candidate.value === memberId);
+      if (!input || input.disabled || input.checked) return;
+      input.checked = true;
+      markTeamFormDirty();
+      updateTeamRosterSummary();
+      memberLibrary?.updateTeamToggle();
+      toast("新成员已自动勾入当前团队草稿，保存团队后生效", "success", 4200);
+    },
+  });
+  memberLibrary.init();
+
+  runtimeSeatManager = createRuntimeSeatManager({
+    state,
+    request,
+    api: API,
+    escapeHtml,
+    toast,
+    confirmAction,
+    getProviders: () => state.providersData?.providers ?? [],
+    ensureProviders: async () => {
+      await loadTeams();
+      return loadProviders();
+    },
+    onCatalogChanged: async () => {
+      await loadBootstrap();
+      await loadTeams({ fresh: true });
+      await invalidateCapabilitiesCatalog();
+      reconcileTeamFormCatalog("runtime-seat-catalog-refresh");
+      refreshTeamData();
+      renderTeamPulse();
+      memberLibrary?.updateTeamToggle();
+      memberLibrary?.refreshUsage?.(); // 席位目录变化可能影响团队成员归属展示
+      renderConfigTopology();
+    },
+    onModeChanged: () => renderConfigTopology(),
+    cliIconMarkup,
+    onOpenMember: (memberId) => {
+      setView("team");
+      void memberLibrary?.open(memberId);
+    },
+    onSelectionChanged: (runtimeProfileId) => {
+      state.configRuntimeFocusId = runtimeProfileId || null;
+      renderConfigTopology();
+      if (state.view === "config" && state.configSurface === "sources" && state.runtimeWorkspaceMode === "seats") {
+        history.replaceState(null, "", configRouteHash("sources", {
+          memberId: state.configMemberFocusId,
+          runtimeProfileId: state.configRuntimeFocusId,
+        }));
+      }
+    },
+  });
+  runtimeSeatManager.init();
+
+  // v4.0：命令面板 + 团队面板初始化
+  initCmdPalette({
+    extraItems: () => FORGE_PALETTE_EXTRA_ITEMS(),
+    onNavigate: (viewId) => setView(viewId),
+    onAction: (actionId) => {
+      if (actionId === "refresh") void refreshAll();
+      else if (actionId === "toggle-theme") toggleTheme();
+      else if (actionId === "new-task") focusTaskInput();
+      else if (actionId === "run-diagnostics") void runDiagnostics();
+      else if (actionId === "reload-runtime") void reloadRuntime();
+      else if (actionId.startsWith("select-agent:")) {
+        const agentId = actionId.split(":")[1];
+        // 切换到协作台并聚焦该 Agent
+        setView("workbench");
+      }
+    },
+  });
+
+  // 团队面板（容器可能尚未落位；v4.0 团队协作视图的 section 也作为挂载兜底）
+  const teamContainer = byId("team-panel-container") || byId("view-team");
+  if (teamContainer) {
+    initTeamPanel(teamContainer);
+  }
+
+  // DELTA 问责时间线
+  const deltaContainer = byId("delta-timeline-container");
+  if (deltaContainer) {
+    initDeltaTimeline(deltaContainer);
+    loadDeltaData();
+  }
+
+  // 项目启动器
+  const bootstrapperContainer = byId("bootstrapper-container");
+  if (bootstrapperContainer) {
+    initProjectBootstrapper(bootstrapperContainer, {
+      onCreate: (config, result) => {
+        // v4.0：脚手架由 project-bootstrapper 模块内部执行（POST /api/bootstrap/scaffold），
+        // onCreate 仅通知——旧版模块只回传 config 时不误报，安静等新版结果
+        if (result == null) return;
+        if (result.ok) {
+          const files = Array.isArray(result.filesWritten) ? result.filesWritten.length
+            : Array.isArray(result.filesPlanned) ? result.filesPlanned.length : 0;
+          const where = result.targetDir ? ` → ${result.targetDir}` : "";
+          toast(`项目脚手架完成：${config?.name || "项目"}（${files} 个文件）${where}`, "success", 5200);
+        } else {
+          toast(`项目脚手架失败：${result.error || "未知错误"}`, "error", 6000);
+        }
+      },
+    });
+  }
+  const initialRoute = parseForgeRoute();
+  const initialMemberTarget = initialRoute.view === "config" && (
+    initialRoute.configSurface === "capabilities" && initialRoute.memberId
+    || initialRoute.configSurface === "sources" && initialRoute.runtimeProfileId
+  );
+  if (initialMemberTarget) {
+    state.configMemberFocusId = initialRoute.memberId;
+    state.configRuntimeFocusId = initialRoute.runtimeProfileId;
+  }
+  setView(FORGE_VIEW_TITLES[initialRoute.view] ? initialRoute.view : "workbench", {
+    updateHash: false,
+    focus: false,
+    configSurface: initialRoute.configSurface,
+    preserveMemberTarget: Boolean(initialMemberTarget),
+  });
   renderAll();
   connectEvents();
   await loadInitial();
+  if (initialMemberTarget) {
+    await openMemberConfigTarget({
+      surface: initialRoute.configSurface === "capabilities" ? "capabilities" : "runtime",
+      memberId: initialRoute.memberId,
+      runtimeProfileId: initialRoute.runtimeProfileId,
+    });
+  }
+  restoreTabs(); // runs 就绪后恢复页签（已清除 run 的页签如实丢弃）——刷新不丢工作现场
+  renderTabs();
+  renderRuns();
   if (state.selectedSourceId && !state.config) await loadSelectedConfig();
   window.setInterval(() => {
     void loadHealth().catch(() => {});

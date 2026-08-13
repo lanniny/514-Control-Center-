@@ -1,0 +1,357 @@
+/* forge/markdown.css — Markdown 排版与富内容组件（renderMarkdown + renderRichContent 产物）
+ * 加载顺序在 styles.css 之后：同特异性后者胜出。变量优先取 forge tokens，
+ * 逐项带 legacy fallback（--text/--surface/--rose），foundation 未就位时也不破版。
+ * 动效遵守 prefers-reduced-motion。
+ */
+
+/* ===== 正文节奏 ===== */
+
+.md-body p,
+.md-body li {
+  line-height: 1.7;
+}
+
+.md-body p {
+  overflow-wrap: break-word;
+}
+
+/* ===== 标题（h1–h4，weight 600 + 紧字距；h2/h3 发丝下划线） ===== */
+
+.md-body .md-h {
+  margin: 12px 0 0;
+  color: var(--foreground, var(--text));
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.4;
+}
+
+.md-body .md-h:first-child {
+  margin-top: 0;
+}
+
+.md-body .md-h1 { font-size: var(--text-xl, 20px); }
+.md-body .md-h2,
+.md-body .md-h3 {
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border, currentColor);
+}
+.md-body .md-h2 { font-size: var(--text-lg, 16px); }
+.md-body .md-h3 { font-size: var(--text-base, 14px); }
+.md-body .md-h4 {
+  font-size: var(--text-sm, 12.5px);
+  color: var(--muted-foreground, var(--text-muted));
+}
+
+/* ===== 列表（含任务列表） ===== */
+
+.md-body ul,
+.md-body ol {
+  padding-left: 20px;
+  gap: 4px;
+}
+
+.md-body .md-task {
+  list-style: none;
+  margin-left: -18px;
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.md-body .md-task-check {
+  flex: none;
+  width: 13px;
+  height: 13px;
+  margin: 0;
+  accent-color: var(--primary, var(--rose));
+  translate: 0 1.5px;
+}
+
+.md-body .md-task-check:checked + .md-task-text {
+  color: var(--muted-foreground, var(--text-muted));
+  text-decoration: line-through;
+  text-decoration-color: var(--border, currentColor);
+}
+
+/* ===== 行内元素 ===== */
+
+.md-body code,
+.message-body code {
+  padding: 1px 6px;
+  border-radius: var(--radius-md, 8px);
+  background: var(--muted, var(--surface-muted));
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: var(--text-sm, 12.5px);
+}
+
+.md-body del {
+  color: var(--muted-foreground, var(--text-muted));
+}
+
+.md-body a {
+  color: var(--primary, var(--rose));
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.md-body a:hover {
+  color: var(--foreground, var(--text));
+}
+
+.rich-link-icon {
+  display: inline-flex;
+  margin-left: 2px;
+  vertical-align: -1px;
+  opacity: 0.7;
+}
+
+.rich-link-icon svg {
+  width: 10px;
+  height: 10px;
+}
+
+/* ===== 引用：2px 主色栏 + 柔和文字（非斜体） ===== */
+
+.md-body blockquote {
+  margin: 0;
+  padding: 6px 12px;
+  border-left: 2px solid var(--primary, var(--rose));
+  border-radius: 0 var(--radius-md, 8px) var(--radius-md, 8px) 0;
+  background: var(--muted, var(--surface-muted));
+  color: var(--muted-foreground, var(--text-muted));
+}
+
+/* ===== 分隔线 / 图片 ===== */
+
+.md-body .md-hr {
+  width: 100%;
+  margin: 6px 0;
+  border: 0;
+  border-top: 1px solid var(--border, currentColor);
+}
+
+.md-body .md-img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--border, transparent);
+  border-radius: var(--radius-lg, 10px);
+}
+
+/* ===== 代码块：rich-code 卡片（头部条 + 复制钮 + 折叠） ===== */
+
+.code-wrap.rich-code {
+  margin: 8px 0;
+  border: 1px solid var(--border, transparent);
+  border-radius: var(--radius-xl, 14px);
+  background: var(--card, var(--surface));
+  overflow: hidden;
+}
+
+.code-wrap.rich-code .md-code {
+  margin: 0;
+  padding: 12px 14px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  overflow-x: auto;
+}
+
+.md-body .md-code,
+.code-wrap .md-code {
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: var(--text-sm, 12.5px);
+  line-height: 1.6;
+}
+
+.md-body .md-code code,
+.code-wrap .md-code code {
+  padding: 0;
+  border-radius: 0;
+  background: none;
+  font-size: inherit;
+  white-space: pre;
+}
+
+.rich-code-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 8px 5px 12px;
+  border-bottom: 1px solid var(--border, transparent);
+  background: var(--muted, var(--surface-muted));
+}
+
+.rich-code-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted-foreground, var(--text-muted));
+  font-size: var(--text-xs, 11px);
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.rich-code-badge svg {
+  width: 12px;
+  height: 12px;
+}
+
+/* mermaid / math：徽标着色 + 头部微染色，源码本体保持原样呈现 */
+.rich-code.is-mermaid .rich-code-badge { color: var(--info, #4b7db3); }
+.rich-code.is-math .rich-code-badge { color: var(--primary, var(--rose)); }
+
+.rich-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-md, 8px);
+  background: transparent;
+  color: var(--muted-foreground, var(--text-muted));
+  cursor: pointer;
+  transition: background var(--dur-fast, 100ms) var(--ease-out, ease),
+    color var(--dur-fast, 100ms) var(--ease-out, ease);
+}
+
+.rich-copy-btn:hover {
+  background: var(--card, var(--surface));
+  color: var(--foreground, var(--text));
+}
+
+.rich-copy-btn:active {
+  transform: translateY(1px);
+}
+
+.rich-copy-btn.is-copied { color: var(--success, #3d9a6d); }
+.rich-copy-btn.is-failed { color: var(--danger, #c04444); }
+
+.rich-copy-btn svg {
+  width: 13px;
+  height: 13px;
+}
+
+/* 折叠：max-h + 底部渐隐遮罩 + 展开开关 */
+.rich-code.is-collapsed .md-code {
+  max-height: calc(var(--text-sm, 12.5px) * 1.6 * 16 + 24px);
+  overflow: hidden;
+}
+
+.rich-code.is-collapsed::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 33px;
+  height: 56px;
+  background: linear-gradient(to bottom, transparent, var(--card, var(--surface)));
+  pointer-events: none;
+}
+
+.rich-code.is-expanded::after {
+  content: none;
+}
+
+.rich-expand-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-top: 1px solid var(--border, transparent);
+  background: var(--muted, var(--surface-muted));
+  color: var(--muted-foreground, var(--text-muted));
+  font-size: var(--text-xs, 11px);
+  font-weight: 600;
+  cursor: pointer;
+  transition: color var(--dur-fast, 100ms) var(--ease-out, ease);
+}
+
+.rich-expand-btn:hover {
+  color: var(--foreground, var(--text));
+}
+
+.rich-expand-btn:active {
+  transform: translateY(1px);
+}
+
+.rich-expand-btn svg {
+  width: 12px;
+  height: 12px;
+  transition: transform var(--dur-med, 150ms) var(--ease-out, ease);
+}
+
+.rich-code.is-expanded .rich-expand-btn svg {
+  transform: rotate(180deg);
+}
+
+/* ===== 表格：圆角边框滚动卡片 ===== */
+
+.md-table-wrap,
+.rich-table-wrap {
+  overflow-x: auto;
+  margin: 6px 0;
+  border: 1px solid var(--border, transparent);
+  border-radius: var(--radius-xl, 14px);
+  background: var(--card, var(--surface));
+}
+
+.md-table,
+.rich-table-wrap table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm, 12.5px);
+  line-height: 1.55;
+}
+
+.md-table th,
+.md-table td,
+.rich-table-wrap th,
+.rich-table-wrap td {
+  padding: 7px 12px;
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: break-word;
+}
+
+.md-table th,
+.rich-table-wrap th {
+  background: var(--muted, var(--surface-muted));
+  color: var(--foreground, var(--text));
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+
+.md-table tbody tr + tr td,
+.rich-table-wrap tbody tr + tr td {
+  border-top: 1px solid var(--border, transparent);
+}
+
+.md-ta-center { text-align: center; }
+.md-ta-right { text-align: right; }
+
+/* ===== 减弱动效 ===== */
+
+@media (prefers-reduced-motion: reduce) {
+  .rich-copy-btn,
+  .rich-expand-btn,
+  .rich-expand-btn svg {
+    transition: none;
+  }
+
+  .rich-copy-btn:active,
+  .rich-expand-btn:active {
+    transform: none;
+  }
+}
+
+/* 复制降级代理（CSP：替代内联 cssText） */
+.rich-copy-proxy { position: fixed; top: 0; left: 0; opacity: 0; pointer-events: none; }

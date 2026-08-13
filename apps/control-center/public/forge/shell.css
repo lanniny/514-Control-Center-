@@ -1,0 +1,743 @@
+/**
+ * forge/shell.css — 514 Forge v4.0 应用外壳层
+ *
+ * 范围（只动 chrome，不动各视图内部）：
+ *   侧栏（分组 + 标签 + 激活 pill）/ 顶栏 / 状态栏 / 移动导航 /
+ *   view-team hero 头 / 全局 .empty-state 基座
+ * 设计令牌来自 forge/tokens.css（OKLCH），本文件只消费并带安全回退。
+ * 加载顺序在 styles.css / atelier.css 之后：同特异性后者胜；除工具类外不用 !important。
+ */
+
+/* 侧栏从 58px 图标轨升级为带标签的导航栏（--activity-width 仅被 .app-shell 桌面栅格引用） */
+:root {
+  --activity-width: 232px;
+}
+
+/* ── 侧栏 ─────────────────────────────────────────────── */
+.atelier .sidebar {
+  border-right: 1px solid var(--border, #e4e1ea);
+  /* Wave G codeg 磨砂族：color-mix 86% + blur14/saturate150（与 topbar 触感统一）；
+     老引擎 color-mix 作废自动回落 var(--card) 纯色，明暗随 token 自动跟随 */
+  background: color-mix(in oklab, var(--card, #ffffff) var(--forge-glass-alpha, 86%), transparent);
+  -webkit-backdrop-filter: blur(var(--forge-glass-blur, 14px)) saturate(150%);
+  backdrop-filter: blur(var(--forge-glass-blur, 14px)) saturate(150%);
+  color: var(--muted-foreground, #6b6f76);
+}
+
+.atelier .sidebar .brand {
+  justify-content: flex-start;
+  gap: 11px;
+  min-height: var(--topbar-height);
+  padding: 0 14px;
+  border-bottom: 1px solid var(--border, #e4e1ea);
+}
+
+/* 品牌标：rose rounded-2xl 瓷贴 + flame 字形（替代旧的 '514' 文字块） */
+.atelier .brand-mark {
+  width: 34px;
+  height: 34px;
+  overflow: visible;
+  border: 0;
+  border-radius: var(--radius-2xl, 18px);
+  background: linear-gradient(
+    135deg,
+    var(--primary, #b4234d),
+    color-mix(in oklab, var(--primary, #b4234d) 72%, black)
+  );
+  box-shadow: var(--shadow-sm, 0 1px 2px rgba(0, 0, 0, 0.08));
+  color: var(--primary-foreground, #ffffff);
+}
+
+.atelier .brand-mark::after {
+  display: none;
+}
+
+.brand-mark .icon {
+  width: 18px;
+  height: 18px;
+  stroke-width: 2;
+}
+
+/* 顶栏迷你版品牌标（移动端唯一品牌位） */
+.atelier .brand-mark.brand-mark-sm {
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-lg, 10px);
+}
+
+.brand-mark-sm .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.sidebar .brand-copy {
+  display: block;
+}
+
+.atelier .brand-copy strong {
+  color: var(--foreground, #1b1d21);
+  font-size: var(--text-base, 14px);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.atelier .brand-copy span {
+  margin-top: 1px;
+  color: var(--muted-foreground, #6b6f76);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  opacity: 1;
+  text-transform: uppercase;
+}
+
+.atelier .primary-nav {
+  align-items: stretch;
+  gap: 1px;
+  padding: 6px 8px 12px;
+  overflow-y: auto;
+}
+
+.nav-group {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+/* 分组标签：主流 GUI 式极小灰字，间距收紧 */
+.atelier .nav-group-label {
+  display: block;
+  margin: 12px 8px 3px;
+  color: var(--muted-foreground, #6f6a5e);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  opacity: 0.65;
+  text-transform: uppercase;
+}
+
+.nav-group:first-child .nav-group-label {
+  margin-top: 4px;
+}
+
+/* 导航项：主流 GUI 式 30px 行高 + 8px 小圆角矩形（弃全圆药丸）+ 紧凑 8px 内边距 */
+.atelier .nav-item,
+.atelier .nav-item.nav-primary {
+  display: flex;
+  width: 100%;
+  min-height: 30px;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--radius-md, 8px);
+  background: transparent;
+  color: var(--muted-foreground, #6f6a5e);
+  font-size: var(--text-sm, 12.5px);
+  font-weight: 500;
+  text-align: left;
+  transition:
+    background-color var(--dur-fast, 120ms) var(--ease-out, cubic-bezier(0.4, 0, 0.2, 1)),
+    color var(--dur-fast, 120ms) var(--ease-out, cubic-bezier(0.4, 0, 0.2, 1));
+}
+
+/* 恢复被图标轨隐藏的文本标签 */
+.nav-item > span {
+  position: static;
+  width: auto;
+  height: auto;
+  margin: 0;
+  overflow: visible;
+  clip: auto;
+  white-space: nowrap;
+}
+
+.nav-item .icon,
+.nav-item.nav-primary .icon {
+  width: 15px;
+  height: 15px;
+  color: currentColor;
+}
+
+/* hover：中性暖灰（不抢主色，Claude 式克制） */
+.atelier .nav-item:hover,
+.atelier .nav-item.nav-primary:hover {
+  background: color-mix(in oklab, var(--muted-foreground, #6f6a5e) 9%, transparent);
+  color: var(--foreground, #2a2620);
+}
+
+/* 选中：浅铜底 + 深棕墨字 + 铜橙图标（弃玫瑰字；层次=底浅字深图标点色） */
+.atelier .nav-item.is-active,
+.atelier .nav-item.nav-primary.is-active {
+  background: color-mix(in oklab, var(--primary, #d97757) 12%, transparent);
+  box-shadow: none;
+  color: var(--foreground, #2a2620);
+  font-weight: 600;
+}
+
+.nav-item.is-active .icon,
+.nav-item.nav-primary.is-active .icon {
+  color: var(--primary, #d97757);
+}
+
+/* 关闭图标轨时代装饰：左侧 rose 条与悬浮 tooltip（标签已常驻） */
+.nav-item.is-active::before {
+  display: none;
+}
+
+.nav-item::after {
+  display: none;
+}
+
+.nav-item:focus-visible,
+.topnav-item:focus-visible,
+.mobile-nav-item:focus-visible {
+  outline: 2px solid var(--ring, #b4234d);
+  outline-offset: 2px;
+}
+
+.atelier .sidebar-footer {
+  display: block;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border, #e4e1ea);
+}
+
+/* 恢复 footer 连接文案：图标轨时代 .runtime-indicator > div { display:none }（styles.css:7020）
+   只留居中圆点——孤儿绿点的根因；文字块找回，点归位到行首 */
+.atelier .runtime-indicator > div {
+  display: block;
+}
+
+.runtime-indicator strong {
+  color: var(--foreground, #1b1d21);
+  font-size: var(--text-sm, 12.5px);
+}
+
+.runtime-indicator span {
+  color: var(--muted-foreground, #6b6f76);
+  font-size: var(--text-xs, 11px);
+}
+
+/* ── 顶栏 ─────────────────────────────────────────────── */
+.atelier .topbar {
+  gap: 12px;
+  border-bottom: 1px solid var(--border, #e4e1ea);
+  background: color-mix(in oklab, var(--card, #ffffff) 86%, transparent);
+  backdrop-filter: blur(14px) saturate(150%);
+}
+
+/* 桌面：品牌已由侧栏承载，顶栏品牌位让渡给导航与标题；移动端保留（侧栏变抽屉） */
+@media (min-width: 821px) {
+  .atelier .topbar-brand {
+    display: none;
+  }
+}
+
+/* 面包屑位置指示：分组灰字 + 分隔符 + 当前页小字。
+   视觉主角让渡给 page-heading 的 H1——消除「顶栏大标题 × 内容 H1」双标题冗余。 */
+.topbar-separator {
+  color: var(--muted-foreground, #6f6a5e);
+  font-size: 11px;
+  opacity: 0.55;
+}
+
+.topbar-crumb-group {
+  color: var(--muted-foreground, #6f6a5e);
+  font-size: var(--text-sm, 12.5px);
+  font-weight: 500;
+}
+
+.topbar-title strong {
+  color: var(--foreground, #2a2620);
+  font-size: var(--text-sm, 12.5px);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.atelier .topnav-item {
+  border-radius: 999px;
+  color: var(--muted-foreground, #6b6f76);
+  font-size: var(--text-sm, 12.5px);
+  transition:
+    background-color var(--dur-fast, 120ms) var(--ease-out, cubic-bezier(0.4, 0, 0.2, 1)),
+    color var(--dur-fast, 120ms) var(--ease-out, cubic-bezier(0.4, 0, 0.2, 1));
+}
+
+.atelier .topnav-item:hover {
+  background: color-mix(in oklab, var(--primary, #b4234d) 8%, transparent);
+  color: var(--foreground, #1b1d21);
+}
+
+.atelier .topnav-item.is-active {
+  background: color-mix(in oklab, var(--primary, #b4234d) 13%, transparent);
+  color: var(--primary, #b4234d);
+  font-weight: 600;
+}
+
+.atelier .topnav-item.is-active .icon {
+  color: var(--primary, #b4234d);
+}
+
+/* 命令面板触发 chip：搜索图标 + 「搜索」+ kbd */
+.atelier .command-trigger {
+  min-height: 30px;
+  gap: 7px;
+  padding: 0 10px;
+  border: 1px solid var(--border, #e4e1ea);
+  border-radius: 999px;
+  background: var(--muted, #f2f3f5);
+  color: var(--muted-foreground, #6b6f76);
+  font-size: var(--text-sm, 12.5px);
+  transition:
+    border-color var(--dur-fast, 120ms) var(--ease-out, cubic-bezier(0.4, 0, 0.2, 1)),
+    color var(--dur-fast, 120ms) var(--ease-out, cubic-bezier(0.4, 0, 0.2, 1)),
+    background-color var(--dur-fast, 120ms) var(--ease-out, cubic-bezier(0.4, 0, 0.2, 1));
+}
+
+.atelier .command-trigger:hover {
+  border-color: var(--ring, #b4234d);
+  background: var(--card, #ffffff);
+  color: var(--foreground, #1b1d21);
+}
+
+.command-trigger kbd {
+  padding: 2px 6px;
+  border: 1px solid var(--border, #e4e1ea);
+  border-radius: var(--radius-sm, 6px);
+  background: var(--card, #ffffff);
+  color: var(--muted-foreground, #6b6f76);
+  font-family: inherit;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+/* 连接状态 pill（结构/id 不变，仅圆角与字级） */
+.connection-badge {
+  min-height: 28px;
+  border-radius: 999px;
+  font-size: var(--text-xs, 11px);
+}
+
+/* ── 状态栏（玫瑰实色 → 令牌化 hairline 栏） ───────────── */
+.global-statusbar {
+  border-top: 1px solid var(--border, #e4e1ea);
+  background: var(--card, #ffffff);
+  color: var(--muted-foreground, #6b6f76);
+  font-size: var(--text-xs, 11px);
+  font-variant-numeric: tabular-nums;
+}
+
+.statusbar-connection {
+  background: transparent;
+}
+
+.global-statusbar .status-dot {
+  border: 0;
+}
+
+.statusbar-segment {
+  padding: 0 10px;
+}
+
+/* ── 移动导航（safe-area + 6 项） ─────────────────────── */
+@media (max-width: 820px) {
+  .mobile-nav {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    padding-bottom: env(safe-area-inset-bottom, 0);
+    border-top: 1px solid var(--border, #e4e1ea);
+    background: color-mix(in oklab, var(--card, #ffffff) 92%, transparent);
+  }
+
+  .mobile-nav-item {
+    color: var(--muted-foreground, #6b6f76);
+    font-size: 10.5px;
+  }
+
+  .mobile-nav-item.is-active {
+    color: var(--primary, #b4234d);
+    box-shadow: inset 0 2px 0 var(--primary, #b4234d);
+  }
+}
+
+/* ── page-heading 节奏：H1 收敛编辑排版 + 间距收紧（布局优化波 2026-07-26） ── */
+.page-heading {
+  margin-bottom: 18px;
+}
+
+.page-heading h1 {
+  font-size: clamp(22px, 1.8vw, 26px);
+  letter-spacing: -0.02em;
+}
+
+/* ── view-team hero：eyebrow + 渐变裁切标题 + 副标题 ───── */
+.team-hero {
+  padding: clamp(26px, 4.5vw, 48px) clamp(18px, 3vw, 32px) clamp(10px, 1.5vw, 16px);
+}
+
+.team-hero-eyebrow {
+  margin: 0 0 8px;
+  color: var(--primary, #b4234d);
+}
+
+.team-hero-title {
+  margin: 0;
+  background: linear-gradient(
+    115deg,
+    var(--foreground, #1b1d21) 30%,
+    var(--primary, #b4234d) 85%
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  font-size: clamp(26px, 3.2vw, 34px);
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1.08;
+}
+
+.team-hero-sub {
+  max-width: 62ch;
+  margin: 10px 0 0;
+  color: var(--muted-foreground, #6b6f76);
+  font-size: var(--text-base, 14px);
+  line-height: 1.6;
+}
+
+@keyframes forge-hero-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .team-hero > * {
+    animation: forge-hero-in var(--dur-slower, 300ms) var(--ease-out, cubic-bezier(0.4, 0, 0.2, 1)) both;
+  }
+
+  .team-hero > *:nth-child(2) {
+    animation-delay: 40ms;
+  }
+
+  .team-hero > *:nth-child(3) {
+    animation-delay: 80ms;
+  }
+}
+
+/* ── 全局 empty-state 基座（大图标 muted/60 + display 标题 + 宽松间距） ── */
+.empty-state {
+  gap: 10px;
+  padding: 36px 28px;
+}
+
+.empty-state .empty-icon {
+  width: 34px;
+  height: 34px;
+  color: color-mix(in oklab, var(--muted-foreground, #6b6f76) 60%, transparent);
+  stroke-width: 1.5;
+}
+
+.empty-state strong {
+  color: var(--foreground, #1b1d21);
+  font-size: var(--text-base, 14px);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.empty-state span {
+  font-size: var(--text-sm, 12.5px);
+}
+
+/* Wave G 面视图占位空态（工位交付真实 UI 后此规则仅作降级兜底） */
+.forge-empty-waveg {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--forge-space-3, 12px);
+  padding: var(--forge-space-10, 64px) var(--forge-space-4, 16px);
+  text-align: center;
+  color: var(--forge-text-secondary, #6b6560);
+}
+.forge-empty-waveg .icon-lg { width: 40px; height: 40px; opacity: 0.6; }
+.forge-empty-waveg h2 { margin: 0; font-size: var(--forge-text-lg, 17px); font-weight: 650; color: var(--forge-text-primary, #292524); }
+.forge-empty-waveg .subtle { margin: 0; max-width: 52ch; }
+
+/* ==========================================================================
+ * 单界面波（2026-07-26，LO「不要左侧栏，所有按键集中到一个界面」）
+ * topbar-nav 本已全量镜像侧栏 15 视图（styles.css:7073 一直 display:none），
+ * 本波扶为正主：侧栏整列撤下，app-shell 收单列；面包屑与 nav 激活态重复同撤。
+ * 协作星图（hero）原 topnav 缺位，已补进 index.html。
+ * ========================================================================== */
+
+.app-shell {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas:
+    "topbar"
+    "main"
+    "statusbar";
+}
+
+.sidebar {
+  display: none;
+}
+
+.topbar-nav {
+  display: flex;
+}
+
+/* nav 激活态即当前位置，面包屑重复（wave-2 产物，单界面下让位） */
+.topbar-title {
+  display: none;
+}
+
+/* 单界面波 · 顶栏紧凑化：品牌只留火焰标（锁字让位），nav 项收紧防溢出 */
+.topbar-brand .product-lockup {
+  display: none;
+}
+
+.topbar-brand {
+  min-width: 0;
+  padding-right: 4px;
+}
+
+.topnav-item {
+  gap: 6px;
+  padding: 0 9px;
+  font-size: 12px;
+}
+
+/* 角位开关波（2026-07-26，LO「终端不做顶栏标签，开合键统一右上角」）
+ * ① 终端从顶栏撤下（底部 dock + 右上角开关 + Ctrl+` 已全覆盖；视图本体保留，
+ *    Ctrl+K 面板仍可达）② 角位双开关激活态铜底 */
+.topbar-nav [data-view="terminal"] {
+  display: none;
+}
+
+.icon-button.is-active {
+  background: var(--accent-soft, rgba(217, 119, 87, 0.14));
+  color: var(--accent, #b85c3e);
+}
+
+/* 单界面桌面导航不能覆盖基础移动壳契约：移动端仍由底栏承担高频入口，
+ * 抽屉承接完整导航；桌面快捷键提示不占用底栏点击区域。 */
+@media (max-width: 820px) {
+  .app-shell {
+    grid-template-rows: var(--topbar-height) minmax(0, 1fr) var(--mobile-nav-height);
+    grid-template-areas:
+      "topbar"
+      "main"
+      "mobile-nav";
+  }
+
+  .sidebar {
+    display: flex;
+  }
+
+  .topbar-nav,
+  .kbd-hint {
+    display: none;
+  }
+}
+
+/* ==========================================================================
+ * 团队配置友好性波（2026-07-26，LO「团队配置界面太简单/不够用户友好」）
+ * ① 成员裸 checklist → 富选项卡（logo + 名称 + 头衔·职责，品牌色走
+ *    team.css 的 [data-brand] → --agent-accent 现成映射）
+ * ② 对话框头部团队切换器 ③ 能力声明分区标
+ * ========================================================================== */
+
+.team-member-option {
+  align-items: flex-start;
+  gap: 9px;
+  padding: 8px 10px;
+  transition: border-color 120ms ease, background-color 120ms ease;
+}
+
+.team-member-option:hover {
+  border-color: var(--agent-accent, var(--border-strong));
+  background: color-mix(in oklab, var(--agent-accent, var(--rose)) 4%, transparent);
+}
+
+.team-member-option:has(input[type="checkbox"]:checked) {
+  border-color: var(--agent-accent, var(--rose));
+  background: color-mix(in oklab, var(--agent-accent, var(--rose)) 8%, transparent);
+}
+
+.team-member-option input[type="checkbox"] {
+  margin-top: 3px;
+  accent-color: var(--agent-accent, var(--rose));
+}
+
+.tm-avatar {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid color-mix(in oklab, var(--agent-accent, var(--rose)) 40%, transparent);
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--agent-accent, var(--rose)) 12%, transparent);
+  color: var(--agent-accent, var(--rose));
+  font-size: 10px;
+  font-weight: 760;
+}
+
+.tm-avatar .tm-logo {
+  width: 16px;
+  height: 16px;
+}
+
+.tm-meta {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.tm-meta strong {
+  font-size: 12px;
+  font-weight: 680;
+}
+
+.tm-meta span {
+  color: var(--text-muted);
+  font-size: 10.5px;
+  line-height: 1.4;
+}
+
+.team-member-option .coordinator-pick {
+  align-self: center;
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 99px;
+  font-size: 10px;
+}
+
+.team-member-option .coordinator-pick:has(input:checked) {
+  border-color: var(--rose);
+  background: var(--rose-soft);
+  color: var(--rose-deep);
+  font-weight: 680;
+}
+
+.team-switch-select {
+  max-width: 180px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-small);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.form-section-label {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 10px 0 2px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+  color: var(--text-strong);
+  font-size: 12px;
+  font-weight: 680;
+}
+
+.form-section-label span {
+  color: var(--text-soft);
+  font-size: 10.5px;
+  font-weight: 400;
+}
+
+/* 团队配置友好性波 · 细节：职责行单行省略，不被主脑胶囊截字 */
+.tm-meta {
+  overflow: hidden;
+}
+
+.tm-meta span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 能力声明芯片墙（逗号文本已成历史）：目录与能力图谱同源 */
+.chip-wall {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-height: 132px;
+  overflow-y: auto;
+  padding: 2px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px 3px 7px;
+  border: 1px solid var(--border);
+  border-radius: 99px;
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  transition: border-color 120ms ease, background-color 120ms ease, color 120ms ease;
+}
+
+.chip:hover {
+  border-color: var(--rose-line);
+  color: var(--text);
+}
+
+.chip input[type="checkbox"] {
+  width: 12px;
+  height: 12px;
+  margin: 0;
+  accent-color: var(--rose);
+}
+
+.chip:has(input:checked) {
+  border-color: var(--rose-line);
+  background: var(--rose-soft);
+  color: var(--rose-deep);
+  font-weight: 620;
+}
+
+.chip.is-ghost {
+  border-style: dashed;
+  opacity: 0.75;
+}
+
+.chip.is-off span {
+  text-decoration: line-through;
+}
+
+.chip:has(input:disabled) {
+  cursor: default;
+  opacity: 0.8;
+}
+
+.field-label {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--text-muted);
+  font-size: 11.5px;
+  font-weight: 620;
+}
+
+/* ==========================================================================
+ * 布局对照波（2026-08-02）：kbd-hint 浮丸退役
+ * 右下角固定浮丸「Ctrl+K 命令面板」叠在全局状态栏右段（本机控制面/版本号）上，
+ * 且 Ctrl+K 发现性已由顶栏搜索框（command-palette-trigger）承担——隐藏去重。
+ * DOM 保留（零 JS 引用），回退 = 删本波段。移动端 820px 下本就隐藏（见上媒体查询）。
+ * ========================================================================== */
+
+.kbd-hint {
+  display: none;
+}
