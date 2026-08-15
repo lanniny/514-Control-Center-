@@ -4543,6 +4543,7 @@ function renderRuns() {
     for (const runId of removedRunIds) {
       releaseRunHistoryIfUnreferenced(runId);
       state.attachmentContexts.delete(`run:${runId}`);
+      forgetConversationStreamKeysForRun(runId);
     }
   }
   if (state.view !== "workbench") return;
@@ -12415,6 +12416,44 @@ function postProcessRichContent(stream) {
   }
 }
 
+// 新消息入场动画的去重闸：streaming 期间整段流用 innerHTML 重写，若不按 data-stream-key 去重，
+// 入场动画会在每个 SSE 帧全部重播（闪烁灾难）。策略：按 renderContext 记住已展示过的 key，
+// 首屏挂载只登记不播动画（避免打开历史 run 时整屏级联），之后才新出现的 key 打一次 is-entering。
+// 切走再切回同一 run 不会重播（key 已登记）；后台新到的消息切回时会各播一次。
+const seenConversationStreamKeys = new Map();
+const SEEN_CONVERSATION_CONTEXT_LIMIT = 32;
+
+function markConversationStreamEntries(stream) {
+  const renderContext = stream.dataset.renderContext;
+  if (!renderContext) return;
+  let seen = seenConversationStreamKeys.get(renderContext);
+  const firstPresent = !seen;
+  if (!seen) {
+    if (seenConversationStreamKeys.size >= SEEN_CONVERSATION_CONTEXT_LIMIT) {
+      const oldest = seenConversationStreamKeys.keys().next().value;
+      seenConversationStreamKeys.delete(oldest); // Map 迭代序=插入序，淘汰最旧 context 防无界增长
+    }
+    seen = new Set();
+    seenConversationStreamKeys.set(renderContext, seen);
+  }
+  for (const node of stream.querySelectorAll("[data-stream-key]")) {
+    const key = node.dataset.streamKey;
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    if (firstPresent) continue; // 首屏历史：只登记，不播动画
+    node.classList.add("is-entering");
+    node.addEventListener("animationend", () => node.classList.remove("is-entering"), { once: true });
+  }
+}
+
+function forgetConversationStreamKeysForRun(runId) {
+  if (!runId) return;
+  const prefix = `run:${runId}:`;
+  for (const key of [...seenConversationStreamKeys.keys()]) {
+    if (key.startsWith(prefix)) seenConversationStreamKeys.delete(key);
+  }
+}
+
 function replaceConversationStream(markup, renderContext, { preserveState = true, renderSignature = markup } = {}) {
   const stream = elements["conversation-stream"];
   const pending = pendingConversationMarkup.get(stream);
@@ -12435,6 +12474,7 @@ function replaceConversationStream(markup, renderContext, { preserveState = true
   if (snapshot) restoreConversationStreamState(stream, snapshot);
   else stream.scrollTop = preserveState ? stream.scrollHeight : Number.MAX_SAFE_INTEGER;
   postProcessRichContent(stream);
+  markConversationStreamEntries(stream);
   return true;
 }
 
@@ -12520,6 +12560,7 @@ async function replaceConversationStreamBatched({
   releaseConversationRenderOwnership(stream, ownership);
   stream.removeAttribute("aria-busy");
   postProcessRichContent(stream);
+  markConversationStreamEntries(stream);
   if (snapshot && !ownership.userInteracted) restoreConversationStreamState(stream, snapshot);
   else if (!ownership.userInteracted) {
     // 最后一批挂载后再滚底，避免把首屏节点的解析、样式计算和滚动布局压进同一任务。

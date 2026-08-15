@@ -1544,6 +1544,12 @@ body.atelier .sidebar .nav-item.nav-primary.is-active {
   .workbench-shell .context-rail:not([aria-hidden="true"]) {
     animation: forge-fade-zoom var(--dur-slow, 240ms) var(--ease-out, cubic-bezier(0.4, 0, 0.2, 1)) both;
   }
+
+  /* 新消息入场：渲染层只在「本会话首次出现」的 data-stream-key 上打一次 is-entering，
+     streaming 期间整段流重写不会重播（JS 按 key 去重）；淡入 + 4px 上浮，不缩放变高行。 */
+  .conversation-stream .is-entering {
+    animation: forge-fade-rise var(--dur-slow, 240ms) var(--ease-out, cubic-bezier(0.4, 0, 0.2, 1)) both;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -431,3 +431,30 @@ test("resolved inline approvals aggregate into one line per decision", async () 
   const fn = app.slice(app.indexOf("function inlineApprovalsMarkup"), app.indexOf("// 内联审批决议"));
   assert.ok(!fn.includes("inlineApprovalOutcomes.entries()"), "已决议仍在逐条堆叠");
 });
+
+// LO 2026-08-15：新消息入场动画只能播一次——streaming 期间整段流用 innerHTML 重写，
+// 若不按 data-stream-key 去重，动画会在每个 SSE 帧全部重播（闪烁灾难）。契约：首屏只登记不播，
+// 之后才新出现的 key 打一次 is-entering，切走再切回不重播，run 清除时释放 key 集合。
+test("message entrance animation dedupes by data-stream-key across stream rewrites", async () => {
+  const [app, css, motion] = await Promise.all([
+    source("public/app.js"),
+    source("public/forge/codex-desktop.css"),
+    source("public/forge/motion.css"),
+  ]);
+  // 去重闸：按 renderContext 记住已展示 key；首屏（firstPresent）只登记不播动画
+  assert.ok(app.includes("const seenConversationStreamKeys = new Map();"), "缺 per-context 已见 key 集合");
+  assert.ok(app.includes("if (firstPresent) continue; // 首屏历史：只登记，不播动画"), "首屏没有只登记不播动画");
+  assert.ok(app.includes("if (!key || seen.has(key)) continue;"), "缺按 key 去重");
+  assert.ok(app.includes('node.classList.add("is-entering");'), "缺 is-entering 标记");
+  assert.ok(app.includes('node.addEventListener("animationend", () => node.classList.remove("is-entering"), { once: true });'), "缺动画结束摘类");
+  // 有界：context 超过上限淘汰最旧，run 清除时释放其 key（避免长会话无界增长）
+  assert.ok(app.includes("const SEEN_CONVERSATION_CONTEXT_LIMIT = 32;"), "缺 context 上限");
+  assert.ok(app.includes("function forgetConversationStreamKeysForRun(runId)"), "缺 run 清除时的 key 释放");
+  assert.ok(app.includes("forgetConversationStreamKeysForRun(runId);"), "run 清除路径未调用 key 释放");
+  // 两条渲染路径（全量 + 分批）都在渲染后标记——漏接任何一条，那一条的新消息就不会入场
+  const calls = app.split("markConversationStreamEntries(stream);").length - 1;
+  assert.ok(calls >= 2, `标记只接入 ${calls} 处渲染路径，应覆盖全量与分批两条`);
+  // CSS：淡入 + 4px 上浮（不缩放变高行），仅在非 reduced-motion 下生效
+  assert.ok(motion.includes("@keyframes forge-fade-rise"), "缺 forge-fade-rise keyframe");
+  assert.match(css, /\.conversation-stream \.is-entering \{\s*\n\s*animation: forge-fade-rise/);
+});
