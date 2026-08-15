@@ -11,6 +11,8 @@ npm start
 
 The server binds to `127.0.0.1` only and prints a URL containing an ephemeral access token. The browser stores that token in session storage; API calls without it are rejected.
 
+Config validation additionally requires Python 3.11+ (`python -m pip install -r requirements-validation.txt`, then `npm run validate`).
+
 Optional environment variables:
 
 - `CONTROL_CENTER_PORT`: fixed loopback port; default `0` chooses an available port.
@@ -23,7 +25,9 @@ Optional environment variables:
 - Runtime/user configuration is inventory-only in v1. Deployment remains behind the existing verified sync scripts and a separate approval.
 - Secret-bearing runtime files never return raw content.
 - Claude Fable plans in `plan` mode. Codex starts read-only; write-capable execution requires an approval-bearing run.
-- Grok Build remains disabled until a real local CLI is installed and its protocol is verified. `grok-search-rs` is represented as an external research provider, not misreported as a coding CLI.
+- Grok Build runs on the official `responses` backend and is active for text and PNG/JPEG images (`image-analysis`); GIF/WebP/video remain conservatively rejected. `grok-search-rs` is represented as an external research provider, not misreported as a coding CLI.
+- Routing no longer guesses capabilities: models/seats/members normalize to `["*"]`, and capability tags do not gate admission or scoring. Only special channels with a human-readable `reason` and `constraints.allowedProviders` may hard-limit candidates.
+- Collaboration sessions have no total round cap: `round` is a monotonic audit sequence; each user message gets an independent `interaction` with a default 6-step autonomous budget, and the input stop key interrupts only the current provider turn.
 
 ## API
 
@@ -32,6 +36,11 @@ Optional environment variables:
 - `POST /api/config/:id/validate|plan|apply|rollback`
 - `POST /api/router/preview`
 - `GET/POST /api/runs`, `GET /api/runs/:id`, `POST /api/runs/:id/cancel`
+- `GET /api/providers`, `GET /api/providers/live`, `POST /api/providers/switch|preview|fetch-models|test-endpoints|usage-test|sort|export|import`
+- `GET /api/providers/:id`, `POST /api/providers/:id/duplicate|check|model-test`, `GET /api/providers/:id/usage`
+- `GET /api/runtime-seats`, `GET /api/teams`, `GET /api/team-members`, `GET /api/capabilities`, `GET /api/sessions`
+- `GET /api/observability/summary|routegate|delta|handoffs|drift`
+- The full endpoint surface lives in `public/api.js` and `src/*/routes.mjs`.
 
 ## Tests
 

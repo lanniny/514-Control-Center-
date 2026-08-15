@@ -2,7 +2,7 @@
 
 v3.5.0 | 2026-07-17 | 深度对话协作 + 模型优势路由 v2 + Console 接电
 
-> 正式发布版本以 `rules.md` §八和 `CHANGELOG.md` 最新条目为准。工作记录中的 v3.6/v3.7 是未发布功能波次，不是新的 framework release。
+> 正式发布版本以 `rules.md` §八和 `CHANGELOG.md` 最新条目为准。工作记录中的 v3.6/v3.7/v4.0 是未发布功能波次，不是新的 framework release。
 
 ## 是什么
 
@@ -18,6 +18,10 @@ v3.5.0 | 2026-07-17 | 深度对话协作 + 模型优势路由 v2 + Console 接�
 - **三层定制化**：默认 → 团队 → 个人，TOML override 不改核心文件
 - **可选主脑 + 异构执行面**：内置 `team-514cc` 默认由 Claude Fable 规划和总协作；自定义团队由其 `coordinator` 决定主脑与会话入口，Codex、Grok Build、Kimi、Pi 等已接线席位均可承担
 - **Console 控制面**：`apps/control-center` 提供配置、路由、观测、会话与协作 UI；8 个 adapter 实现均由注册表漂移检查守住
+- **协作会话拆账**：`round` 只作单调审计序号，对话无总轮数上限、可任意中断续接；每条用户消息独立 `interaction`，单次自主执行默认限 6 步防跑飞
+- **路由不猜能力**：模型/席位/成员能力统一归一化为 `["*"]`，能力标签不再参与路由准入或评分；只有带人类可读 `reason` + `constraints.allowedProviders` 的特殊通道可硬限候选
+- **多模态图片运行态**：Grok Build 官方 `responses` 后端，PNG/JPEG 注册 `image-analysis`、剪贴板粘贴直发、图片来源归属 interaction；GIF/WebP/视频保守拒绝
+- **供应商 live 热加载**：`/api/providers/live` 回读运行态，供应商面可见时轮询、失焦即停；live 与档案漂移逐字段列出、一键改回
 - **Codex Ultracode 等价模式**：Codex 项目默认 `xhigh`，`$ultracode` 承载 Claude ultracode 的动态 workflow/fan-out/对抗验证语义
 - **BMAD 质量机制**：对抗式评审（≥10 问题）、冻结块、就绪自检（RC 内联进策）
 - **MCP 深度集成**：能力映射见 `module.yaml`；运行时启用状态必须现场读取，不在 README 固化易漂移数量
@@ -52,6 +56,7 @@ Layer 4: 最小治理（rules.md v3.5 + module schema + guardrails/ + .claude/ho
 
 ## 版本历史
 
+- **v4.0（未发布波次·工作记录，2026-07-25 起）** — codeg + LiveAgent 深度整合、多 CLI 协作可视化、社会模拟编排、协作会话拆账、能力包络移除与图片运行态。未升格为正式 release，详见 `CHANGELOG.md`
 - **v3.5.0**（2026-07-17）— Claude↔Codex 多轮对话桥、Codex review/executor 双角色、模型优势路由 v2、Console 治理接电。源：D-2026-07-17-001
 - **v3.4.3**（2026-07-16）— mirror-gate 契约驱动重构（终结六轮补丁循环，烛 R7 SECURE）+ 织换 grok 驱动（gemini→grok-4.5 完全替代，key 走环境变量）。源：D-2026-07-16-004 + D-2026-07-16-005
 - **v3.4.2**（2026-07-16）— 双地落漂移哨兵接电：mirror-gate 加开机双地落漂移哨兵（宪法+人格 2 对三态防假绿灯），rules 倒挂类 bug 开机即现；SOUL 双地落尝试→烛照设计缺陷→回滚；v3.4.1 版本入口全域对齐。
