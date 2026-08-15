@@ -192,11 +192,7 @@
 .tool-status.is-running { color: var(--warning, var(--amber, #e8590c)); }
 
 .tool-status.is-running .icon.lucide {
-  animation: forge-tool-spin 1s linear infinite;
-}
-
-@keyframes forge-tool-spin {
-  to { transform: rotate(360deg); }
+  animation: forge-spin 1s linear infinite;
 }
 
 /* 工具结果：同款卡片 + 150ms 淡入折叠体 */
@@ -313,7 +309,7 @@
   mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
   mask-composite: exclude;
   pointer-events: none;
-  animation: forge-angle-spin 2.5s linear infinite;
+  animation: forge-conic-spin 2.5s linear infinite;
   transition: opacity var(--dur-slow, 240ms) var(--ease-out, ease);
 }
 
@@ -321,9 +317,7 @@
   opacity: 0;
 }
 
-@keyframes forge-angle-spin {
-  to { --forge-angle: 360deg; }
-}
+
 
 /* 附件 chip：图标对齐 */
 .attach-chip {

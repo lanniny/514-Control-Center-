@@ -6,7 +6,8 @@ import { fileURLToPath } from "node:url";
 const root = fileURLToPath(new URL("..", import.meta.url));
 
 async function source(path) {
-  return readFile(`${root}/${path}`, "utf8");
+  // Windows 工作区源码是 CRLF：统一归一化为 LF，避免多行正则里的 \n 匹配不到（config-topology-state 同根因）
+  return (await readFile(`${root}/${path}`, "utf8")).replace(/\r\n/g, "\n");
 }
 
 test("workbench environment dock exposes the five reference tools and explicit recipient side chat", async () => {

@@ -5675,18 +5675,10 @@ input::placeholder {
   color: var(--aqua);
   font-size: 8px;
   vertical-align: 2px;
-  animation: working-pulse 2.2s ease-in-out infinite;
+  animation: status-pulse 2.2s ease-in-out infinite;
 }
 
-@keyframes working-pulse {
-  0%,
-  100% {
-    opacity: 0.45;
-  }
-  50% {
-    opacity: 1;
-  }
-}
+
 
 @media (prefers-reduced-motion: reduce) {
   .rail-block-working .pane-heading h2::before {
@@ -12668,13 +12660,13 @@ h2 {
 
 /* 环境卡片 busy 态：旋转 loader + 跳动省略点 + 扫光（安装/升级等待反馈） */
 .ccs-cli-busy { position: relative; overflow: hidden; }
-.ccs-cli-busy .icon { animation: ccs-cli-spin 0.9s linear infinite; }
+.ccs-cli-busy .icon { animation: forge-spin 0.9s linear infinite; }
 .ccs-cli-busy-dots { display: inline-flex; align-items: baseline; gap: 2.5px; }
 .ccs-cli-busy-dots i { width: 3px; height: 3px; border-radius: 50%; background: currentColor; animation: ccs-cli-dot 1.2s ease-in-out infinite; }
 .ccs-cli-busy-dots i:nth-child(2) { animation-delay: 0.15s; }
 .ccs-cli-busy-dots i:nth-child(3) { animation-delay: 0.3s; }
 .ccs-cli-busy::after { content: ""; position: absolute; inset: 0; background: linear-gradient(105deg, transparent 32%, var(--accent-soft) 50%, transparent 68%); transform: translateX(-100%); animation: ccs-cli-shimmer 1.8s ease-in-out infinite; pointer-events: none; }
-@keyframes ccs-cli-spin { to { transform: rotate(360deg); } }
+
 @keyframes ccs-cli-dot { 0%, 60%, 100% { transform: translateY(0); opacity: 0.4; } 30% { transform: translateY(-3px); opacity: 1; } }
 @keyframes ccs-cli-shimmer { 55%, 100% { transform: translateX(100%); } }
 @media (prefers-reduced-motion: reduce) {

@@ -6,7 +6,8 @@ import { fileURLToPath } from "node:url";
 const root = fileURLToPath(new URL("..", import.meta.url));
 
 async function source(path) {
-  return readFile(`${root}/${path}`, "utf8");
+  // Windows 工作区源码是 CRLF：统一归一化为 LF，避免多行正则里的 \n 匹配不到（config-topology-state 同根因）
+  return (await readFile(`${root}/${path}`, "utf8")).replace(/\r\n/g, "\n");
 }
 
 // LO 2026-08-10 严格归属制：团队树下只挂显式归属本团队的项目——此前"未归属在所有团队

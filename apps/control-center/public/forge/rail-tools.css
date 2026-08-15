@@ -314,6 +314,12 @@
   animation: forge-tool-reveal 900ms linear infinite;
 }
 
+@media (prefers-reduced-motion: reduce) {
+  .rail-tool-loading .icon {
+    animation: none;
+  }
+}
+
 /* ── 审阅页 ─────────────────────────────────────────── */
 
 .rail-review-head {

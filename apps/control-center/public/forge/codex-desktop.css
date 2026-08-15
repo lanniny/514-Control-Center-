@@ -13,49 +13,9 @@
   --codex-context-width: 326px;
 }
 
-:root:not([data-theme="dark"]) {
-  --bg: #f6f6f5;
-  --surface: #ffffff;
-  --surface-muted: #f4f4f2;
-  --surface-strong: #eaeae7;
-  --surface-glass: rgba(255, 255, 255, 0.96);
-  --sidebar: #f2f2f0;
-  --sidebar-hover: #e9e9e6;
-  --sidebar-active: #e4e4e0;
-  --text: #343432;
-  --text-strong: #20201f;
-  --text-muted: #696965;
-  --text-soft: #92928c;
-  --foreground: #20201f;
-  --muted: #f1f1ef;
-  --muted-foreground: #696965;
-  --card: #ffffff;
-  --border: #e4e4e1;
-  --border-strong: #d6d6d1;
-  --statusbar: #f5f5f3;
-}
-
-[data-theme="dark"] {
-  --bg: #171716;
-  --surface: #1e1e1d;
-  --surface-muted: #242422;
-  --surface-strong: #30302d;
-  --surface-glass: rgba(30, 30, 29, 0.96);
-  --sidebar: #20201f;
-  --sidebar-hover: #2a2a28;
-  --sidebar-active: #333330;
-  --text: #d7d7d2;
-  --text-strong: #f0f0ec;
-  --text-muted: #aaa9a2;
-  --text-soft: #7f7e78;
-  --foreground: #f0f0ec;
-  --muted: #272725;
-  --muted-foreground: #aaa9a2;
-  --card: #1e1e1d;
-  --border: #343431;
-  --border-strong: #44443f;
-  --statusbar: #1b1b1a;
-}
+/* 颜色令牌不在此覆写（LO 2026-08-15 统一基调）：冷灰调曾被最后加载的这里压掉 tokens.css
+   的「人文暖纸」legacy bridge，导致界面实际是冷灰白 + 铜橙杂交态。此处只保留结构性尺寸令牌，
+   冷暖色一律跟随 tokens.css——避免第三套冷灰调再次反压暖纸。 */
 
 html,
 body {
@@ -1573,7 +1533,9 @@ body.atelier .sidebar .nav-item.nav-primary.is-active {
   }
 
   .workbench-shell .status-dot.is-live,
-  .workbench-shell .status-dot.is-running {
+  .workbench-shell .status-dot.is-running,
+  .environment-loading .icon,
+  .environment-inline-spinner .icon {
     animation: none !important;
   }
 

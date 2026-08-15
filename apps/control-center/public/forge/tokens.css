@@ -158,6 +158,7 @@
   --surface-muted: #f0eee7;
   --surface-strong: #e6e3d9;
   --surface-glass: rgba(253, 252, 249, 0.92);
+  --border-strong: #d6d1c2;
   --text: #3d382e;
   --text-strong: #2a2620;
   --text-muted: #6f6a5e;
@@ -189,6 +190,7 @@
   --surface-muted: #232019;
   --surface-strong: #332f27;
   --surface-glass: rgba(40, 37, 32, 0.92);
+  --border-strong: #3a362e;
   --text: #d8d4c9;
   --text-strong: #ece9e0;
   --text-muted: #a8a294;

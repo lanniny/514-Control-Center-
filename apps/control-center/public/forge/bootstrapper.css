@@ -684,13 +684,7 @@
 /* ─── 动效 ─────────────────────────────────────────────────── */
 
 .boot-spin {
-  animation: boot-rotate 0.9s linear infinite;
-}
-
-@keyframes boot-rotate {
-  to {
-    transform: rotate(360deg);
-  }
+  animation: forge-spin 0.9s linear infinite;
 }
 
 .bootstrapper-footer {
