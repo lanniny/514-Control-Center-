@@ -2775,7 +2775,7 @@ test("logical team members sharing one runtime profile keep isolated sessions an
     permissionMode: "plan",
     teamId: team.id,
     requestedAgentIds: ["member-alpha", "member-beta"],
-    maxRounds: 3,
+    maxRounds: 6,
   });
   const completed = await waitTerminal(orchestrator, created.id);
   assert.equal(completed.status, "succeeded");

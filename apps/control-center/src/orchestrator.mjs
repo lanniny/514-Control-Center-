@@ -18,6 +18,9 @@ const execFileAsync = promisify(execFile);
 
 const TERMINAL = new Set(["succeeded", "failed", "cancelled"]);
 const MAX_REQUESTED_AGENTS = 4;
+// social 协作：显式 @N 个成员的闭环 = N+1 步（各回一句 + 主脑汇总），另留该余量给 agent 间
+// 自主往复（追问/补强/复核），避免一次多 agent 协作被"单交互自主步骤"闸在闭环边界截断。
+const SOCIAL_INTERACTION_HEADROOM = 2;
 const CODEX_TRANSPORT_FAILURES = new Set(["APP_SERVER_EXIT", "APP_SERVER_TIMEOUT", "EPIPE", "ECONNRESET", "ENOENT", "UNSAFE_COMMAND_SHIM"]);
 // 自动续跑只针对"已提交但被打断"的超时轮：打断经 provider 确认 + 只读/plan 轮（无写盘残留）
 // 才有安全续跑语义。次数按当前用户交互计，不把一次超时变成整场会话的永久惩罚。
@@ -352,7 +355,11 @@ export class Orchestrator {
 
   maxStepsForInteraction(run) {
     const configured = Number(run?.maxStepsPerInteraction ?? run?.maxRounds ?? this.policy.limits.maxRounds);
-    const policyCap = Math.max(1, Math.trunc(Number(this.policy.limits.maxRounds) || 1));
+    const baseCap = Math.max(1, Math.trunc(Number(this.policy.limits.maxRounds) || 1));
+    // social 模式上限高于 pipeline：显式派工闭环 + 往复余量；顶由 MAX_REQUESTED_AGENTS + 余量机械限制。
+    const policyCap = run?.orchestrationMode === "social"
+      ? baseCap + MAX_REQUESTED_AGENTS + SOCIAL_INTERACTION_HEADROOM
+      : baseCap;
     return Math.max(1, Math.min(Math.trunc(Number.isFinite(configured) ? configured : policyCap), policyCap));
   }
 
@@ -1873,14 +1880,25 @@ export class Orchestrator {
     // codeg 的 DelegationBroker 含 depth_limit（1-8）、per-agent defaults、cancel 传播
     const delegationDepthLimit = Math.max(1, Math.min(8, Number(input.delegationDepthLimit) || 4));
     // maxRounds 是公开 API/审批哈希的兼容名；实际语义是每条用户消息可触发的自主 provider 步数。
-    const requestedMaxRounds = Number(input.maxStepsPerInteraction ?? input.maxRounds) || this.policy.limits.maxRounds;
+    const explicitSteps = Number(input.maxStepsPerInteraction ?? input.maxRounds) || 0;
     const topologyMinimumRounds = executionOwnerId === coordinatorId ? (route.independentRequired ? 3 : 1) : 3;
-    const socialMinimumRounds = orchestrationMode === "social" ? initialTargets.length + 1 : 0;
+    // social 模式：显式 @N 个成员的协作闭环 = N+1 步，另留往复余量。不再被 pipeline 的
+    // policy.maxRounds（默认 6）硬顶——否则 @4 成员时闭环正好占满 6 步、任何一次追问即截断。
+    const socialMinimumRounds = orchestrationMode === "social"
+      ? initialTargets.length + 1 + SOCIAL_INTERACTION_HEADROOM
+      : 0;
     const minimumRounds = Math.max(topologyMinimumRounds, socialMinimumRounds);
-    if (this.policy.limits.maxRounds < minimumRounds) {
+    // social 步数硬顶 = policy.maxRounds + 可 @ 成员数 + 往复余量，机械防失控；MAX_REQUESTED_AGENTS
+    // 已把 requestedAgentIds 限在 4，故 initialTargets ≤ 5、闭环 ≤ 8，远低于该顶。
+    const socialCap = this.policy.limits.maxRounds + MAX_REQUESTED_AGENTS + SOCIAL_INTERACTION_HEADROOM;
+    const effectiveCap = orchestrationMode === "social" ? socialCap : this.policy.limits.maxRounds;
+    const effectiveDefault = orchestrationMode === "social"
+      ? Math.max(socialMinimumRounds, this.policy.limits.maxRounds)
+      : this.policy.limits.maxRounds;
+    if (orchestrationMode !== "social" && this.policy.limits.maxRounds < minimumRounds) {
       throw Object.assign(new Error(`permission policy maxRounds cannot satisfy the selected ${minimumRounds}-round topology`), { code: "POLICY_VIOLATION" });
     }
-    if (requestedMaxRounds < minimumRounds) {
+    if (explicitSteps && explicitSteps < minimumRounds) {
       throw Object.assign(new Error(`selected topology requires at least ${minimumRounds} collaboration rounds`), {
         code: "INSUFFICIENT_ROUNDS",
         minimumRounds,
@@ -1897,7 +1915,7 @@ export class Orchestrator {
           ...initialInteraction,
         })))
       : [];
-    const maxStepsPerInteraction = Math.max(minimumRounds, Math.min(requestedMaxRounds, this.policy.limits.maxRounds));
+    const maxStepsPerInteraction = Math.max(minimumRounds, Math.min(explicitSteps || effectiveDefault, effectiveCap));
     const run = {
       id: runId,
       status: "queued",
@@ -3427,6 +3445,8 @@ ${rosterLine}
    * 只有机械证明未被 provider 接受的轮次才可退：prepared/session_ready 尚未提交 prompt，
    * rejected 是 turn/start 的窄白名单准入拒绝。submitting/submitted/ambiguous 都可能已经
    * 到达 provider，退还会允许超过当前 interaction 的自主步骤上限。
+   * 注意：函数名沿历史叫 "Round"，实际退的是当前 interaction 的 interactionStep；round 是
+   * 全会话单调审计序号，永不回退。
    */
   refundableAbandonedAttempt(run) {
     this.ensureInteractionState(run);
@@ -3482,6 +3502,10 @@ ${rosterLine}
       refundedAttemptIds: [...(run.refundedAttemptIds || [])],
       recoveryAcknowledgedAt: run.recoveryAcknowledgedAt,
       recoveryNote: run.recoveryNote,
+      // ensureInteractionState 在退款路径会把 activeInteraction 同步进私有 ledger；快照必须一并覆盖，
+      // 否则 save 失败回滚后 interactionStates 残留半套同步（拆账引入的缺口，见 round-refund-contract）。
+      // 保留 undefined 语义：|| {} 会把"无 ledger"伪造成空对象，回滚后仍与放弃前不一致。
+      interactionStates: run.interactionStates == null ? undefined : structuredClone(run.interactionStates),
     };
   }
 

@@ -1478,7 +1478,7 @@ test("cancelling while the safe fallback audit is pending prevents fallback prov
     teamId: "team-514cc",
     orchestrationMode: "social",
     startAgentId: "codex-technical",
-    maxRounds: 3,
+    maxRounds: 8,
   });
   await fallbackAuditEntered.promise;
 
@@ -2126,7 +2126,7 @@ test("social Build validates and assigns workspace-write to the explicit direct 
     teamId: "team-514cc",
     orchestrationMode: "social",
     startAgentId: "claude-fable",
-    maxRounds: 3,
+    maxRounds: 8,
   });
   const terminal = await waitTerminal(orchestrator, run.id);
   assert.equal(terminal.status, "succeeded", terminal.error);
@@ -2177,7 +2177,7 @@ test("the active direct target stays first when requestedAgentIds adds collabora
     orchestrationMode: "social",
     startAgentId: "codex-technical",
     requestedAgentIds: ["claude-fable"],
-    maxRounds: 3,
+    maxRounds: 8,
   });
   const terminal = await waitTerminal(orchestrator, run.id);
   assert.equal(terminal.status, "succeeded", terminal.error);
@@ -2234,7 +2234,7 @@ test("structured multi-mention dispatches every explicit target before leader fi
     teamId: "team-514cc",
     orchestrationMode: "social",
     requestedAgentIds: ["claude-fable", "codex-technical"],
-    maxRounds: 3,
+    maxRounds: 8,
   });
   const terminal = await waitTerminal(orchestrator, run.id);
   assert.equal(terminal.status, "succeeded", terminal.error);
@@ -2269,7 +2269,7 @@ test("multi-mention restart rebuilds an empty durable queue and preserves order"
     teamId: "team-514cc",
     orchestrationMode: "social",
     requestedAgentIds: ["codex-technical", "claude-fable"],
-    maxRounds: 3,
+    maxRounds: 8,
   });
   await orchestrator.close();
   const runPath = resolve(root, "runs", `${preview.id}.json`);
@@ -2753,7 +2753,7 @@ test("an answer starts a fresh interaction and preserves routes frozen beside th
     { policyOverride: { maxRounds: 3 } },
   );
   t.after(() => rm(root, { recursive: true, force: true }));
-  const run = await orchestrator.create({ prompt: "紧轮次拍板任务", execute: true, permissionMode: "plan", teamId: "team-514cc", orchestrationMode: "social", maxRounds: 3 });
+  const run = await orchestrator.create({ prompt: "紧轮次拍板任务", execute: true, permissionMode: "plan", teamId: "team-514cc", orchestrationMode: "social", maxRounds: 4 });
   const deadline = Date.now() + 15_000;
   let paused = orchestrator.get(run.id);
   while (Date.now() < deadline && !(paused.status === "waiting_agent" && paused.pendingAsk && paused.pausedForInput)) {
@@ -3008,4 +3008,78 @@ test("effort validation honors dynamically discovered levels (codex max/ultra)",
     () => orchestrator.create({ prompt: "x", execute: false, permissionMode: "plan", teamId: "team-514cc", orchestrationMode: "social", startAgentId: "codex-technical", effort: "ultracode" }),
     (error) => error.code === "INVALID_EFFORT",
   );
+});
+
+test("maxStepsForInteraction grants social headroom while pipeline stays clamped", async (t) => {
+  const fx = await fixture({}, { policyOverride: { maxRounds: 6 } });
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const orchestrator = fx.orchestrator;
+  assert.equal(
+    orchestrator.maxStepsForInteraction({ orchestrationMode: "social", maxStepsPerInteraction: 8 }),
+    8,
+    "social 不钳到 pipeline 的 policy 6",
+  );
+  assert.equal(
+    orchestrator.maxStepsForInteraction({ orchestrationMode: "pipeline", maxStepsPerInteraction: 8 }),
+    6,
+    "pipeline 仍钳到 policy 6",
+  );
+  assert.equal(
+    orchestrator.maxStepsForInteraction({ orchestrationMode: "social", maxRounds: 8 }),
+    8,
+    "兼容字段 maxRounds 在 social 模式同样按 headroom 放宽",
+  );
+});
+
+test("social create budgets explicit targets plus headroom above pipeline clamp", async (t) => {
+  const fx = await fixture({}, { policyOverride: { maxRounds: 6 } });
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const orchestrator = fx.orchestrator;
+  const members = ["claude-fable", "codex-technical", "kimi-frontend", "grok-build"];
+  orchestrator.teams = {
+    get(id) {
+      if (id !== "team-514cc") throw Object.assign(new Error("not found"), { code: "SOURCE_NOT_FOUND" });
+      return { id: "team-514cc", name: "514cc", coordinator: "claude-fable", members };
+    },
+    brief: () => "[团队配置开始] 测试团队 [结束]",
+  };
+  for (const id of ["kimi-frontend", "grok-build"]) {
+    orchestrator.adapters.set(id, {
+      cwd: fx.root,
+      supportsPerTurnCwd: true,
+      async send(input) {
+        await input.onSessionStarted?.({ sessionId: `${id}-session` });
+        return { sessionId: `${id}-session`, text: `${id} 的静默答复`, protocol: `${id}-mock`, tokens: 100, costUsd: 0.01 };
+      },
+      async close() {},
+    });
+  }
+  const created = await orchestrator.create({
+    prompt: "协作",
+    execute: false,
+    permissionMode: "plan",
+    teamId: "team-514cc",
+    orchestrationMode: "social",
+    startAgentId: "claude-fable",
+    requestedAgentIds: ["codex-technical", "kimi-frontend", "grok-build"],
+  });
+  // initialTargets = [claude-fable, codex-technical, kimi-frontend, grok-build] = 4 → socialFloor = 4+1+2 = 7
+  assert.ok(created.maxStepsPerInteraction >= 7, `social 预算应含往复余量，实际 ${created.maxStepsPerInteraction}`);
+  assert.ok(created.maxStepsPerInteraction > 6, "social 预算不得钳到 pipeline 的 6 步");
+});
+
+test("allocateInteraction advances seq without ledger; activateInteraction backfills it", async (t) => {
+  const fx = await fixture({}, { policyOverride: { maxRounds: 6 } });
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const orchestrator = fx.orchestrator;
+  const created = await orchestrator.create({
+    prompt: "账本契约", execute: false, permissionMode: "plan", teamId: "team-514cc", orchestrationMode: "pipeline",
+  });
+  const seqBefore = created.interactionSeq;
+  const allocated = orchestrator.allocateInteraction(created);
+  assert.equal(created.interactionSeq, seqBefore + 1);
+  assert.equal(created.interactionStates?.[allocated.interactionId], undefined, "allocate 只递增 seq，不写 ledger");
+  orchestrator.activateInteraction(created, allocated);
+  assert.ok(created.interactionStates?.[allocated.interactionId], "activate 补写 ledger，重启后 pendingSteer 的 interaction 自愈");
+  assert.equal(created.interactionStates[allocated.interactionId].interactionSeq, allocated.interactionSeq);
 });

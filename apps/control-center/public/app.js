@@ -14668,6 +14668,9 @@ function sendErrorText(error, run) {
   if (code === "INSUFFICIENT_ROUNDS") {
     return `所选协作拓扑至少需要 ${Number(error?.payload?.error?.minimumRounds) || "更多"} 轮，请提高轮次上限或换更简单的拓扑。`;
   }
+  if (code === "POLICY_VIOLATION") {
+    return "权限策略的步骤上限不足以跑起所选协作拓扑；请减少协作成员、提高权限策略的 maxRounds，或换更简单的编排。";
+  }
   return error?.message ?? "续接失败";
 }
 
