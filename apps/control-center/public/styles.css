@@ -9313,21 +9313,12 @@ h2 {
   line-height: 1.45;
 }
 
-/* Capability Lease 审批卡 */
-.approval-inline.capability-lease {
-  border-color: var(--amber);
-  background: var(--amber-soft);
-}
-
+/* Capability Lease 审批卡（row 形态，仅在安全视图审批面板） */
 .approval-inline .lease-scope {
   margin: 0 0 8px;
   color: var(--text-muted);
   font-size: 11.5px;
   line-height: 1.4;
-}
-
-.approval-inline.capability-lease .approval-inline-head strong {
-  color: var(--amber);
 }
 
 .capability-lease-row {

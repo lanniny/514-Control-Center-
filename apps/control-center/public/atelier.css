@@ -521,7 +521,6 @@ body.atelier {
 }
 
 .atelier .settlement-card,
-.atelier .approval-inline.capability-lease,
 .atelier .ask-card,
 .atelier .run-end-note {
   border-radius: var(--radius-card);

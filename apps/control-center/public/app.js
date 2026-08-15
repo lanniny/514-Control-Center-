@@ -11666,7 +11666,8 @@ function approvalCardMarkup(item) {
     </article>`;
 }
 
-function capabilityLeaseMarkup(lease, { inline = true } = {}) {
+// 租约只渲染在安全视图审批面板（row 形态）；会话流末尾的 inline 形态已随 LO 2026-08-15 退役。
+function capabilityLeaseMarkup(lease) {
   const status = String(lease?.status || "unknown");
   const effective = lease?.gateOpen === true ? "active" : status === "active" ? "invalid" : status;
   const statusText = {
@@ -11675,7 +11676,7 @@ function capabilityLeaseMarkup(lease, { inline = true } = {}) {
     expired: "执行租约已过期",
     invalid: "执行租约绑定失效",
   }[effective] || "执行租约状态未知";
-  const classes = inline ? "approval-inline capability-lease" : "approval-row capability-lease-row";
+  const classes = "approval-row capability-lease-row";
   return `
     <article class="${classes}" data-stream-key="lease:${escapeHtml(lease.id)}">
       <div class="approval-inline-head">
@@ -11705,10 +11706,12 @@ function inlineApprovalsMarkup(run) {
     const timeText = latest ? ` · 最近 ${escapeHtml(formatTime(latest))}` : "";
     return `<div class="approval-resolved-line ${approved ? "is-approved" : "is-denied"}" data-stream-key="approval-result:${decision}:${escapeHtml(run.id)}">${approved ? `${lucideIcon("shield-check", "icon lucide")} 动作审批已批准${countText}` : `${lucideIcon("x", "icon lucide")} 动作审批已拒绝${countText}`}${timeText}</div>`;
   });
-  const leases = state.leases.filter((lease) => lease.runId === run.id).map((lease) => capabilityLeaseMarkup(lease));
-  // 等待审批（run build 授权）与轮中审批（codex command/file 请求）都挂在会话流末尾
+  // 执行租约（capability lease）不再挂会话流末尾：它整段生命周期都有效，常驻流尾像一张永不撤的卡，
+  // 且「吊销」对下一次写派发生效（不终止正在执行的原生 turn），放在对话里容易被误读成「终止当前」。
+  // 租约展示与吊销入口统一收敛到安全视图的审批面板（renderApprovals 的 leaseRows）。
+  // 等待审批（run build 授权）与轮中审批（codex command/file 请求）仍挂在会话流末尾
   const pending = state.approvals.filter((item) => item.runId === run.id && (item.status ?? "pending") === "pending");
-  return [...resolved, ...leases, ...pending.map(approvalCardMarkup)].join("");
+  return [...resolved, ...pending.map(approvalCardMarkup)].join("");
 }
 
 // 内联审批决议：跳过 confirmAction 二次弹窗——actionSha256 随请求回传、服务端哈希校验已是防误触护栏
@@ -15156,7 +15159,7 @@ function renderApprovals() {
             </article>`;
         })
         .join("");
-  const leaseRows = leases.map((lease) => capabilityLeaseMarkup(lease, { inline: false })).join("");
+  const leaseRows = leases.map((lease) => capabilityLeaseMarkup(lease)).join("");
   elements["approval-list"].innerHTML = approvalRows || leaseRows
     ? `${approvalRows}${leaseRows}`
     : emptyMarkup("暂无待处理审批或执行租约", "权限请求会在这里等待显式决定");
