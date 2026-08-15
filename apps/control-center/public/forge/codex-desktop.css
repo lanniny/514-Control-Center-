@@ -64,9 +64,44 @@ body {
 }
 
 /* 背景舞台恢复（LO 2026-08-15 增强 3D 质感）：atelier.css 已铺 mesh 暖渐变 + grain 噪点 +
-   指针粒子光场（atelier-canvas.js），此处不再整层隐藏，只让工作台面板改磨砂半透明透出纵深。 */
+   指针粒子光场（atelier-canvas.js），此处不再整层隐藏，并把原本过淡的光晕/粒子调到肉眼可见。 */
 .atelier-stage {
   display: block;
+  opacity: 1;
+}
+
+/* 光晕加强：暖铜橙顶部主光 + 深青底部补光，色相层次一眼可见（不是纯白底） */
+.atelier-mesh {
+  background:
+    radial-gradient(ellipse 75% 55% at 14% -2%, rgba(217, 119, 87, 0.16), transparent 58%),
+    radial-gradient(ellipse 60% 50% at 100% 102%, rgba(6, 117, 98, 0.10), transparent 54%),
+    radial-gradient(ellipse 42% 34% at 50% 118%, rgba(180, 92, 62, 0.08), transparent 60%),
+    linear-gradient(180deg, var(--bg) 0%, var(--void) 100%);
+}
+
+[data-theme="dark"] .atelier-mesh {
+  background:
+    radial-gradient(ellipse 70% 48% at 12% -2%, rgba(232, 145, 111, 0.17), transparent 56%),
+    radial-gradient(ellipse 56% 46% at 100% 102%, rgba(45, 140, 122, 0.12), transparent 54%),
+    linear-gradient(180deg, var(--bg) 0%, var(--void) 100%);
+}
+
+/* 粒子光场提亮：指针光晕 + 星座连线肉眼可见 */
+#atelier-canvas {
+  opacity: 0.75;
+}
+
+[data-theme="dark"] #atelier-canvas {
+  opacity: 0.62;
+}
+
+/* grain 噪点略提，纸面质感可见 */
+.atelier-grain {
+  opacity: 0.16;
+}
+
+[data-theme="dark"] .atelier-grain {
+  opacity: 0.12;
 }
 
 /* Application chrome */
@@ -267,7 +302,7 @@ body.atelier .sidebar .nav-item.nav-primary.is-active {
   display: none;
 }
 
-.run-rail {
+.atelier .run-rail {
   min-width: 0;
   max-height: none;
   margin: 0;
@@ -276,10 +311,12 @@ body.atelier .sidebar .nav-item.nav-primary.is-active {
   border: 0;
   border-right: 1px solid var(--border);
   border-radius: 0;
-  /* 磨砂玻璃：半透明暖米侧栏 + 模糊，让背景舞台透出纵深（不抢会话栏主阅读面） */
-  background: color-mix(in oklab, var(--sidebar) 72%, transparent);
-  -webkit-backdrop-filter: blur(18px) saturate(140%);
-  backdrop-filter: blur(18px) saturate(140%);
+  /* 磨砂玻璃：半透明暖米侧栏 + 模糊，让背景舞台透出纵深（不抢会话栏主阅读面）。
+     .atelier 前缀对齐 atelier.css 的 `.atelier .run-rail`（0,2,0），否则实色会反压磨砂。 */
+  background: color-mix(in oklab, var(--sidebar) 62%, transparent);
+  -webkit-backdrop-filter: blur(18px) saturate(150%);
+  backdrop-filter: blur(18px) saturate(150%);
+  box-shadow: 1px 0 0 rgba(255, 255, 255, 0.5) inset;
 }
 
 .run-rail > .rail-block-team {
@@ -342,14 +379,14 @@ body.atelier .sidebar .nav-item.nav-primary.is-active {
   background: var(--sidebar);
 }
 
-.conversation-pane {
+.atelier .conversation-pane {
   min-width: 0;
   min-height: 0;
   grid-template-rows: auto minmax(42px, auto) minmax(0, 1fr) auto auto auto;
   border: 0;
   border-radius: 0;
   /* 主阅读面：比侧栏更实的暖纸玻璃（更高不透明度保正文对比），微透舞台光场 */
-  background: color-mix(in oklab, var(--surface) 84%, transparent);
+  background: color-mix(in oklab, var(--surface) 78%, transparent);
   -webkit-backdrop-filter: blur(22px) saturate(150%);
   backdrop-filter: blur(22px) saturate(150%);
 }
@@ -358,13 +395,19 @@ body.atelier .sidebar .nav-item.nav-primary.is-active {
   min-height: 34px;
   padding: 4px 12px 0;
   border-bottom: 1px solid var(--border);
-  background: var(--surface-muted);
+  /* 页签条同样磨砂化，与标题栏/输入区玻璃连续成一片 */
+  background: color-mix(in oklab, var(--surface-muted) 70%, transparent);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  backdrop-filter: blur(18px) saturate(140%);
 }
 
 .conversation-heading {
   min-height: 42px;
   padding: 6px 16px;
   border-bottom: 1px solid var(--border);
+  background: color-mix(in oklab, var(--surface) 80%, transparent);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
+  backdrop-filter: blur(20px) saturate(150%);
 }
 
 .conversation-heading h2 {
@@ -442,7 +485,10 @@ body.atelier .sidebar .nav-item.nav-primary.is-active {
   min-width: 0;
   padding: 8px 24px 15px;
   border-top: 0;
-  background: var(--surface);
+  /* 与主阅读面同款暖纸玻璃，让舞台光场贯通到输入区底部（不实色盖死） */
+  background: color-mix(in oklab, var(--surface) 78%, transparent);
+  -webkit-backdrop-filter: blur(22px) saturate(150%);
+  backdrop-filter: blur(22px) saturate(150%);
 }
 
 .composer-target-tabs {
@@ -612,7 +658,7 @@ body.atelier .sidebar .nav-item.nav-primary.is-active {
   visibility: visible;
   border: 1px solid var(--border-strong);
   border-radius: 8px;
-  background: color-mix(in oklab, var(--surface) 82%, transparent);
+  background: color-mix(in oklab, var(--surface) 72%, transparent);
   -webkit-backdrop-filter: blur(20px) saturate(150%);
   backdrop-filter: blur(20px) saturate(150%);
   box-shadow: 0 16px 48px rgba(22, 22, 20, 0.16), 0 2px 8px rgba(22, 22, 20, 0.08);
@@ -1458,6 +1504,24 @@ body.atelier .sidebar .nav-item.nav-primary.is-active {
   transform: translateX(2px);
 }
 
+/* 工具卡 hover 抬升：与用户胶囊/会话项同语汇（微抬 + 阴影加深） */
+.conversation-stream .tool-call.tool-card {
+  transition:
+    border-color var(--dur-med, 150ms) var(--ease-out, cubic-bezier(0.4, 0, 0.2, 1)),
+    box-shadow var(--dur-med, 150ms) var(--ease-out, cubic-bezier(0.4, 0, 0.2, 1)),
+    transform var(--dur-med, 150ms) var(--ease-out, cubic-bezier(0.4, 0, 0.2, 1));
+}
+
+.conversation-stream .tool-call.tool-card:hover {
+  transform: translateY(-1px);
+}
+
+/* 会话项选中态：左内高光条 + 轻微阴影，把“当前”从纯底色抬成有纵深的选中面 */
+.run-rail-list [data-run-select].is-selected,
+.run-rail-list [data-run-select][aria-current] {
+  box-shadow: inset 2px 0 0 var(--primary, var(--rose)), var(--shadow-sm, 0 1px 2px rgba(0, 0, 0, 0.05));
+}
+
 /* 发送按钮：按下微收，松开回弹（对标大厂 press 微交互） */
 .task-composer .composer-shell .send-button {
   transition:
@@ -1490,12 +1554,14 @@ body.atelier .sidebar .nav-item.nav-primary.is-active {
 
   .conversation-stream .message-row,
   .conversation-stream .message-row.is-user .message-body,
+  .conversation-stream .tool-call.tool-card,
   .run-rail-list [data-run-select],
   .task-composer .composer-shell .send-button {
     transition: none !important;
   }
 
   .conversation-stream .message-row.is-user .message-body:hover,
+  .conversation-stream .tool-call.tool-card:hover,
   .run-rail-list [data-run-select]:hover {
     transform: none;
   }
