@@ -63,8 +63,10 @@ body {
   background: var(--bg);
 }
 
+/* 背景舞台恢复（LO 2026-08-15 增强 3D 质感）：atelier.css 已铺 mesh 暖渐变 + grain 噪点 +
+   指针粒子光场（atelier-canvas.js），此处不再整层隐藏，只让工作台面板改磨砂半透明透出纵深。 */
 .atelier-stage {
-  display: none;
+  display: block;
 }
 
 /* Application chrome */
@@ -230,6 +232,9 @@ body.atelier .sidebar .nav-item.nav-primary.is-active {
   min-height: 0;
   overflow: hidden;
   padding: 0;
+  /* 主内容区透明化：让背景舞台（z-index:0）透到协作台磨砂面板背后；
+     其余视图的 .main-content 仍用 styles.css 的 var(--bg) 实色，不受影响 */
+  background: transparent;
 }
 
 /* :not([hidden]) 是命脉——裸 !important 会压过 [hidden]{display:none!important} 的隐藏语义，
@@ -254,7 +259,7 @@ body.atelier .sidebar .nav-item.nav-primary.is-active {
   overflow: hidden !important;
   border: 0;
   border-radius: 0;
-  background: var(--surface);
+  background: transparent;
   box-shadow: none;
 }
 
@@ -271,7 +276,10 @@ body.atelier .sidebar .nav-item.nav-primary.is-active {
   border: 0;
   border-right: 1px solid var(--border);
   border-radius: 0;
-  background: var(--sidebar);
+  /* 磨砂玻璃：半透明暖米侧栏 + 模糊，让背景舞台透出纵深（不抢会话栏主阅读面） */
+  background: color-mix(in oklab, var(--sidebar) 72%, transparent);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  backdrop-filter: blur(18px) saturate(140%);
 }
 
 .run-rail > .rail-block-team {
@@ -340,7 +348,10 @@ body.atelier .sidebar .nav-item.nav-primary.is-active {
   grid-template-rows: auto minmax(42px, auto) minmax(0, 1fr) auto auto auto;
   border: 0;
   border-radius: 0;
-  background: var(--surface);
+  /* 主阅读面：比侧栏更实的暖纸玻璃（更高不透明度保正文对比），微透舞台光场 */
+  background: color-mix(in oklab, var(--surface) 84%, transparent);
+  -webkit-backdrop-filter: blur(22px) saturate(150%);
+  backdrop-filter: blur(22px) saturate(150%);
 }
 
 .conv-tabs {
@@ -601,7 +612,9 @@ body.atelier .sidebar .nav-item.nav-primary.is-active {
   visibility: visible;
   border: 1px solid var(--border-strong);
   border-radius: 8px;
-  background: var(--surface);
+  background: color-mix(in oklab, var(--surface) 82%, transparent);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
+  backdrop-filter: blur(20px) saturate(150%);
   box-shadow: 0 16px 48px rgba(22, 22, 20, 0.16), 0 2px 8px rgba(22, 22, 20, 0.08);
   opacity: 1;
   transition: transform 150ms ease-out, opacity 120ms ease-out, visibility 0s;
@@ -1412,9 +1425,87 @@ body.atelier .sidebar .nav-item.nav-primary.is-active {
 
 }
 
+/* ==========================================================================
+ * 深度与动效精修（LO 2026-08-15：背景舞台 + 组件层次、中档动效）
+ * 只加轻层次与微动效；prefers-reduced-motion 下全部兑为静态。
+ * ========================================================================== */
+
+/* 会话栏悬停微抬：主阅读面不升，只让行内交互元素在 hover 时浮起 1px */
+.conversation-stream .message-row {
+  transition: transform var(--dur-med, 150ms) var(--ease-out, cubic-bezier(0.4, 0, 0.2, 1));
+}
+
+.conversation-stream .message-row.is-user .message-body {
+  box-shadow: var(--shadow-sm, 0 1px 2px rgba(0, 0, 0, 0.05));
+  transition:
+    box-shadow var(--dur-med, 150ms) var(--ease-out, cubic-bezier(0.4, 0, 0.2, 1)),
+    transform var(--dur-med, 150ms) var(--ease-out, cubic-bezier(0.4, 0, 0.2, 1));
+}
+
+.conversation-stream .message-row.is-user .message-body:hover {
+  box-shadow: var(--shadow-md, 0 4px 6px -1px rgba(0, 0, 0, 0.07), 0 2px 4px -2px rgba(0, 0, 0, 0.06));
+  transform: translateY(-1px);
+}
+
+/* 会话栏列表项：选中/悬停轻浮，不用霓虹描边 */
+.run-rail-list [data-run-select] {
+  transition:
+    background var(--dur-fast, 100ms) var(--ease-out, cubic-bezier(0.4, 0, 0.2, 1)),
+    transform var(--dur-fast, 100ms) var(--ease-out, cubic-bezier(0.4, 0, 0.2, 1));
+}
+
+.run-rail-list [data-run-select]:hover {
+  transform: translateX(2px);
+}
+
+/* 发送按钮：按下微收，松开回弹（对标大厂 press 微交互） */
+.task-composer .composer-shell .send-button {
+  transition:
+    transform var(--dur-fast, 100ms) var(--ease-spring, cubic-bezier(0.34, 1.56, 0.64, 1)),
+    background var(--dur-fast, 100ms) var(--ease-out, cubic-bezier(0.4, 0, 0.2, 1));
+}
+
+.task-composer .composer-shell .send-button:active:not(:disabled) {
+  transform: scale(0.92);
+}
+
+/* 状态呼吸点：live/运行中的状态点缓慢呼吸，非循环霓虹 */
+.workbench-shell .status-dot.is-live,
+.workbench-shell .status-dot.is-running {
+  animation: forge-pulse-dot 2.6s var(--ease-out, cubic-bezier(0.4, 0, 0.2, 1)) infinite;
+}
+
+/* Mission Control 抽屉展开时的轻量入场（只在非 reduced-motion） */
+@media (prefers-reduced-motion: no-preference) {
+  .workbench-shell .context-rail:not([aria-hidden="true"]) {
+    animation: forge-fade-zoom var(--dur-slow, 240ms) var(--ease-out, cubic-bezier(0.4, 0, 0.2, 1)) both;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   body.atelier .sidebar,
   .workbench-shell .context-rail {
     transition: none;
+  }
+
+  .conversation-stream .message-row,
+  .conversation-stream .message-row.is-user .message-body,
+  .run-rail-list [data-run-select],
+  .task-composer .composer-shell .send-button {
+    transition: none !important;
+  }
+
+  .conversation-stream .message-row.is-user .message-body:hover,
+  .run-rail-list [data-run-select]:hover {
+    transform: none;
+  }
+
+  .workbench-shell .status-dot.is-live,
+  .workbench-shell .status-dot.is-running {
+    animation: none !important;
+  }
+
+  .task-composer .composer-shell .send-button:active:not(:disabled) {
+    transform: none;
   }
 }
