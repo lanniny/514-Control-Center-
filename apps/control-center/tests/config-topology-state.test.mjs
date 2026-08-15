@@ -4,7 +4,9 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 const appRoot = fileURLToPath(new URL("..", import.meta.url));
-const appSource = await readFile(`${appRoot}/public/app.js`, "utf8");
+// 归一化行尾：Windows 工作区 checkout 后 app.js 是 CRLF，而 sourceSection 的 marker 用 LF；
+// 不归一化会让含换行的 end marker（如 beforeunload 那处）在 CRLF 工作区永远匹配不到。
+const appSource = (await readFile(`${appRoot}/public/app.js`, "utf8")).replace(/\r\n/g, "\n");
 
 function sourceSection(startMarker, endMarker) {
   const start = appSource.indexOf(startMarker);
