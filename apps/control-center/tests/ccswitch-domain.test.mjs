@@ -157,6 +157,41 @@ test("备份/恢复：ProviderStore 与领域状态一体恢复，删除需确�
   assert.equal((await domain.deleteBackup(backup.filename, { confirmed: true })).removed, backup.filename);
 });
 
+test("默认批量重写和快照恢复不触碰 legacy Claude Desktop，显式兼容范围仍可同步", async (t) => {
+  const { domain, providers, runtimeHome } = await fixture(t);
+  const provider = await providers.create({
+    name: "Legacy Desktop provider",
+    baseUrl: "https://desktop-legacy.example.com",
+    apiKey: "desktop-secret",
+    apps: { "claude-desktop": true },
+    models: { "claude-desktop": { model: "claude-desktop-model" } },
+  });
+  await providers.switchTo("claude-desktop", provider.id);
+  const snapshot = domain.snapshot();
+  const desktopConfig = join(runtimeHome, "AppData", "Local", "Claude", "claude_desktop_config.json");
+  const sentinel = '{"sentinel":"keep-hidden-desktop"}\n';
+  await writeFile(desktopConfig, sentinel, "utf8");
+
+  await domain.syncAllLive();
+  assert.equal(await readFile(desktopConfig, "utf8"), sentinel);
+  await domain.restoreSnapshot(snapshot);
+  assert.equal(await readFile(desktopConfig, "utf8"), sentinel);
+
+  await domain.syncAllLive({ apps: ["claude-desktop"] });
+  assert.notEqual(await readFile(desktopConfig, "utf8"), sentinel);
+});
+
+test("快照恢复在替换本地状态前拒绝无效 live 应用范围", async (t) => {
+  const { domain, providers } = await fixture(t);
+  await providers.create({ name: "Before invalid restore", baseUrl: "https://before.example.com", apps: { codex: true } });
+  const before = domain.snapshot();
+  const incoming = structuredClone(before);
+  incoming.providers.providers[0].name = "Must not install";
+
+  await assert.rejects(domain.restoreSnapshot(incoming, { apps: ["not-an-app"] }), { code: "VALIDATION_FAILED" });
+  assert.equal(providers.list().providers[0].name, "Before invalid restore");
+});
+
 test("完整深链：Prompt/MCP 解析导入，MCP base64url 配置兼容", async (t) => {
   const { domain } = await fixture(t);
   const promptUrl = "ccswitch://v1/import?resource=prompt&app=codex&name=Review&content=Read%20first&enabled=true";

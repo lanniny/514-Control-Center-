@@ -93,7 +93,7 @@ export function normalizeStatus(value) {
   if (value === false) return "error";
   const raw = String(value ?? "unknown").toLowerCase().replaceAll("-", "_");
   if (["ok", "healthy", "ready", "connected", "online", "available", "consistent", "pass", "passed", "dormant"].includes(raw)) return "ok";
-  if (["warn", "warning", "degraded", "drift", "stale", "partial", "pending", "connecting", "external_unverified", "unconfigured", "disabled"].includes(raw)) return raw === "pending" || raw === "connecting" ? "pending" : "warning";
+  if (["warn", "warning", "degraded", "drift", "stale", "partial", "interrupted", "pending", "connecting", "external_unverified", "unconfigured", "disabled"].includes(raw)) return raw === "pending" || raw === "connecting" ? "pending" : "warning";
   if (["error", "failed", "down", "offline", "unavailable", "invalid", "blocked", "missing"].includes(raw)) return "error";
   return "unknown";
 }
@@ -114,7 +114,7 @@ export function runStatusText(value, run = null) {
     waiting_agent: "等待 Agent", recovery_required: "需人工恢复", queued: "已排队",
     executing: "执行中", running: "执行中", active: "执行中", integrating: "综合中",
     verifying: "验证中", complete: "已完成", completed: "已完成", succeeded: "已完成",
-    blocked: "已阻塞", failed: "失败", cancelled: "已取消", canceled: "已取消",
+    interrupted: "已中断，可继续", blocked: "已阻塞", failed: "失败", cancelled: "已取消", canceled: "已取消",
   }[status] ?? "未知";
 }
 

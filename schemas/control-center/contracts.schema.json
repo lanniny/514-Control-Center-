@@ -265,8 +265,9 @@
         "capabilities": {
           "type": "array",
           "minItems": 1,
+          "maxItems": 1,
           "items": {
-            "type": "string"
+            "const": "*"
           },
           "uniqueItems": true
         },
@@ -394,18 +395,12 @@
         "weights": {
           "type": "object",
           "required": [
-            "capability",
             "quality",
             "speed",
             "health",
             "cost"
           ],
           "properties": {
-            "capability": {
-              "type": "number",
-              "minimum": 0,
-              "maximum": 1
-            },
             "quality": {
               "type": "number",
               "minimum": 0,
@@ -436,7 +431,8 @@
             "required": [
               "id",
               "taskTypes",
-              "prefer"
+              "prefer",
+              "reason"
             ],
             "properties": {
               "id": {
@@ -453,6 +449,28 @@
                 "items": {
                   "type": "string"
                 }
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500
+              },
+              "constraints": {
+                "type": "object",
+                "required": [
+                  "allowedProviders"
+                ],
+                "properties": {
+                  "allowedProviders": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "string"
+                    },
+                    "uniqueItems": true
+                  }
+                },
+                "additionalProperties": false
               }
             },
             "additionalProperties": false
@@ -462,8 +480,7 @@
           "type": "object",
           "required": [
             "requiredFor",
-            "mustDifferFromPrimary",
-            "capabilities"
+            "mustDifferFromPrimary"
           ],
           "properties": {
             "requiredFor": {
@@ -475,14 +492,6 @@
             },
             "mustDifferFromPrimary": {
               "type": "boolean"
-            },
-            "capabilities": {
-              "type": "array",
-              "minItems": 1,
-              "items": {
-                "type": "string"
-              },
-              "uniqueItems": true
             }
           },
           "additionalProperties": false

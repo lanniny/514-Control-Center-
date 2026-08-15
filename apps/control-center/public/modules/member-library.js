@@ -343,14 +343,8 @@ export function createMemberLibrary({
     next.scrollIntoView({ block: "nearest" });
   }
 
-  function capabilityMarkup(profile, selected) {
-    const available = [...new Set(profile.capabilities || [])];
-    if (!available.length) return '<span class="subtle">底层席位未声明能力</span>';
-    const checked = new Set(selected || []);
-    return available.map((capability) => `<label class="chip" title="${escapeHtml(capability)}">
-      <input type="checkbox" value="${escapeHtml(capability)}"${checked.has(capability) ? " checked" : ""} />
-      <span>${escapeHtml(capability)}</span>
-    </label>`).join("");
+  function capabilityMarkup() {
+    return '<span class="chip is-on" title="成员能力不再按运行席位子集收窄">默认全能力</span>';
   }
 
   function eligibilityReasonText(reason) {
@@ -362,7 +356,6 @@ export function createMemberLibrary({
       "profile-disabled": "运行席位已停用",
       "command-not-configured": "运行席位缺少执行命令",
       "runtime-profile-missing": "绑定的运行席位不存在",
-      "runtime-capability-conflict": "成员能力超出运行席位能力包络",
       "runtime-profile-ineligible": "运行席位当前不可执行",
     };
     return labels[reason] || "运行席位当前不可执行";
@@ -386,7 +379,7 @@ export function createMemberLibrary({
     byId("member-default-effort-select").innerHTML = ["", ...efforts]
       .map((effort) => `<option value="${escapeHtml(effort)}"${effort === currentEffort ? " selected" : ""}>${escapeHtml(effort || "跟随运行席位")}</option>`)
       .join("");
-    byId("member-capabilities-wall").innerHTML = capabilityMarkup(profile, member.capabilities);
+    byId("member-capabilities-wall").innerHTML = capabilityMarkup();
 
     const mainBrainAllowed = member.mainBrainAllowed !== false;
     const coordinatorEligible = preferServerEligibility && typeof member.coordinatorEligible === "boolean"
@@ -506,7 +499,7 @@ export function createMemberLibrary({
       role: copy?.role || "",
       description: copy?.description || "",
       systemPrompt: copy?.systemPrompt || "",
-      capabilities: [...(copy?.capabilities || profile.capabilities || [])],
+      capabilities: ["*"],
       runtimeProfileId,
       defaultModel: copy?.defaultModel || profile.defaultModel || profile.model || null,
       defaultEffort: copy?.defaultEffort || profile.defaultEffort || null,
@@ -544,7 +537,7 @@ export function createMemberLibrary({
       role: byId("member-role-input").value.trim(),
       description: byId("member-description-input").value.trim(),
       systemPrompt: byId("member-system-prompt-input").value.trim(),
-      capabilities: [...byId("member-capabilities-wall").querySelectorAll('input[type="checkbox"]:checked')].map((input) => input.value),
+      capabilities: ["*"],
       runtimeProfileId: byId("member-runtime-profile-select").value,
       defaultModel: byId("member-default-model-input").value.trim() || null,
       defaultEffort: byId("member-default-effort-select").value || null,

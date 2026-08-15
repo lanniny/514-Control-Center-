@@ -395,11 +395,11 @@ token 驱动（277 处 var）→ 重写 :root 自动流转全站 + 末尾精修�
 
 - **三域契约**：`memberId` 是团队、主脑、run、turn、bus 与 session 使用的逻辑成员身份；`runtimeProfileId` 是 models、router 与 adapter registry 使用的运行席位键；`adapter.id` 是具体协议实现。唯一绑定链为 `memberId -> runtimeProfileId -> adapter.id`，三者禁止混用。
 - **成员库**：内置成员由 runtime catalog 投影，保持 `memberId === runtimeProfileId` 且绑定与删除冻结；`team-members.json` 只持久化内置元数据覆盖和服务端生成 `member-*` ID 的自定义成员。自定义成员支持创建、编辑、复制、删除，也允许多个逻辑成员共享同一运行席位。
-- **引用完整性**：仍被正常团队、拒载团队或不可验证的 `teams.json` 引用状态覆盖时，自定义成员禁止删除或更换 runtime binding；能力声明必须是绑定席位能力的子集。成员引用检查与团队 create/update 共用 TeamStore 串行队列，避免跨 Store TOCTOU。
+- **引用完整性**：仍被正常团队、拒载团队或不可验证的 `teams.json` 引用状态覆盖时，自定义成员禁止删除或更换 runtime binding；模型、运行席位和成员统一默认全能力，不再做能力子集资格检查。成员引用检查与团队 create/update 共用 TeamStore 串行队列，避免跨 Store TOCTOU。
 - **团队与主脑**：团队的 `members[]` 和 `coordinator` 均存逻辑 `memberId`；新建草稿可以为空，但持久化时至少需要一名可执行成员和一名 `coordinatorEligible` 主脑。内置 `team-514cc` 继续冻结；自定义团队可自由加入、移除成员并指定任意合格主脑。
 - **运行快照**：run 创建时固化 `teamMembers + teamRosterVersion: 1 + teamRoster`；同一 runtime profile 下的多个逻辑成员保持独立人格、默认档位和 native session，后续成员编辑不漂移既有 run。
 - **成员档位**：`defaultModel/defaultEffort` 属于逻辑成员；会话级 model/effort override 只覆盖起始成员，其余轮次使用各自成员默认值。模型目录按 `runtimeProfileId` 查询，最终值传给支持对应参数的 adapter。
-- **融合入口**：`#/team` 内的“成员库”工作面提供搜索、内置/自定义筛选、成员详情与提示词编辑、运行席位绑定、默认模型/推理强度、能力声明，以及加入或移出当前团队。“配置运行席位”深链到唯一配置图谱的 `control.models`；成员 Skill 入口以逻辑 `memberId` 聚焦能力矩阵列，目标进入 hash 并采用 latest-wins/fresh 语义。
+- **融合入口**：`#/team` 内的“成员库”工作面提供搜索、内置/自定义筛选、成员详情与提示词编辑、运行席位绑定、默认模型/推理强度、默认全能力状态，以及加入或移出当前团队。“配置运行席位”深链到唯一配置图谱的 `control.models`；成员 Skill 入口以逻辑 `memberId` 聚焦能力矩阵列，目标进入 hash 并采用 latest-wins/fresh 语义。
 
 ## Codex 桌面式环境舱与任务工具（2026-08-07）
 

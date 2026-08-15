@@ -79,6 +79,7 @@ test("legacy runtime profiles are projected as builtin logical members", async (
   assert.equal(members[0].provider, "openai");
   assert.equal(members[0].adapter, "codex-app-server");
   assert.equal(members[0].teamMemberEligible, true);
+  assert.ok(members.every((member) => member.capabilities.length === 1 && member.capabilities[0] === "*"));
 });
 
 test("custom CRUD persists metadata while runtime fields stay derived", async (t) => {
@@ -98,6 +99,7 @@ test("custom CRUD persists metadata while runtime fields stay derived", async (t
   assert.equal(created.builtin, false);
   assert.equal(created.provider, "openai");
   assert.equal(created.teamMemberEligible, true);
+  assert.deepEqual(created.capabilities, ["*"], "旧能力子集在写入边界迁移为默认全能力");
   assert.equal(created.createdAt, created.updatedAt);
 
   const disk = JSON.parse(await readFile(join(root, "team-members.json"), "utf8"));
@@ -140,7 +142,7 @@ test("builtin metadata and runtime overrides round-trip while identity and delet
   assert.equal(updated.id, "codex-technical");
   assert.equal(updated.runtimeProfileId, "codex-technical");
   assert.equal(updated.label, "烛 · 技术执行");
-  assert.deepEqual(updated.capabilities, ["coding", "review"]);
+  assert.deepEqual(updated.capabilities, ["*"]);
 
   state.catalog[0] = { ...state.catalog[0], role: "runtime-role-changed" };
   const reloaded = await new TeamMemberStore({
@@ -206,7 +208,7 @@ test("custom runtime rebinding resets omitted defaults and rejects stale explici
   assert.equal(rebound.defaultEffort, null);
 });
 
-test("custom members require a currently eligible runtime binding and a capability subset", async (t) => {
+test("custom members require an eligible runtime but capability subsets normalize to full access", async (t) => {
   const disabled = runtimeProfile({
     id: "disabled-profile",
     enabled: false,
@@ -223,18 +225,14 @@ test("custom members require a currently eligible runtime binding and a capabili
     () => store.create({ label: "禁用席", runtimeProfileId: "disabled-profile" }),
     { code: "RUNTIME_PROFILE_INELIGIBLE" },
   );
-  await assert.rejects(
-    () => store.create({
-      label: "越权席",
-      runtimeProfileId: "codex-technical",
-      capabilities: ["coding", "shell-root"],
-    }),
-    { code: "RUNTIME_CAPABILITY_CONFLICT" },
-  );
-  await assert.rejects(
-    () => store.update("codex-technical", { capabilities: ["coding", "unwired-tool"] }),
-    { code: "RUNTIME_CAPABILITY_CONFLICT" },
-  );
+  const migrated = await store.create({
+    label: "旧能力子集席",
+    runtimeProfileId: "codex-technical",
+    capabilities: ["coding", "shell-root"],
+  });
+  assert.deepEqual(migrated.capabilities, ["*"]);
+  const updated = await store.update("codex-technical", { capabilities: ["coding", "unwired-tool"] });
+  assert.deepEqual(updated.capabilities, ["*"]);
 });
 
 test("runtime invalidation retains saved members but fails eligibility and compatibility closed", async (t) => {
@@ -348,14 +346,12 @@ test("secret-like text, unsafe keys and structural bounds are rejected", async (
     }),
     { code: "VALIDATION_FAILED" },
   );
-  await assert.rejects(
-    () => store.create({
-      label: "能力过量席",
-      runtimeProfileId: "codex-technical",
-      capabilities: Array.from({ length: 65 }, (_, index) => `capability-${index}`),
-    }),
-    { code: "VALIDATION_FAILED" },
-  );
+  const migratedLegacyCapabilities = await store.create({
+    label: "旧能力数组迁移席",
+    runtimeProfileId: "codex-technical",
+    capabilities: Array.from({ length: 65 }, (_, index) => index === 64 ? { legacy: true } : `capability-${index}`),
+  });
+  assert.deepEqual(migratedLegacyCapabilities.capabilities, ["*"], "旧能力数组内容不得继续阻断成员加载或保存");
   const poisoned = JSON.parse('{"label":"污染席","runtimeProfileId":"codex-technical","__proto__":{"polluted":true}}');
   await assert.rejects(() => store.create(poisoned), { code: "VALIDATION_FAILED" });
   assert.equal(Object.prototype.polluted, undefined);

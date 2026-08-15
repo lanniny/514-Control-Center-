@@ -14,6 +14,7 @@ import { runDiffForRun } from "./src/run-diff.mjs";
 import {
   checkReachability,
   defaultBillingProbe,
+  fetchProviderModels,
   parseDeeplink,
   queryProviderUsage,
   queryUsageScript,
@@ -32,7 +33,13 @@ import { auditBusDiagnostics, MISSION_CONTROL_LIMITS, projectMissionControl } fr
 import { inspectRunWorkspace } from "./src/workspace-explorer.mjs";
 import { collectWorkbenchEnvironment, GitActionBroker } from "./src/workbench-environment.mjs";
 import { attestRunWorkspace, resolveRunWorkspace } from "./src/run-workspace.mjs";
-import { publicSourceEntries, redactSourcePaths as redactPublicSourcePaths } from "./src/run-sources.mjs";
+import { normalizeRunSources, publicSourceEntries, redactSourcePaths as redactPublicSourcePaths, visualSourceType } from "./src/run-sources.mjs";
+import {
+  cleanupClipboardImages,
+  MAX_CLIPBOARD_IMAGE_REQUEST_BYTES,
+  saveClipboardImage,
+} from "./src/clipboard-attachment.mjs";
+import { claimPendingClipboardUpload } from "./src/clipboard-lifecycle.mjs";
 import { SearchService } from "./src/search.mjs";
 import { MemoryService } from "./src/memory.mjs";
 import { scaffoldProject } from "./src/bootstrap.mjs";
@@ -258,6 +265,7 @@ function normalizeRuntimeSeatControls(profile, template) {
   }
   return {
     ...profile,
+    capabilities: ["*"],
     command: command || null,
     model: model || null,
     defaultEffort: defaultEffort || null,
@@ -281,7 +289,7 @@ function buildCustomRuntimeSeat(input) {
     adapter,
     command: template.defaultCommand ?? null,
     model: null,
-    capabilities: [...template.capabilityEnvelope],
+    capabilities: ["*"],
     defaultPermissionMode: template.defaultPermissionMode || "read-only",
     coordinatorEligible: false,
     quality: template.routingDefaults?.quality ?? 0.5,
@@ -541,6 +549,12 @@ function runForPublic(run) {
   if (Array.isArray(value.sources)) {
     value.sources = sources.map(({ kind, name }) => ({ kind, name }));
   }
+  delete value.activeInteractionSources;
+  delete value.pendingInteractionSources;
+  delete value.interactionStates;
+  if (Array.isArray(value.pendingSteer)) {
+    value.pendingSteer = value.pendingSteer.map(({ sources: _privateSources, ...steer }) => steer);
+  }
   return value;
 }
 
@@ -691,13 +705,16 @@ function secretReferenceStatus(health) {
 }
 
 function statusFor(error) {
-  if (["SOURCE_NOT_FOUND", "RUN_NOT_FOUND", "VERSION_NOT_FOUND", "APPROVAL_NOT_FOUND", "LEASE_NOT_FOUND", "AUTOMATION_NOT_FOUND", "RUNTIME_SEAT_NOT_FOUND", "REMOTE_HOST_NOT_FOUND", "BACKUP_NOT_FOUND"].includes(error.code)) return 404;
-  if (["STALE_BASE", "RUN_ACTIVE", "RUN_TERMINAL", "TURN_ACTIVE", "CONTROL_TRANSITION_FORBIDDEN", "APPROVAL_HASH_MISMATCH", "APPROVAL_IN_PROGRESS", "PLAN_REQUIRED", "PLAN_MISMATCH", "PLAN_EXPIRED", "PLAN_STALE", "APPROVAL_REQUIRED", "RECOVERY_REQUIRED", "RUNTIME_BUSY", "AGENT_ACTION_BUSY", "AUTOMATION_BUSY", "AUTOMATION_RECOVERY_REQUIRED", "PREFS_REVISION_MISMATCH", "MCP_RESTORE_CONFLICT", "MCP_QUARANTINE_CONFLICT", "MCP_SOURCE_CONFLICT", "TEAM_CATALOG_CONFLICT", "MEMBER_IN_USE", "MEMBER_RUNTIME_CONFLICT", "RUNTIME_SEAT_EXISTS", "RUNTIME_SEAT_IN_USE", "PROVIDER_IN_USE", "ASK_NOT_PENDING", "ASK_MISMATCH", "ASK_OWNER_MISMATCH", "ANSWER_IN_PROGRESS", "GIT_ACTION_FAILED", "REMOTE_HOST_DISABLED", "BACKUP_TARGET_CHANGED"].includes(error.code)) return 409;
+  if (["SOURCE_NOT_FOUND", "RUN_NOT_FOUND", "VERSION_NOT_FOUND", "APPROVAL_NOT_FOUND", "LEASE_NOT_FOUND", "AUTOMATION_NOT_FOUND", "RUNTIME_SEAT_NOT_FOUND", "REMOTE_HOST_NOT_FOUND", "BACKUP_NOT_FOUND", "MODEL_FETCH_NOT_FOUND"].includes(error.code)) return 404;
+  if (["STALE_BASE", "RUN_ACTIVE", "RUN_TERMINAL", "RUN_INTERRUPTING", "TURN_ACTIVE", "CONTROL_TRANSITION_FORBIDDEN", "APPROVAL_HASH_MISMATCH", "APPROVAL_IN_PROGRESS", "PLAN_REQUIRED", "PLAN_MISMATCH", "PLAN_EXPIRED", "PLAN_STALE", "APPROVAL_REQUIRED", "RECOVERY_REQUIRED", "RUNTIME_BUSY", "AGENT_ACTION_BUSY", "AUTOMATION_BUSY", "AUTOMATION_RECOVERY_REQUIRED", "PREFS_REVISION_MISMATCH", "MCP_RESTORE_CONFLICT", "MCP_QUARANTINE_CONFLICT", "MCP_SOURCE_CONFLICT", "TEAM_CATALOG_CONFLICT", "MEMBER_IN_USE", "MEMBER_RUNTIME_CONFLICT", "RUNTIME_SEAT_EXISTS", "RUNTIME_SEAT_IN_USE", "PROVIDER_IN_USE", "PROVIDER_RESERVED_NAME", "ASK_NOT_PENDING", "ASK_MISMATCH", "ASK_OWNER_MISMATCH", "ANSWER_IN_PROGRESS", "DUPLICATE_MESSAGE", "GIT_ACTION_FAILED", "REMOTE_HOST_DISABLED", "BACKUP_TARGET_CHANGED", "CODEX_MODEL_CATALOG_CONFLICT"].includes(error.code)) return 409;
   if (["CONFIRMATION_REQUIRED", "DEPLOYMENT_REQUIRED", "READ_ONLY_SOURCE", "FROZEN_BLOCK"].includes(error.code)) return 403;
-  if (["VALIDATION_FAILED", "RUNTIME_GRAPH_INVALID", "ADAPTER_MANIFEST_INVALID", "RUNTIME_CATALOG_INVALID", "RUNTIME_PROFILE_NOT_FOUND", "RUNTIME_PROFILE_INELIGIBLE", "RUNTIME_CAPABILITY_CONFLICT", "AGENT_ACTION_UNSUPPORTED", "PATH_BOUNDARY", "INVALID_PROMPT", "INVALID_JSON", "INVALID_DECISION", "INVALID_CWD", "INVALID_MODEL", "INVALID_EFFORT", "NOT_TEAM_MEMBER", "PROVIDER_NOT_FOUND", "PROVIDER_UNAVAILABLE", "NO_ROUTE", "NO_INDEPENDENT_ROUTE", "ROUND_LIMIT", "INSUFFICIENT_ROUNDS", "SENSITIVE_PROMPT", "UNSUPPORTED_APPROVAL", "UNSUPPORTED_PERMISSION", "POLICY_VIOLATION", "ADAPTER_UNAVAILABLE", "TRANSACTION_INCONSISTENT", "GIT_STATE_UNAVAILABLE", "NOTHING_STAGED", "NOTHING_TO_PUSH", "NO_UPSTREAM", "MULTIPLE_PUSH_TARGETS", "PUSH_URL_REWRITE", "DETACHED_HEAD", "WORKTREE_NOT_READY", "WORKTREE_INVALID", "INVALID_REMOTE", "INVALID_REMOTE_PATH", "REMOTE_ADAPTER_UNSUPPORTED", "BACKUP_NAME_INVALID", "BACKUP_TARGET_UNRESOLVED"].includes(error.code)) return 422;
-  if (error.code === "BODY_TOO_LARGE") return 413;
+  if (["VALIDATION_FAILED", "PROVIDER_CREDENTIAL_SCOPE_MISMATCH", "CODEX_MODEL_CATALOG_REQUIRED", "MODEL_FETCH_URL_INVALID", "MODEL_FETCH_HTTPS_REQUIRED", "MODEL_FETCH_INVALID_RESPONSE", "RUNTIME_GRAPH_INVALID", "ADAPTER_MANIFEST_INVALID", "RUNTIME_CATALOG_INVALID", "RUNTIME_PROFILE_NOT_FOUND", "RUNTIME_PROFILE_INELIGIBLE", "AGENT_ACTION_UNSUPPORTED", "PATH_BOUNDARY", "INVALID_PROMPT", "INVALID_JSON", "INVALID_DECISION", "INVALID_CWD", "INVALID_MODEL", "INVALID_EFFORT", "INVALID_IMAGE_DATA", "IMAGE_TYPE_MISMATCH", "UNSUPPORTED_IMAGE_TYPE", "CLIPBOARD_CLAIM_INVALID", "NOT_TEAM_MEMBER", "PROVIDER_NOT_FOUND", "PROVIDER_UNAVAILABLE", "NO_ROUTE", "NO_INDEPENDENT_ROUTE", "ROUND_LIMIT", "INTERACTION_STEP_LIMIT", "INTERACTION_INVALID", "INSUFFICIENT_ROUNDS", "SENSITIVE_PROMPT", "UNSUPPORTED_APPROVAL", "UNSUPPORTED_PERMISSION", "POLICY_VIOLATION", "ADAPTER_UNAVAILABLE", "TRANSACTION_INCONSISTENT", "GIT_STATE_UNAVAILABLE", "NOTHING_STAGED", "NOTHING_TO_PUSH", "NO_UPSTREAM", "MULTIPLE_PUSH_TARGETS", "PUSH_URL_REWRITE", "DETACHED_HEAD", "WORKTREE_NOT_READY", "WORKTREE_INVALID", "INVALID_REMOTE", "INVALID_REMOTE_PATH", "REMOTE_ADAPTER_UNSUPPORTED", "BACKUP_NAME_INVALID", "BACKUP_TARGET_UNRESOLVED"].includes(error.code)) return 422;
+  if (["BODY_TOO_LARGE", "IMAGE_TOO_LARGE", "MODEL_FETCH_RESPONSE_TOO_LARGE"].includes(error.code)) return 413;
   if (["EVENT_TOO_LARGE", "EVENT_HISTORY_TOO_LARGE"].includes(error.code)) return 413;
+  if (error.code === "CLIPBOARD_STORAGE_QUOTA_EXCEEDED") return 507;
   if (error.code === "PROCESS_TIMEOUT") return 408; // 系统选择框挂满 5 分钟未选属预期流程，不是服务端故障
+  if (error.code === "MODEL_FETCH_TIMEOUT") return 504;
+  if (["PROVIDER_TURN_INCOMPLETE", "MODEL_FETCH_UNAUTHORIZED", "MODEL_FETCH_UPSTREAM_FAILED", "MODEL_FETCH_REDIRECT_BLOCKED", "MODEL_FETCH_REDIRECT_LIMIT"].includes(error.code)) return 502;
   if (error.code === "OUTPUT_LIMIT") return 413;
   if (["AGENT_ACTION_CAPACITY", "MODEL_DISCOVERY_CAPACITY"].includes(error.code)) return 429;
   if (["EVENT_INDEX_BUSY", "HEALTH_PROBE_BUSY", "TEAM_STORE_UNAVAILABLE", "MEMBER_REFERENCE_CHECK_FAILED", "PROVIDER_REFERENCE_CHECK_FAILED", "REMOTE_UNAVAILABLE"].includes(error.code)) return 503;
@@ -1195,6 +1212,11 @@ async function api(request, response, url) {
   if (request.method === "GET" && pathname === "/api/providers") {
     return json(response, 200, { ...state.providers.list(), live: await state.providers.liveStatus() });
   }
+  // live 热加载轮询面：只回 live 回读 + 漂移，不带档案列表——供应商页可见时高频轮询也很轻。
+  // 外部工具/手改 CLI 配置（cc-switch、grok CLI 自己改档位）后，界面不必等手动刷新就跟上真实运行态。
+  if (request.method === "GET" && pathname === "/api/providers/live") {
+    return json(response, 200, { live: await state.providers.liveStatus() });
+  }
   if (request.method === "POST" && pathname === "/api/providers") {
     const input = await body(request);
     return json(response, 201, await withRuntimeSeatMutation(() => state.providers.create(input)));
@@ -1222,6 +1244,38 @@ async function api(request, response, url) {
   if (request.method === "POST" && pathname === "/api/providers/test-endpoints") {
     const input = await body(request);
     return json(response, 200, { results: await testEndpoints(input.urls ?? [], input.timeoutSecs) });
+  }
+  if (request.method === "POST" && pathname === "/api/providers/fetch-models") {
+    const input = await body(request, 16 * 1024);
+    const stored = input.providerId ? state.providers.get(String(input.providerId)) : null;
+    if (stored && !stored.apps?.codex && !stored.apps?.grokbuild) {
+      throw Object.assign(new Error("provider is not enabled for Codex or Grok Build"), { code: "VALIDATION_FAILED" });
+    }
+    const requestedBaseUrl = String(input.baseUrl ?? "").trim();
+    const baseUrl = requestedBaseUrl || stored?.baseUrl || "";
+    let apiKey = String(input.apiKey ?? "").trim();
+    if (!apiKey && stored?.apiKey) {
+      let requestedOrigin = null;
+      let storedOrigin = null;
+      try {
+        requestedOrigin = new URL(baseUrl).origin;
+        storedOrigin = new URL(stored.baseUrl).origin;
+      } catch {
+        // fetchProviderModels owns detailed URL validation below.
+      }
+      if (!requestedOrigin || requestedOrigin !== storedOrigin) {
+        throw Object.assign(new Error("请求地址已切换到不同来源；请重新输入 API Key 后再获取模型列表"), {
+          code: "PROVIDER_CREDENTIAL_SCOPE_MISMATCH",
+        });
+      }
+      apiKey = stored.apiKey;
+    }
+    return json(response, 200, await fetchProviderModels({
+      baseUrl,
+      apiKey,
+      isFullUrl: input.isFullUrl ?? stored?.meta?.isFullUrl ?? false,
+      customUserAgent: String(input.customUserAgent ?? stored?.meta?.proxyOverrides?.userAgent ?? ""),
+    }));
   }
   // 用量脚本内置模板（UsageScriptModal PRESET_TEMPLATES 搬运）
   if (request.method === "GET" && pathname === "/api/providers/usage-templates") {
@@ -1311,6 +1365,11 @@ async function api(request, response, url) {
     if (request.method === "GET") return json(response, 200, state.providers.getFailover(app));
     if (request.method === "PUT") return json(response, 200, await state.providers.setFailover(app, await body(request)));
   }
+  const providerDuplicateMatch = pathname.match(/^\/api\/providers\/([^/]+)\/duplicate$/);
+  if (request.method === "POST" && providerDuplicateMatch) {
+    const providerId = decodeURIComponent(providerDuplicateMatch[1]);
+    return json(response, 201, await withRuntimeSeatMutation(() => state.providers.duplicate(providerId)));
+  }
   const providerMatch = pathname.match(/^\/api\/providers\/([^/]+)$/);
   if (providerMatch) {
     const providerId = decodeURIComponent(providerMatch[1]);
@@ -1375,6 +1434,32 @@ async function api(request, response, url) {
   if (request.method === "GET" && runDiffMatch) {
     const run = state.orchestrator.get(runDiffMatch[1]);
     return json(response, 200, await runDiffForRun(run));
+  }
+  if (request.method === "POST" && pathname === "/api/system/clipboard-image") {
+    const input = await body(request, MAX_CLIPBOARD_IMAGE_REQUEST_BYTES);
+    return json(response, 201, await saveClipboardImage({ dataUrl: input?.dataUrl, dataRoot: state.dataRoot }));
+  }
+  if (request.method === "POST" && pathname === "/api/system/clipboard-image/claim") {
+    const input = await body(request);
+    return json(response, 200, await claimPendingClipboardUpload({
+      dataRoot: state.dataRoot,
+      path: input?.path,
+      claimToken: input?.claimToken,
+    }));
+  }
+  if (request.method === "POST" && pathname === "/api/system/clipboard-images/cleanup") {
+    const input = await body(request);
+    return json(response, 200, await cleanupClipboardImages({
+      dataRoot: state.dataRoot,
+      confirmation: input?.confirmation,
+      protectedPaths: () => [
+        ...state.orchestrator.list()
+          .flatMap((run) => Array.isArray(run.sources) ? run.sources : [])
+          .map((source) => source?.path)
+          .filter(Boolean),
+        ...(Array.isArray(input?.protectedPaths) ? input.protectedPaths : []),
+      ],
+    }));
   }
   if (request.method === "POST" && pathname === "/api/system/pick-directory") {
     // 弹本机资源管理器目录选择框（Console 是 loopback 本地服务的特权面）。
@@ -1669,6 +1754,11 @@ async function api(request, response, url) {
   if (request.method === "POST" && pathname === "/api/router/preview") {
     const input = await body(request);
     delete input.allowedProviders; // 白名单只能由服务端从 teamId 推导，不信客户端直提（烛 R10 致命2）
+    // 同理：multimodal 判据由服务端从 sources 推导，不信客户端直提的 hasVisualAttachment
+    const visualAttachmentType = visualSourceType(normalizeRunSources(input.sources));
+    delete input.sources;
+    input.hasVisualAttachment = visualAttachmentType !== null;
+    input.visualAttachmentType = visualAttachmentType;
     // 缺省解析内置团队——预览与 orchestrator.create 完全同契约（烛 R11 建议）
     const team = state.teams.get(String(input.teamId || "team-514cc"));
     const requestedProvider = input.requestedProvider == null ? null : String(input.requestedProvider).trim();
@@ -1676,8 +1766,17 @@ async function api(request, response, url) {
       ? state.teamMembers.get(requestedProvider)
       : null;
     const requestedAgentIds = normalizeRequestedAgentIds(input.requestedAgentIds, team.members);
-    const startAgentId = resolveStartAgentId(input.startAgentId, team.members, requestedAgentIds[0] || team.coordinator);
+    const explicitStartAgentId = String(input.startAgentId ?? "").trim();
+    const startAgentId = resolveStartAgentId(explicitStartAgentId || null, team.members, requestedAgentIds[0] || team.coordinator);
+    const startRuntimeProfileId = runtimeProfileIdForMember(startAgentId);
+    const requestedRuntimeProfileId = requestedProviderMember?.runtimeProfileId || requestedProvider || null;
+    if (explicitStartAgentId && requestedRuntimeProfileId && requestedRuntimeProfileId !== startRuntimeProfileId) {
+      throw Object.assign(new Error("requestedProvider must match the explicit startAgentId runtime profile"), {
+        code: "VALIDATION_FAILED",
+      });
+    }
     const preferredMemberIds = [
+      explicitStartAgentId ? startAgentId : requestedProviderMember?.id,
       requestedProviderMember?.id,
       startAgentId,
       ...requestedAgentIds,
@@ -1685,7 +1784,7 @@ async function api(request, response, url) {
     ].filter(Boolean);
     input.requestedAgentIds = requestedAgentIds;
     input.allowedProviders = [...new Set(team.members.map(runtimeProfileIdForMember))];
-    input.requestedProvider = requestedProviderMember?.runtimeProfileId || requestedProvider || undefined;
+    input.requestedProvider = requestedRuntimeProfileId || (explicitStartAgentId ? startRuntimeProfileId : undefined);
     return json(response, 200, projectRouteToTeamMembers(await state.router.preview(input), team, preferredMemberIds));
   }
   if (request.method === "GET" && pathname === "/api/approvals") return json(response, 200, { approvals: state.approvalBroker.list() });
@@ -1720,17 +1819,23 @@ async function api(request, response, url) {
 
   match = pathname.match(/^\/api\/runs\/([^/]+)$/);
   if (request.method === "GET" && match) return json(response, 200, runForPublic(state.orchestrator.get(decodeURIComponent(match[1]))));
-  match = pathname.match(/^\/api\/runs\/([^/]+)\/(cancel|messages)$/);
+  match = pathname.match(/^\/api\/runs\/([^/]+)\/(cancel|interrupt|messages)$/);
   if (request.method === "POST" && match) {
     const id = decodeURIComponent(match[1]);
-    return json(response, 200, runForPublic(match[2] === "cancel"
+    const action = match[2];
+    return json(response, 200, runForPublic(action === "cancel"
       ? await state.orchestrator.cancel(id)
-      : await state.orchestrator.continue(id, await body(request))));
+      : action === "interrupt"
+        ? await state.orchestrator.interrupt(id)
+        : await state.orchestrator.continue(id, await body(request))));
   }
   match = pathname.match(/^\/api\/runs\/([^/]+)\/sources$/);
   if (request.method === "POST" && match) {
     const input = await body(request);
-    return json(response, 200, runForPublic(await state.orchestrator.addSources(decodeURIComponent(match[1]), input?.sources)));
+    return json(response, 200, runForPublic(await state.orchestrator.addSources(
+      decodeURIComponent(match[1]),
+      input?.sources,
+    )));
   }
   match = pathname.match(/^\/api\/runs\/([^/]+)\/meta$/);
   if (request.method === "PATCH" && match) {
@@ -1984,6 +2089,8 @@ const server = createServer(async (request, response) => {
         candidates: error.candidates,
         references: error.references,
         conflicts: error.conflicts,
+        usage: error.usage,
+        limits: error.limits,
         runtimeProfileId: error.runtimeProfileId,
         eligibilityReason: error.eligibilityReason,
         automationStatus: error.automationStatus,

@@ -59,6 +59,13 @@ export function validateRuntimeGraph({ models, routing, permissions }) {
     for (const id of rule.prefer || []) {
       if (!known.has(id)) throw Object.assign(new Error(`routing rule ${rule.id} references unknown profile ${id}`), { code: "RUNTIME_GRAPH_INVALID" });
     }
+    const constrained = rule.constraints?.allowedProviders;
+    if (rule.constraints && (!String(rule.reason || "").trim() || !Array.isArray(constrained) || !constrained.length)) {
+      throw Object.assign(new Error(`special routing rule ${rule.id} requires a reason and allowedProviders`), { code: "RUNTIME_GRAPH_INVALID" });
+    }
+    for (const id of constrained || []) {
+      if (!known.has(id)) throw Object.assign(new Error(`routing rule ${rule.id} constrains unknown profile ${id}`), { code: "RUNTIME_GRAPH_INVALID" });
+    }
   }
   if (permissions.modes?.build?.approvalRequired !== true) {
     throw Object.assign(new Error("build mode must remain approval-bound"), { code: "RUNTIME_GRAPH_INVALID" });
@@ -90,7 +97,7 @@ export function createRuntimeMemberCatalog(profiles = [], { providerStore = null
       shortLabel: String(profile.shortLabel || profile.label || entry.label || entry.id),
       description: String(profile.description || ""),
       systemPrompt: String(profile.systemPrompt || ""),
-      capabilities: Object.freeze([...(profile.capabilities || [])]),
+      capabilities: Object.freeze(["*"]),
       defaultModel,
       defaultEffort: profile.defaultEffort ?? null,
       command: profile.command ?? null,

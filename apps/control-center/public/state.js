@@ -173,12 +173,17 @@ export const state = {
   providerPresets: null, // GET /api/providers/presets 一次性拉取（cc-switch 3.18 目录）
   providerPresetQuery: "",
   providerPresetSelected: null, // 预设带入的附加 meta（apiFormat/extraEnv/extraSettings/codexTop/codexProviderExtra/modelCatalog/icon/iconColor）
+  providerCodexCatalog: [], // Codex 高级折叠区的模型映射编辑态
+  providerFetchedModels: [], // 当前 Base URL/Key 拉取到的模型建议，仅会话内存态
   providerDeeplinkPreview: null,
   providerDialogTab: "basic",
   providerDialogTargetApp: "claude", // 新建由供应商面板当前应用标签锁定；编辑用于预览与测试
   providerDialogApps: {}, // 新建=仅目标应用；编辑=保留档案原有关联，避免无控件时静默抹除
   providerDialogEndpoints: [], // 对话框内 customEndpoints 编辑暂存
   providerDialogSnapshot: null, // 打开对话框时的表单快照（「重置」回到这里，不必关窗重开）
+  // live 热加载：打开对话框时算出的 live↔档案 漂移清单（[{field,label,live,stored}]）。
+  // 字段已按 live 预填，这里留档供通知条显示与「改回档案值」一键还原。
+  providerDialogLiveDrift: [],
   providerSortMode: false,
   // 本机 live 配置备份台账（GET /api/providers/backups）——与远程备份时间线同形态同操作
   providerBackups: null, // { backups: [...], targets: [...] }
@@ -219,7 +224,11 @@ export const state = {
   showSubagents: false,
   recentOnly: true,
   sessionPreview: null,
+  composerDraftId: globalThis.crypto?.randomUUID?.() || `draft-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+  attachmentContexts: new Map(),
+  activeAttachmentContextKey: null,
   attachments: [],
+  attachmentUploads: [],
   projectPrefs: { revision: 0, projects: {}, sessions: {} },
   projectPrefsStatus: "idle",
   projectPrefsError: null,

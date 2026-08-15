@@ -17,6 +17,17 @@ import { mountCcSwitchPanel } from "./modules/ccswitch-panel.js";
 import { attachJsonEditor } from "./modules/json-editor.js";
 import { createMemberLibrary } from "./modules/member-library.js";
 import { createRuntimeSeatManager } from "./modules/runtime-seat-manager.js";
+import {
+  attachmentContextKey,
+  bindClipboardImagePaste,
+  claimClipboardImage,
+  composerDraftHasActivity,
+  ensureAttachmentContext,
+  MAX_ATTACHMENTS_PER_CONTEXT,
+  queueClipboardImageUploads,
+  retryQuotaClipboardImageUploads,
+  uploadClipboardImage,
+} from "./modules/clipboard-attachments.js";
 import { renderRichContent } from "./rich-render.js";
 import { initCommandPalette as initCmdPalette, openCommandPalette as openForgePalette } from "./command-palette.js";
 import {
@@ -394,6 +405,7 @@ function cacheElements() {
     "provider-dialog",
     "provider-form",
     "provider-dialog-title",
+    "provider-tabs",
     "provider-name-input",
     "provider-baseurl-input",
     "provider-key-input",
@@ -429,8 +441,24 @@ function cacheElements() {
     "provider-proxy-body",
     "provider-codex-model",
     "provider-codex-effort",
+    "provider-codex-full-url",
+    "provider-codex-fetch-models-button",
+    "provider-codex-fetch-models-result",
+    "provider-codex-advanced-slot",
+    "provider-advanced-panel",
+    "provider-advanced-details",
+    "provider-codex-advanced",
+    "provider-codex-catalog-list",
+    "provider-codex-catalog-fetch-button",
+    "provider-codex-catalog-add-button",
     "provider-gemini-model",
+    "provider-grok-fields",
+    "provider-grokbuild-profile",
+    "provider-grokbuild-backend",
+    "provider-grokbuild-context",
     "provider-grokbuild-model",
+    "provider-grokbuild-fetch-models-button",
+    "provider-grokbuild-fetch-models-result",
     "provider-kimi-model",
     "provider-opencode-model",
     "provider-openclaw-model",
@@ -441,6 +469,7 @@ function cacheElements() {
     "provider-close-button",
     "provider-tools-button",
     "provider-sort-exit",
+    "provider-live-drift",
     "provider-endpoint-list",
     "provider-endpoint-input",
     "provider-endpoint-add-button",
@@ -480,6 +509,7 @@ function cacheElements() {
     "provider-preset-clear-button",
     "provider-preset-grid",
     "provider-preset-hint",
+    "provider-preset-description",
     "provider-reset-button",
     "provider-catalog-list",
     "provider-app-bar",
@@ -1030,6 +1060,15 @@ async function loadRuns() {
     state.selectedRunId = null;
     state.selectionClearedByUser = false; // 选中失效非用户意图，允许下方自动接力
   }
+  const draftContext = state.attachmentContexts.get(attachmentContextKey({ draftId: state.composerDraftId }));
+  if (!state.selectedRunId && !state.selectionClearedByUser && composerDraftHasActivity({
+    text: elements["task-input"]?.value,
+    context: draftContext,
+  })) {
+    // 首屏 runs 仍在加载时，LO 已开始输入或附图，语义已明确属于新任务草稿。
+    // 后台自动选中旧 run 会把发送目标偷换成续聊，并让附件 chip 看似消失。
+    state.selectionClearedByUser = true;
+  }
   // 自动选择只补「从未选过」的位：用户显式切新任务模式（selectionClearedByUser）时不得回盖——
   // 否则笔按钮/新任务后下一次 loadRuns 轮询把旧 run 重新刷回会话区（LO 2026-08-11）
   if (!state.selectedRunId && !state.selectionClearedByUser) {
@@ -1122,6 +1161,7 @@ function setConfigSurface(surface, { updateHash = true, focus = false, preserveM
   // 远程配置目标生效期间，程序化 surface 切换不得把本机三面图谱重新放出来
   if (state.configHostId) syncConfigHostView();
   if (next === "providers" && !state.providersData) void loadTeams().then(() => loadProviders());
+  reconcileProviderLivePoll(); // 供应商面进出即开停 live 轮询
   if (next === "capabilities" && !state.capabilitiesData) void loadCapabilities();
   if (next === "capabilities" && state.capabilitiesData) renderCapabilities();
   if (next === "sources") runtimeSeatManager?.setMode(state.runtimeWorkspaceMode, { focus: false });
@@ -1214,6 +1254,7 @@ function setView(view, {
     refreshTeamData();
     void refreshCollabFlow();
   }
+  reconcileProviderLivePoll(); // 离开配置页即停轮询；回到供应商面自动接上
   // 隐藏视图的数据只落 state；切到该视图时再消费，避免 SSE/轮询持续改写屏外 DOM。
   if (view === "overview") renderOverview();
   if (view === "workbench") {
@@ -4499,7 +4540,10 @@ function renderRuns() {
     persistTabs();
     renderTabs();
     renderMemberStrip();
-    for (const runId of removedRunIds) releaseRunHistoryIfUnreferenced(runId);
+    for (const runId of removedRunIds) {
+      releaseRunHistoryIfUnreferenced(runId);
+      state.attachmentContexts.delete(`run:${runId}`);
+    }
   }
   if (state.view !== "workbench") return;
   // 左栏分区（互斥）：会话=普通任务；正在工作=活跃 run；置顶/已归档=renderRailMetaSections（run + 原生会话混合）
@@ -6314,7 +6358,8 @@ function syncSideChatTarget(target = activeComposerTarget()) {
     input.disabled = !target.memberId;
   }
   if (submit) {
-    submit.disabled = !target.memberId;
+    // 带上在途锁：否则侧边聊天成了绕过锁的第二个提交入口（它就是 LO 那条消息被送出两遍的路径）
+    submit.disabled = composerSubmitInFlight || attachmentUploadInFlight() || !target.memberId;
     submit.title = target.memberId ? `发送给 ${name}` : "当前没有可用收件人";
     submit.setAttribute("aria-label", submit.title);
   }
@@ -7189,7 +7234,6 @@ function teamEligibilityReason(reason) {
     "adapter-not-team-eligible": "Adapter 未开放团队席位",
     "runtime-profile-missing": "绑定的运行席位不存在",
     "runtime-profile-ineligible": "绑定的运行席位不可用",
-    "runtime-capability-conflict": "能力声明超出运行席位",
     "member-main-brain-disabled": "成员未开放主脑资格",
     "adapter-not-coordinator-capable": "Adapter 不支持主脑职责",
     "seat-main-brain-disabled": "运行席位未开放主脑资格",
@@ -7737,7 +7781,7 @@ const PROVIDER_APP_META = Object.freeze([
   { app: "gemini", label: "Gemini", icon: "diamond", modelHint: (p) => p.models?.gemini?.model },
   { app: "grokbuild", label: "Grok Build", icon: "terminal", modelHint: (p) => p.models?.grokbuild?.model },
   { app: "kimi", label: "Kimi Code", icon: "moon", modelHint: (p) => p.models?.kimi?.model },
-  { app: "opencode", label: "OpenCode", icon: "code-2", modelHint: (p) => p.models?.opencode?.model, cumulative: true },
+  { app: "opencode", label: "OpenCode", icon: "code", modelHint: (p) => p.models?.opencode?.model, cumulative: true },
   { app: "openclaw", label: "OpenClaw", icon: "box", modelHint: (p) => p.models?.openclaw?.model, cumulative: true },
   { app: "hermes", label: "Hermes", icon: "bot", modelHint: (p) => p.models?.hermes?.model, cumulative: true },
 ]);
@@ -7804,6 +7848,7 @@ function startProvidersLoad() {
         if (state.configHostId && state.configSurface === "providers") renderConfigRemotePanel();
         runtimeSeatManager?.syncProviders();
         reconcileUsageAutoQuery();
+        reconcileProviderLivePoll();
         // 团队设置已并入团队页；档案晚到或改名时同步刷新绑定下拉。
         if (elements["team-settings-panel"]) {
           const editing = state.teams.find((team) => team.id === state.editingTeamId) ?? null;
@@ -7876,6 +7921,58 @@ function reconcileUsageAutoQuery() {
       timer: setInterval(() => void queryProviderUsageNow(id), Math.min(1440, minutes) * 60_000),
     });
   }
+}
+
+/* ===== live 配置热加载轮询 =====
+ * 外部改动（cc-switch、grok CLI 自己换档位、手改 config.toml）不会通知 Console，
+ * 界面只在手动刷新时才跟上，于是"正在跑 grok-4.6、界面写 grok-4.5"这种失真能挂很久。
+ * GET /api/providers/live 只回 live 回读（不带档案列表），供应商面可见时轮询足够轻；
+ * 切页/失焦即停，回到前台立刻补一次——不在后台空转。 */
+const PROVIDER_LIVE_POLL_MS = 8000;
+let providerLivePollTimer = null;
+let providerLiveInFlight = false;
+
+function providerLiveViewVisible() {
+  return state.view === "config"
+    && state.configSurface === "providers"
+    && !state.configHostId // 远程配置目标生效时，本机 live 不是当前关注面
+    && document.visibilityState !== "hidden";
+}
+
+/** 只刷新 live 段并重画列表；档案列表、健康态、编辑中的对话框都不动。 */
+async function refreshProviderLive() {
+  if (providerLiveInFlight || !state.providersData || state.providersData.error) return;
+  providerLiveInFlight = true;
+  try {
+    const payload = await request(API.providerLive);
+    if (!payload?.live || !state.providersData) return;
+    if (JSON.stringify(state.providersData.live ?? {}) === JSON.stringify(payload.live)) return;
+    state.providersData.live = payload.live;
+    renderProviders();
+    renderConfigTopology();
+  } catch {
+    // 轮询静默失败：live 读不到不该弹 toast 打扰 LO，下一拍自然重试（手动刷新仍会如实报错）
+  } finally {
+    providerLiveInFlight = false;
+  }
+}
+
+function reconcileProviderLivePoll() {
+  const wanted = providerLiveViewVisible();
+  if (wanted === Boolean(providerLivePollTimer)) return;
+  if (!wanted) {
+    clearInterval(providerLivePollTimer);
+    providerLivePollTimer = null;
+    return;
+  }
+  providerLivePollTimer = setInterval(() => {
+    if (!providerLiveViewVisible()) {
+      reconcileProviderLivePoll();
+      return;
+    }
+    void refreshProviderLive();
+  }, PROVIDER_LIVE_POLL_MS);
+  void refreshProviderLive(); // 进面立即对齐一次，不等第一拍
 }
 
 function providerById(id) {
@@ -7973,8 +8070,8 @@ function failoverBarMarkup(app, data, compatibleProviderCount = 0) {
  */
 function providerRowIdentityMarkup({ item, meta, health, latency = null, handle = "", badges = "" }) {
   const link = item.websiteUrl || item.baseUrl || "官方默认端点";
-  const model = meta.modelHint(item) || "模型：不动现有";
   const letter = escapeHtml((item.name || "?").trim().charAt(0).toUpperCase() || "?");
+  const partner = Boolean(item.meta?.isPartner) || item.category === "third_party";
   // 测速结果统一挂在端点行末的 chip 上（原远程侧把它塞进模型行，两侧位置不一致）
   const latencyChip = latency
     ? ` <span class="provider-latency${latency.latency == null ? " is-error" : ""}">${latency.latency != null ? `${latency.latency}ms` : escapeHtml(latency.error ?? "测速失败")}</span>`
@@ -7984,12 +8081,11 @@ function providerRowIdentityMarkup({ item, meta, health, latency = null, handle 
     <div class="provider-row-main">
       <div class="provider-row-title">
         <strong>${escapeHtml(item.name)}</strong>
+        ${partner ? '<span class="provider-partner-star" title="合作伙伴" aria-label="合作伙伴"><svg class="icon lucide"><use href="#lucide-star"></use></svg></span>' : ""}
         <span class="provider-health-dot is-${health.level}" title="${escapeHtml(health.title)}" role="status"></span>
         ${badges}
-        ${item.category && item.category !== "custom" ? `<span class="provider-badge is-category">${escapeHtml(PRESET_CATEGORY_LABELS[item.category] ?? item.category)}</span>` : ""}
       </div>
       <span class="provider-row-link" title="${escapeHtml(link)}">${escapeHtml(link)}${latencyChip}</span>
-      <span class="provider-meta-line">${escapeHtml(model)}${item.hasApiKey ? ` · Key ${escapeHtml(item.apiKeyMasked)}` : " · 无 Key"}</span>
       ${usageLineOf(item)}
     </div>`;
 }
@@ -8029,6 +8125,42 @@ function renderProviderAppBar() {
 /** 官方登录态虚拟行（live 检出 CLI 托管官方登录，如 kimi managed:kimi-code，且档案库无同端点档案）：
  *  形态对齐真实档案行让「正在使用」一眼可见；操作面只给「存为档案」——OAuth 凭据绝不落档案。 */
 function officialLiveRowMarkup({ app, liveInfo }) {
+  if (app === "codex") {
+    const authenticated = Boolean(liveInfo.official);
+    return `<article class="provider-row provider-official-row${authenticated ? " is-current" : ""}" data-provider-official-row="codex">
+      <span class="provider-drag-handle is-locked" title="内置供应商，不能排序、编辑或删除" aria-hidden="true"><svg class="icon lucide"><use href="#lucide-lock"></use></svg></span>
+      <span class="provider-row-icon provider-row-brand">${cliIconMarkup("codex", "cli-logo")}</span>
+      <div class="provider-row-main">
+        <div class="provider-row-title">
+          <strong>OpenAI Official</strong>
+          <span class="provider-badge is-live">Codex 登录</span>
+          ${authenticated ? '<span class="provider-health-dot is-operational" title="已检测到 Codex 官方登录" role="status"></span>' : '<span class="provider-health-dot is-unknown" title="尚未检测到 ChatGPT OAuth 登录" role="status"></span>'}
+        </div>
+        <a class="provider-row-link" href="https://chatgpt.com/codex" target="_blank" rel="noreferrer noopener">https://chatgpt.com/codex</a>
+      </div>
+      <div class="provider-row-actions" aria-label="内置供应商，无可用操作"></div>
+    </article>`;
+  }
+  if (app === "grokbuild") {
+    const active = Boolean(liveInfo.official);
+    return `<article class="provider-row provider-official-row${active ? " is-current" : ""}" data-provider-official-row="grokbuild">
+      <span class="provider-drag-handle is-locked" title="内置供应商，不能排序、编辑或删除" aria-hidden="true"><svg class="icon lucide"><use href="#lucide-lock"></use></svg></span>
+      <span class="provider-row-icon provider-row-brand">${cliIconMarkup("grok", "cli-logo")}</span>
+      <div class="provider-row-main">
+        <div class="provider-row-title">
+          <strong>Grok Official</strong>
+          <span class="provider-badge is-live">Grok 登录</span>
+          ${active ? '<span class="provider-health-dot is-operational" title="当前 live 配置回落到 Grok CLI 官方登录" role="status"></span>' : '<span class="provider-health-dot is-unknown" title="内置官方入口——启用后回落到 Grok CLI 自带登录" role="status"></span>'}
+        </div>
+        <a class="provider-row-link" href="https://x.ai/grok" target="_blank" rel="noreferrer noopener">https://x.ai/grok</a>
+      </div>
+      <div class="provider-row-actions">
+        ${active
+          ? '<button class="provider-state-pill" type="button" disabled title="当前已使用 Grok 官方登录"><span class="provider-state-pill-check" aria-hidden="true">✓</span>使用中</button>'
+          : '<button class="button secondary provider-card-action" type="button" data-provider-switch="grokbuild::__official__">启用</button>'}
+      </div>
+    </article>`;
+  }
   const label = PROVIDER_APP_META.find((entry) => entry.app === app)?.label ?? app;
   const letter = escapeHtml(label.trim().charAt(0).toUpperCase() || "?");
   const link = liveInfo.baseUrl || "官方默认端点";
@@ -8064,9 +8196,6 @@ function providerRowMarkup({ item, index, total, meta, app, current, liveInfo, q
     ? `<button class="icon-button provider-card-action" type="button" data-provider-move="${escapeHtml(app)}::${escapeHtml(item.id)}::-1" title="上移" aria-label="上移"${index === 0 ? " disabled" : ""}><svg class="icon lucide"><use href="#lucide-arrow-up"></use></svg></button>
        <button class="icon-button provider-card-action" type="button" data-provider-move="${escapeHtml(app)}::${escapeHtml(item.id)}::1" title="下移" aria-label="下移"${index === total - 1 ? " disabled" : ""}><svg class="icon lucide"><use href="#lucide-arrow-down"></use></svg></button>`
     : "";
-  const failoverButton = queueIndex === -1
-    ? `<button class="icon-button provider-card-action" type="button" data-provider-failover-add="${escapeHtml(app)}::${escapeHtml(item.id)}" title="加入故障转移队列" aria-label="加入故障转移队列"><svg class="icon lucide"><use href="#lucide-repeat"></use></svg></button>`
-    : `<button class="icon-button provider-card-action is-in-queue" type="button" data-provider-failover-remove="${escapeHtml(app)}::${escapeHtml(item.id)}" title="移出故障转移队列" aria-label="移出故障转移队列"><svg class="icon lucide"><use href="#lucide-repeat"></use></svg></button>`;
   const primaryLabel = item.category === "omo" || item.category === "omo-slim"
     ? "启用插件"
     : meta.cumulative
@@ -8083,6 +8212,13 @@ function providerRowMarkup({ item, index, total, meta, app, current, liveInfo, q
     ? `<button class="provider-state-pill" type="button" data-provider-switch="${escapeHtml(app)}::${escapeHtml(item.id)}"${storeBlocked ? " disabled" : ""} title="${isCurrent ? "live 配置当前指向此档案" : "live 配置与此档案一致（外部切换认亲）"}——点击重新投影（编辑档案后需重新启用）"><span class="provider-state-pill-check" aria-hidden="true">✓</span>${escapeHtml(currentStateLabel)}</button>`
     : `<button class="button secondary provider-card-action" type="button" data-provider-switch="${escapeHtml(app)}::${escapeHtml(item.id)}"${storeBlocked ? " disabled" : ""}>${primaryLabel}</button>`;
   const draggable = !sortMode && !storeBlocked;
+  // live 漂移徽标：正在跑的值和档案存的值不一致时直接摆在行上，不必点开编辑才发现
+  const drift = liveInfo.matchedProviderId === item.id ? (Array.isArray(liveInfo.drift) ? liveInfo.drift : []) : [];
+  const driftBadge = drift.length
+    // 文案刻意不用 ≠ 这类数学符号：LO 2026-08-14 一眼没读懂 "live≠档案 2"，
+    // 徽标必须自解释；"live" 沿用上方 live 行既有语汇，保持同一页内用词统一
+    ? `<span class="provider-badge is-live-drift" title="${escapeHtml(`live 配置与档案不一致：${drift.map((entry) => `${entry.label} live=${entry.live} / 档案=${entry.stored}`).join("；")}`)}">live ${drift.length} 项不同</span>`
+    : "";
   return `<article class="provider-row${isActive ? " is-current" : ""}" data-provider-row="${escapeHtml(item.id)}"${draggable ? ' draggable="true"' : ""}>
     ${providerRowIdentityMarkup({
       item,
@@ -8090,19 +8226,52 @@ function providerRowMarkup({ item, index, total, meta, app, current, liveInfo, q
       health,
       latency,
       handle: `<span class="provider-drag-handle" title="${draggable ? "拖拽排序" : "排序模式：用右侧箭头移动"}" aria-hidden="true"><span class="provider-drag-glyph">⠿</span></span>`,
-      badges: `${isCurrent ? '<span class="provider-badge is-current">当前</span>' : ""}`
-        + `${isLiveMatch ? '<span class="provider-badge is-live" title="live 配置与此档案一致（外部切换认亲）">live</span>' : ""}`
-        + `${queueIndex !== -1 ? `<span class="provider-badge is-failover" title="故障转移队列优先级">P${queueIndex + 1}</span>` : ""}`,
+      badges: `${queueIndex !== -1 ? `<span class="provider-badge is-failover" title="故障转移队列优先级">P${queueIndex + 1}</span>` : ""}${driftBadge}`,
     })}
     <div class="provider-row-actions">
       ${sortControls || primaryAction}
+      <button class="icon-button provider-card-action" type="button" data-provider-edit="${escapeHtml(item.id)}" title="编辑档案" aria-label="编辑档案"><svg class="icon lucide"><use href="#lucide-pencil"></use></svg></button>
+      <button class="icon-button provider-card-action" type="button" data-provider-duplicate="${escapeHtml(item.id)}" title="复制档案" aria-label="复制档案"${storeBlocked ? " disabled" : ""}><svg class="icon lucide"><use href="#lucide-copy"></use></svg></button>
       <button class="icon-button provider-card-action" type="button" data-provider-check="${escapeHtml(item.id)}" title="连通性检查" aria-label="连通性检查"><svg class="icon lucide"><use href="#lucide-activity"></use></svg></button>
-      ${item.baseUrl ? `<button class="icon-button provider-card-action" type="button" data-provider-speed="${escapeHtml(item.id)}" title="端点测速" aria-label="端点测速"><svg class="icon lucide"><use href="#lucide-gauge"></use></svg></button>` : ""}
-      ${failoverButton}
-      <button class="icon-button provider-card-action" type="button" data-provider-edit="${escapeHtml(item.id)}" title="编辑档案" aria-label="编辑档案"><svg class="icon lucide"><use href="#lucide-settings"></use></svg></button>
+      <button class="icon-button provider-card-action" type="button" data-provider-usage-config="${escapeHtml(item.id)}" title="用量查询" aria-label="用量查询"><svg class="icon lucide"><use href="#lucide-chart-column"></use></svg></button>
       <button class="icon-button provider-card-action" type="button" data-provider-delete="${escapeHtml(item.id)}" title="删除档案" aria-label="删除档案"><svg class="icon lucide"><use href="#lucide-trash-2"></use></svg></button>
     </div>
   </article>`;
+}
+
+/* ===== live 热加载：live 配置 = 「现在真的在跑什么」，档案 = 「下次启用会写什么」 =====
+ * 两者本来允许不同（编辑档案不会自动投影），但界面只显示档案值时，外部改动（cc-switch、
+ * CLI 自己改档位、手改 config.toml）就成了看不见的漂移——LO 2026-08-13：live 已是 grok-4.6，
+ * 编辑框仍显示 grok-4.5。修法不是"以档案为准"也不是"静默采用 live"，而是：
+ * live 认亲的档案，字段按 live 预填 + 通知条逐字段列出差异 + 一键「改回档案值」。
+ * 显示跟上真相，差异永不隐藏，还原只要一下。 */
+
+/** live 字段 → 对话框控件 id。用于 live 预填与「改回档案值」还原。 */
+const PROVIDER_LIVE_FIELD_INPUTS = Object.freeze({
+  claude: { model: "provider-claude-model", baseUrl: "provider-baseurl-input" },
+  codex: { model: "provider-codex-model", baseUrl: "provider-baseurl-input" },
+  gemini: { model: "provider-gemini-model", baseUrl: "provider-baseurl-input" },
+  grokbuild: {
+    profile: "provider-grokbuild-profile",
+    model: "provider-grokbuild-model",
+    apiBackend: "provider-grokbuild-backend",
+    contextWindow: "provider-grokbuild-context",
+    baseUrl: "provider-baseurl-input",
+  },
+  kimi: { model: "provider-kimi-model", baseUrl: "provider-baseurl-input" },
+  opencode: { model: "provider-opencode-model", baseUrl: "provider-baseurl-input" },
+  openclaw: { model: "provider-openclaw-model", baseUrl: "provider-baseurl-input" },
+  hermes: { model: "provider-hermes-model", baseUrl: "provider-baseurl-input" },
+});
+
+/**
+ * 档案在指定 app 上的 live 漂移清单（服务端 providerLiveDrift 算好，前端只读不重算）。
+ * 只有 live 认亲到这个档案才谈漂移——未认亲是「没关联」，不是「不一致」。
+ */
+function providerLiveDriftOf(providerId, app) {
+  const info = state.providersData?.live?.[app];
+  if (!providerId || !app || !info || info.matchedProviderId !== providerId) return [];
+  return (Array.isArray(info.drift) ? info.drift : []).filter((entry) => entry?.field in (PROVIDER_LIVE_FIELD_INPUTS[app] ?? {}));
 }
 
 /** 拖拽排序（HTML5 DnD）：dragover 标记插入位（前/后半行），drop 后按视觉顺序落 appOrder。 */
@@ -8166,7 +8335,9 @@ function renderProviders() {
     || (data.failoverQueue?.[app] ?? []).length
     || data.autoFailover?.[app],
   );
-  const globallyEmpty = !providers.some(providerBelongsToScheme) && !PROVIDER_APPS.some(appHasRuntimeState);
+  const globallyEmpty = !["codex", "grokbuild"].includes(providerActiveApp())
+    && !providers.some(providerBelongsToScheme)
+    && !PROVIDER_APPS.some(appHasRuntimeState);
   // 空库只保留内容区内的主 CTA；避免页头与空态重复出现两个“新增供应商”。
   if (elements["provider-add-button"]) elements["provider-add-button"].hidden = globallyEmpty || storeBlocked;
   let deckMarkup = "";
@@ -8185,18 +8356,27 @@ function renderProviders() {
     const orderRank = new Map(order.map((id, index) => [id, index]));
     const appProviders = providers
       .filter((item) => item.apps?.[app])
+      .filter((item) => !(app === "codex" && item.category === "official" && item.name === "OpenAI Official"))
+      .filter((item) => !(app === "grokbuild" && item.category === "official" && String(item.name ?? "").trim().toLowerCase() === "grok official"))
       .sort((a, b) => (orderRank.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (orderRank.get(b.id) ?? Number.MAX_SAFE_INTEGER));
     const rows = appProviders
       .map((item, index) => providerRowMarkup({ item, index, total: appProviders.length, meta, app, current, liveInfo, queue, sortMode, storeBlocked }))
       .join("");
-    // 官方登录态虚拟行置顶——同端点档案已在列表（认亲成功）时不重复合成
-    const officialRow = liveInfo.official && !appProviders.some((item) => item.id === liveInfo.matchedProviderId)
+    // 官方登录态虚拟行置顶——Codex / Grok 固定拥有；其它应用仅在 live 检出官方登录且未认亲时合成
+    const officialRow = app === "codex" || app === "grokbuild"
+      ? officialLiveRowMarkup({ app, liveInfo })
+      : liveInfo.official && !appProviders.some((item) => item.id === liveInfo.matchedProviderId)
       ? officialLiveRowMarkup({ app, liveInfo })
       : "";
-    const liveLine = liveInfo.official
+    const liveLine = app === "codex" && liveInfo.official
+      ? `live：OpenAI Official · ${escapeHtml(liveInfo.authModeLabel ?? "Codex 登录")}${liveInfo.model ? ` · 模型 ${escapeHtml(liveInfo.model)}` : ""}`
+      : app === "grokbuild" && liveInfo.official
+      ? `live：Grok Official · ${escapeHtml(liveInfo.authModeLabel ?? "Grok 官方登录")}${liveInfo.model ? ` · 模型 ${escapeHtml(liveInfo.model)}` : ""}`
+      : liveInfo.official
       ? `live：官方登录（managed:kimi-code）${liveInfo.baseUrl ? ` · ${escapeHtml(liveInfo.baseUrl)}` : ""}${liveInfo.model ? ` · 模型 ${escapeHtml(liveInfo.model)}` : ""}${liveInfo.matchedProviderId ? " · 端点已认亲" : " · 未关联档案"}`
       : liveInfo.baseUrl
-        ? `live：${escapeHtml(liveInfo.baseUrl)}${liveInfo.matchedProviderId ? "" : "（未认亲——外部手改或非档案切换）"}`
+        // live 模型也一并说出来：端点对得上、模型被外部换掉是最容易被忽略的漂移面
+        ? `live：${escapeHtml(liveInfo.baseUrl)}${liveInfo.model ? ` · 模型 ${escapeHtml(liveInfo.model)}` : ""}${liveInfo.matchedProviderId ? "" : "（未认亲——外部手改或非档案切换）"}${(liveInfo.drift ?? []).length ? `（与档案有 ${liveInfo.drift.length} 项不一致）` : ""}`
         : "未检测到自定义端点（CLI 可能使用官方登录）";
     const emptyOtherApps = PROVIDER_APP_META.filter((entry) => entry.app !== app
       && !providers.some((item) => item.apps?.[entry.app])
@@ -8461,6 +8641,101 @@ function setProviderDialogTab(tab) {
   }
 }
 
+function setProviderDialogMode(app) {
+  const codexMode = app === "codex";
+  const grokMode = app === "grokbuild";
+  const compactMode = codexMode || grokMode;
+  elements["provider-dialog"]?.classList.toggle("is-codex", compactMode);
+  elements["provider-dialog"]?.classList.toggle("is-grokbuild", grokMode);
+  if (elements["provider-tabs"]) elements["provider-tabs"].hidden = compactMode;
+  if (elements["provider-grok-fields"]) elements["provider-grok-fields"].hidden = !grokMode;
+  const advancedPanel = elements["provider-advanced-panel"];
+  const advancedDetails = elements["provider-advanced-details"];
+  const compactSlot = elements["provider-codex-advanced-slot"];
+  if (advancedPanel && advancedDetails) {
+    if (compactMode && compactSlot) {
+      compactSlot.append(advancedDetails);
+      advancedPanel.hidden = true;
+      advancedDetails.open = Boolean(state.editingProviderId || state.providerCodexCatalog.length);
+    } else {
+      advancedPanel.append(advancedDetails);
+      advancedDetails.open = true;
+    }
+  }
+  if (elements["provider-codex-advanced"]) elements["provider-codex-advanced"].hidden = !codexMode;
+  if (elements["provider-models-claude"]) elements["provider-models-claude"].hidden = compactMode || !state.providerDialogApps?.claude;
+  for (const field of elements["provider-advanced-details"]?.querySelectorAll(".provider-advanced-admin-grid > .field") ?? []) {
+    field.hidden = compactMode && !field.classList.contains("provider-api-format-field");
+  }
+  const previewBlock = elements["provider-config-json-block"];
+  if (previewBlock) previewBlock.open = !compactMode;
+  if (elements["provider-preset-description"]) {
+    elements["provider-preset-description"].textContent = compactMode
+      ? "仅保留自定义配置、Official 与 Micu 预设"
+      : "选中即自动填好端点与模型，只需再填 API Key";
+  }
+  if (elements["provider-preset-search"]) {
+    elements["provider-preset-search"].placeholder = compactMode ? "搜索 Official / Micu" : "搜索预设供应商";
+  }
+}
+
+function updateCodexBaseUrlHint() {
+  const hint = elements["provider-baseurl-hint"];
+  const app = state.providerDialogTargetApp;
+  if (!hint || (app !== "codex" && app !== "grokbuild")) return;
+  if (app === "grokbuild") {
+    hint.textContent = elements["provider-codex-full-url"].checked
+      ? "完整 URL 会原样投影给 Grok；模型测试直接请求该地址，模型列表由该地址安全推导 /v1/models。"
+      : "填写兼容 OpenAI Response 格式的服务端点地址；纯域名会自动补 /v1。";
+    return;
+  }
+  hint.textContent = elements["provider-codex-full-url"].checked
+    ? "完整 URL 会原样投影给 Codex；模型测试直接请求该地址，模型列表由该地址安全推导 /v1/models。"
+    : "填写兼容 OpenAI Responses 格式的服务端点地址；纯域名会自动补 /v1。";
+}
+
+function renderProviderCodexCatalog() {
+  const list = elements["provider-codex-catalog-list"];
+  if (!list) return;
+  const rows = state.providerCodexCatalog ?? [];
+  if (!rows.length) {
+    list.innerHTML = '<p class="subtle provider-codex-catalog-empty">尚未添加模型映射。</p>';
+    return;
+  }
+  list.innerHTML = `<div class="provider-codex-catalog-head" aria-hidden="true">
+      <span>菜单显示名</span><span>实际请求模型</span><span>上下文窗口</span><span></span>
+    </div>${rows.map((row, index) => `<div class="provider-codex-catalog-row" data-codex-catalog-row="${index}">
+      <input type="text" maxlength="120" data-codex-catalog-field="displayName" value="${escapeHtml(row.displayName ?? "")}" placeholder="例如：Kimi K2.5" aria-label="菜单显示名" />
+      <input type="text" maxlength="80" data-codex-catalog-field="model" value="${escapeHtml(row.model ?? "")}" placeholder="例如：kimi-k2.5" list="provider-catalog-list" aria-label="实际请求模型" />
+      <input type="number" min="1" max="100000000" data-codex-catalog-field="contextWindow" value="${escapeHtml(row.contextWindow ?? "")}" placeholder="128000" aria-label="上下文窗口" />
+      <button class="icon-button" type="button" data-codex-catalog-remove="${index}" title="删除模型映射" aria-label="删除模型映射"><svg class="icon lucide"><use href="#lucide-trash-2"></use></svg></button>
+    </div>`).join("")}`;
+}
+
+function collectProviderCodexCatalog() {
+  const list = elements["provider-codex-catalog-list"];
+  if (!list) return [];
+  return [...list.querySelectorAll("[data-codex-catalog-row]")].map((row) => {
+    const context = row.querySelector('[data-codex-catalog-field="contextWindow"]')?.value.trim() ?? "";
+    return {
+      displayName: row.querySelector('[data-codex-catalog-field="displayName"]')?.value.trim() ?? "",
+      model: row.querySelector('[data-codex-catalog-field="model"]')?.value.trim() ?? "",
+      ...(context ? { contextWindow: Number(context) } : {}),
+    };
+  }).filter((row) => row.model);
+}
+
+function addProviderCodexCatalogRow(seed = {}) {
+  state.providerCodexCatalog = [...(state.providerCodexCatalog ?? []), {
+    displayName: seed.displayName ?? seed.model ?? "",
+    model: seed.model ?? "",
+    contextWindow: seed.contextWindow ?? "",
+  }];
+  renderProviderCodexCatalog();
+  elements["provider-advanced-details"].open = true;
+  elements["provider-codex-catalog-list"]?.querySelector('[data-codex-catalog-row]:last-child [data-codex-catalog-field="displayName"]')?.focus();
+}
+
 function providerDialogSelection(provider, preferredApp = null) {
   const requestedApp = PROVIDER_APPS.includes(preferredApp) ? preferredApp : providerActiveApp();
   const firstLinkedApp = provider ? PROVIDER_APPS.find((app) => provider.apps?.[app]) : null;
@@ -8474,6 +8749,8 @@ function providerDialogSelection(provider, preferredApp = null) {
 
 function fillProviderDialog(provider, { app: preferredApp = null, prefill = null } = {}) {
   state.editingProviderId = provider?.id ?? null;
+  elements["provider-save-button"].disabled = false;
+  elements["provider-save-button"].title = "";
   const selection = providerDialogSelection(provider, preferredApp);
   state.providerDialogTargetApp = selection.targetApp;
   state.providerDialogApps = selection.apps;
@@ -8504,7 +8781,20 @@ function fillProviderDialog(provider, { app: preferredApp = null, prefill = null
   }
   elements["provider-codex-model"].value = provider?.models?.codex?.model ?? "";
   elements["provider-codex-effort"].value = provider?.models?.codex?.reasoningEffort ?? "";
+  elements["provider-codex-full-url"].checked = Boolean(provider?.meta?.isFullUrl);
+  state.providerCodexCatalog = (provider?.meta?.modelCatalog ?? []).map((entry) => ({ ...entry }));
+  state.providerFetchedModels = [];
+  renderProviderCodexCatalog();
+  elements["provider-codex-fetch-models-result"].textContent = "";
   elements["provider-gemini-model"].value = provider?.models?.gemini?.model ?? "";
+  const grokConfig = provider?.meta?.appConfig?.grokbuild ?? prefill?.appConfig?.grokbuild ?? {};
+  if (elements["provider-grokbuild-profile"]) elements["provider-grokbuild-profile"].value = grokConfig.profile ?? provider?.models?.grokbuild?.model ?? prefill?.models?.grokbuild?.model ?? "";
+  if (elements["provider-grokbuild-backend"]) elements["provider-grokbuild-backend"].value = grokConfig.apiBackend ?? "responses";
+  if (elements["provider-grokbuild-context"]) elements["provider-grokbuild-context"].value = grokConfig.contextWindow ?? 500000;
+  if (elements["provider-grokbuild-fetch-models-result"]) {
+    elements["provider-grokbuild-fetch-models-result"].textContent = "";
+    elements["provider-grokbuild-fetch-models-result"].classList.remove("is-error");
+  }
   for (const app of ["grokbuild", "kimi", "opencode", "openclaw", "hermes"]) {
     elements[`provider-${app}-model`].value = provider?.models?.[app]?.model ?? "";
   }
@@ -8553,6 +8843,11 @@ function fillProviderDialog(provider, { app: preferredApp = null, prefill = null
   elements["provider-cost-multiplier"].value = meta.costMultiplier ?? "";
   elements["provider-limit-daily"].value = meta.limitDailyUsd ?? "";
   elements["provider-limit-monthly"].value = meta.limitMonthlyUsd ?? "";
+  // ── live 热加载：认亲成功的档案，漂移字段改用 live 值预填（在配置预览干跑之前，
+  //    这样预览显示的也是"以 live 为基准保存后会写什么"）──
+  state.providerDialogLiveDrift = providerLiveDriftOf(provider?.id ?? null, selection.targetApp);
+  applyProviderLiveDriftValues("live");
+  renderProviderLiveDriftNotice("live");
   // ── 三波预设选择器：仅新建模式可见；编辑模式隐藏（预设附加 meta 已在档案里）──
   state.providerPresetSelected = null;
   state.providerPresetQuery = "";
@@ -8574,6 +8869,7 @@ function fillProviderDialog(provider, { app: preferredApp = null, prefill = null
   const hintLabel = PROVIDER_APP_META.find((entry) => entry.app === hintApp)?.label ?? "Claude";
   const baseurlHint = elements["provider-baseurl-hint"];
   if (baseurlHint) baseurlHint.textContent = `填写兼容 ${hintLabel} API 的服务端点地址，不要以斜杠结尾；留空 = 官方默认端点`;
+  if (hintApp === "codex" || hintApp === "grokbuild") updateCodexBaseUrlHint();
   // 「配置预览」区块：聚焦应用 + 首轮干跑生成（之后随表单输入防抖刷新）；手改/明文/重置状态全部清零
   const previewBlock = elements["provider-config-json-block"];
   if (previewBlock) previewBlock.dataset.previewApp = hintApp;
@@ -8586,7 +8882,48 @@ function fillProviderDialog(provider, { app: preferredApp = null, prefill = null
   providerPreviewState.rawDirty = false;
   renderProviderPreview();
   void loadProviderConfigPreview();
+  setProviderDialogMode(hintApp);
   setProviderDialogTab("basic");
+}
+
+/** 把漂移字段整批写成 live 值或档案值（source: "live" | "stored"）。 */
+function applyProviderLiveDriftValues(source) {
+  const inputs = PROVIDER_LIVE_FIELD_INPUTS[state.providerDialogTargetApp] ?? {};
+  for (const entry of state.providerDialogLiveDrift ?? []) {
+    const element = elements[inputs[entry.field]];
+    if (element) element.value = source === "live" ? entry.live : entry.stored;
+  }
+}
+
+/**
+ * live 漂移通知条：逐字段列出 live 值与档案值 + 双向一键切换。
+ * 差异必须看得见——静默采用 live 会悄悄改掉 LO 存的意图，静默显示档案又会骗人说"在跑 4.5"。
+ */
+function renderProviderLiveDriftNotice(source) {
+  const bar = elements["provider-live-drift"];
+  if (!bar) return;
+  const drift = state.providerDialogLiveDrift ?? [];
+  bar.hidden = drift.length === 0;
+  if (!drift.length) {
+    bar.innerHTML = "";
+    return;
+  }
+  bar.dataset.source = source;
+  const showingLive = source === "live";
+  const rows = drift.map((entry) => `<li>
+      <span class="provider-live-drift-field">${escapeHtml(entry.label)}</span>
+      <span class="provider-live-drift-value is-live">live ${escapeHtml(String(entry.live))}</span>
+      <span class="provider-live-drift-value">档案 ${escapeHtml(String(entry.stored))}</span>
+    </li>`).join("");
+  bar.innerHTML = `<div class="provider-live-drift-head">
+      <svg class="icon lucide" aria-hidden="true"><use href="#lucide-refresh-cw"></use></svg>
+      <strong>${showingLive ? `已按运行中的 live 配置填充 ${drift.length} 个字段` : `正在显示档案值（与 live 有 ${drift.length} 项不一致）`}</strong>
+      <button class="provider-link-button" type="button" data-provider-live-drift="${showingLive ? "stored" : "live"}">${showingLive ? "改回档案值" : "采用 live 值"}</button>
+    </div>
+    <ul class="provider-live-drift-list">${rows}</ul>
+    <p class="provider-live-drift-note">${showingLive
+      ? "CLI 正在用的就是 live 值；保存即把它写回档案。"
+      : "档案值是「下次启用会写入 CLI 的值」；保存后需再点一次「启用」才会覆盖 live。"}</p>`;
 }
 
 /** 端点列表渲染：url + 添加时间 + 测速结果 + 设为主端点/移除。 */
@@ -8688,6 +9025,7 @@ function collectProviderForm() {
       if (state.providerPresetSelected[key] != null) presetExtras[key] = state.providerPresetSelected[key];
     }
   }
+  if (state.providerDialogTargetApp === "codex") presetExtras.modelCatalog = collectProviderCodexCatalog();
   const payload = {
     name: elements["provider-name-input"].value.trim(),
     baseUrl: elements["provider-baseurl-input"].value.trim(),
@@ -8717,7 +9055,7 @@ function collectProviderForm() {
       },
       codex: { model: elements["provider-codex-model"].value.trim(), reasoningEffort: elements["provider-codex-effort"].value },
       gemini: { model: elements["provider-gemini-model"].value.trim() },
-      grokbuild: { model: elements["provider-grokbuild-model"].value.trim() },
+      grokbuild: { model: elements["provider-grokbuild-model"].value.trim() || elements["provider-grokbuild-profile"]?.value.trim() || "" },
       kimi: { model: elements["provider-kimi-model"].value.trim() },
       opencode: { model: elements["provider-opencode-model"].value.trim() },
       openclaw: { model: elements["provider-openclaw-model"].value.trim() },
@@ -8755,6 +9093,7 @@ function collectProviderForm() {
       },
       apiKeyField: elements["provider-apikey-field"].value,
       apiFormat: elements["provider-api-format"].value,
+      isFullUrl: elements["provider-codex-full-url"].checked,
       proxyOverrides: collectProviderProxyOverrides(),
       costMultiplier: numberOrNull(elements["provider-cost-multiplier"].value) ?? undefined,
       limitDailyUsd: numberOrNull(elements["provider-limit-daily"].value),
@@ -8764,6 +9103,21 @@ function collectProviderForm() {
   // 预设图标一并落档案（列表卡片色点/图标用）
   if (state.providerPresetSelected?.icon) payload.icon = state.providerPresetSelected.icon;
   if (/^#[0-9a-fA-F]{6}$/.test(state.providerPresetSelected?.iconColor ?? "")) payload.iconColor = state.providerPresetSelected.iconColor;
+  if (state.providerDialogTargetApp === "grokbuild") {
+    const context = Number(elements["provider-grokbuild-context"]?.value);
+    payload.meta.appConfig = {
+      ...(payload.meta.appConfig ?? {}),
+      grokbuild: {
+        ...(payload.meta.appConfig?.grokbuild ?? {}),
+        profile: elements["provider-grokbuild-profile"]?.value.trim() || payload.models.grokbuild.model || "grok-4.5",
+        apiBackend: elements["provider-grokbuild-backend"]?.value.trim() || "responses",
+        ...(Number.isInteger(context) && context > 0 ? { contextWindow: context } : { contextWindow: 500000 }),
+      },
+    };
+  }
+  if (state.providerPresetSelected?.isPartner) {
+    payload.meta.isPartner = true;
+  }
   return payload;
 }
 
@@ -8807,6 +9161,18 @@ async function saveProviderForm(event) {
   }
 }
 
+async function duplicateProvider(id) {
+  const provider = providerById(id);
+  if (!provider) return;
+  try {
+    const created = await request(API.providerDuplicate(id), { method: "POST" });
+    toast(`已复制为「${created.name}」`, "success");
+    await loadProviders({ fresh: true });
+  } catch (error) {
+    toast(`复制失败：${error.message}`, "error");
+  }
+}
+
 async function deleteProvider(id) {
   const provider = providerById(id);
   if (!provider) return;
@@ -8839,6 +9205,30 @@ async function deleteProvider(id) {
 }
 
 async function switchProvider(app, providerId) {
+  if (providerId === "__official__") {
+    if (app !== "grokbuild") return;
+    const proceed = await confirmAction({
+      eyebrow: "启用官方登录",
+      title: "将 Grok Build 切换到 Grok Official？",
+      rows: [
+        ["方式", "清空自定义模型表，回落到 Grok CLI 自带的 xAI 登录"],
+        ["凭据", "官方 OAuth 由 Grok CLI 托管，不会写入供应商档案"],
+        ["备份", "切换前自动备份现有 live 配置——可在下方「发布备份」一键回退"],
+      ],
+      warning: "Grok Build 的 live 配置将被改写；改写前的内容进「发布备份」时间线，随时可回退。",
+      confirmLabel: "启用",
+    });
+    if (!proceed) return;
+    try {
+      await request(API.providerSwitch, { method: "POST", body: { app, providerId } });
+      toast("Grok Build 已切换到 Grok Official——改写前的配置已进「发布备份」", "success", 6000);
+      state.providerBackupCache.clear();
+      await Promise.all([loadProviders({ fresh: true }), state.providerBackups ? loadProviderBackups({ fresh: true }) : Promise.resolve(null)]);
+    } catch (error) {
+      toast(`切换失败：${error.message}`, "error", 6000);
+    }
+    return;
+  }
   const provider = providerById(providerId);
   if (!provider) return;
   const meta = PROVIDER_APP_META.find((entry) => entry.app === app);
@@ -9202,6 +9592,52 @@ async function ensureProviderPresets() {
   return state.providerPresets;
 }
 
+async function fetchProviderCodexModels() {
+  const grokMode = state.providerDialogTargetApp === "grokbuild";
+  const result = grokMode ? elements["provider-grokbuild-fetch-models-result"] : elements["provider-codex-fetch-models-result"];
+  if (!result) return [];
+  const baseUrl = elements["provider-baseurl-input"].value.trim();
+  const apiKey = elements["provider-key-input"].value;
+  const canUseStoredKey = Boolean(state.editingProviderId);
+  if (!baseUrl || (!apiKey && !canUseStoredKey)) {
+    result.textContent = !baseUrl && !apiKey ? "请先填写 API Key 和请求地址。" : !apiKey ? "请先填写 API Key。" : "请先填写请求地址。";
+    result.classList.add("is-error");
+    return [];
+  }
+  const buttons = grokMode
+    ? [elements["provider-grokbuild-fetch-models-button"]].filter(Boolean)
+    : [elements["provider-codex-fetch-models-button"], elements["provider-codex-catalog-fetch-button"]].filter(Boolean);
+  for (const button of buttons) button.disabled = true;
+  result.textContent = "正在获取模型列表…";
+  result.classList.remove("is-error");
+  try {
+    const response = await request(API.providerFetchModels, {
+      method: "POST",
+      body: {
+        providerId: state.editingProviderId,
+        baseUrl,
+        apiKey,
+        isFullUrl: elements["provider-codex-full-url"].checked,
+        customUserAgent: elements["provider-proxy-ua"].value.trim(),
+      },
+    });
+    const models = Array.isArray(response.models) ? response.models : [];
+    state.providerFetchedModels = models;
+    elements["provider-catalog-list"].innerHTML = models
+      .map((entry) => `<option value="${escapeHtml(entry.id)}">${escapeHtml(entry.ownedBy ? `${entry.id} · ${entry.ownedBy}` : entry.id)}</option>`)
+      .join("");
+    result.textContent = models.length ? `已获取 ${models.length} 个模型。` : "接口返回空模型列表。";
+    result.classList.toggle("is-error", !models.length);
+    return models;
+  } catch (error) {
+    result.textContent = `获取失败：${error.message}`;
+    result.classList.add("is-error");
+    return [];
+  } finally {
+    for (const button of buttons) button.disabled = false;
+  }
+}
+
 const PRESET_CATEGORY_LABELS = Object.freeze({
   official: "官方",
   cn_official: "国产官方",
@@ -9213,19 +9649,62 @@ const PRESET_CATEGORY_LABELS = Object.freeze({
   "omo-slim": "OMO Slim",
 });
 
-/** 网格过滤：目标应用 ∩ 搜索词（name/websiteUrl）；官方置顶、primePartner 次之。 */
+function codexPresetAllowed(preset) {
+  const name = String(preset?.name ?? "").trim();
+  return name === "OpenAI Official"
+    || name === "Azure OpenAI"
+    || name.toLowerCase() === "micu";
+}
+
+function grokbuildPresetAllowed(preset) {
+  const name = String(preset?.name ?? "").trim();
+  return name === "Grok Official" || name.toLowerCase() === "micu";
+}
+
+function compactPresetRank(preset, officialName) {
+  if (preset?.syntheticCustom) return 0;
+  const name = String(preset?.name ?? "").trim();
+  if (name === officialName) return 1;
+  if (name === "Azure OpenAI") return 2;
+  if (name.toLowerCase() === "micu") return 3;
+  return Number.MAX_SAFE_INTEGER;
+}
+
+function codexPresetRank(preset) {
+  return compactPresetRank(preset, "OpenAI Official");
+}
+
+function grokbuildPresetRank(preset) {
+  return compactPresetRank(preset, "Grok Official");
+}
+
+/** 网格过滤：Codex / Grok 只保留自定义配置、Official 与 Micu；其他应用仍使用完整目录。 */
 function presetGridEntries() {
   const catalog = state.providerPresets ?? Object.fromEntries(PROVIDER_APPS.map((app) => [app, []]));
   const query = state.providerPresetQuery.trim().toLowerCase();
   const entries = [];
   for (const { app, label } of PROVIDER_APP_META) {
     if (!state.providerDialogApps?.[app]) continue;
+    if (app === "codex" || app === "grokbuild") {
+      const custom = {
+        app,
+        appLabel: label,
+        preset: { name: "自定义配置", category: "custom", syntheticCustom: true, iconColor: "#0b6bcb" },
+      };
+      if (!query || "自定义配置 custom".includes(query)) entries.push(custom);
+    }
     for (const preset of catalog[app] ?? []) {
+      if (app === "codex" && !codexPresetAllowed(preset)) continue;
+      if (app === "grokbuild" && !grokbuildPresetAllowed(preset)) continue;
       if (query && !`${preset.name} ${preset.websiteUrl ?? ""}`.toLowerCase().includes(query)) continue;
       entries.push({ app, appLabel: label, preset });
     }
   }
-  const rank = (e) => (e.preset.isOfficial ? 0 : e.preset.primePartner ? 1 : e.preset.isPartner ? 2 : 3);
+  const rank = (e) => e.app === "codex"
+    ? codexPresetRank(e.preset)
+    : e.app === "grokbuild"
+      ? grokbuildPresetRank(e.preset)
+      : (e.preset.isOfficial || e.preset.category === "official" ? 0 : e.preset.primePartner ? 1 : e.preset.isPartner ? 2 : 3);
   return entries.sort((a, b) => rank(a) - rank(b) || a.preset.name.localeCompare(b.preset.name));
 }
 
@@ -9242,12 +9721,12 @@ function renderProviderPresetGrid() {
     return;
   }
   grid.innerHTML = entries.map(({ app, appLabel, preset }, index) => {
-    const key = `${app}:${preset.name}`;
+    const key = `${app}:${preset.syntheticCustom ? "__custom__" : preset.name}`;
     const active = state.providerPresetSelected?.key === key ? " is-active" : "";
-    return `<button class="provider-preset-card${active}" type="button" role="option" aria-selected="${active ? "true" : "false"}" data-preset-key="${escapeHtml(key)}" title="${escapeHtml(preset.websiteUrl ?? preset.name)}">
+    return `<button class="provider-preset-card${active}" type="button" role="option" aria-selected="${active ? "true" : "false"}" data-preset-key="${escapeHtml(key)}"${preset.syntheticCustom ? ' data-preset-kind="custom"' : ""} title="${escapeHtml(preset.websiteUrl ?? preset.name)}">
       <span class="provider-preset-dot" data-preset-dot="${index}"></span>
       <span class="provider-preset-name">${escapeHtml(preset.name)}</span>
-      <span class="provider-preset-meta">${appLabel} · ${PRESET_CATEGORY_LABELS[preset.category] ?? preset.category ?? "第三方"}</span>
+      <span class="provider-preset-meta">${preset.syntheticCustom ? "手动填写所有字段" : `${appLabel} · ${PRESET_CATEGORY_LABELS[preset.category] ?? preset.category ?? "第三方"}`}</span>
     </button>`;
   }).join("");
   // 图标色点走 CSSOM（不落内联 style 属性）
@@ -9260,6 +9739,38 @@ function renderProviderPresetGrid() {
 
 /** 预设一键填充：基本字段 + 模型 + 附加 meta 暂存（保存时并入 payload），只留 API Key 给用户。 */
 function applyProviderPreset(app, preset) {
+  if (preset.syntheticCustom) {
+    state.providerPresetSelected = { key: `${app}:__custom__`, syntheticCustom: true };
+    elements["provider-name-input"].value = "";
+    elements["provider-baseurl-input"].value = "";
+    elements["provider-website-input"].value = "";
+    elements["provider-codex-model"].value = "";
+    elements["provider-codex-effort"].value = "";
+    if (elements["provider-grokbuild-profile"]) elements["provider-grokbuild-profile"].value = "";
+    if (elements["provider-grokbuild-backend"]) elements["provider-grokbuild-backend"].value = "responses";
+    if (elements["provider-grokbuild-context"]) elements["provider-grokbuild-context"].value = "500000";
+    if (elements["provider-grokbuild-model"]) elements["provider-grokbuild-model"].value = "";
+    elements["provider-category"].value = "custom";
+    elements["provider-api-format"].value = app === "grokbuild" || app === "codex" ? "openai_responses" : elements["provider-api-format"].value;
+    state.providerCodexCatalog = [];
+    state.providerFetchedModels = [];
+    renderProviderCodexCatalog();
+    elements["provider-catalog-list"].innerHTML = "";
+    elements["provider-save-button"].disabled = false;
+    elements["provider-save-button"].title = "";
+    elements["provider-preset-clear-button"].hidden = true;
+    const hint = elements["provider-preset-hint"];
+    if (hint) {
+      hint.hidden = false;
+      hint.textContent = "自定义配置需手动填写 API Key、请求地址和默认模型。";
+    }
+    elements["provider-name-input"].focus();
+    renderProviderPresetGrid();
+    refreshProviderConfigPreview();
+    return;
+  }
+  elements["provider-save-button"].disabled = false;
+  elements["provider-save-button"].title = "";
   state.providerPresetSelected = {
     key: `${app}:${preset.name}`,
     apiFormat: preset.apiFormat,
@@ -9292,10 +9803,19 @@ function applyProviderPreset(app, preset) {
   } else if (app === "codex") {
     elements["provider-codex-model"].value = models.model ?? "";
     if (models.reasoningEffort) elements["provider-codex-effort"].value = models.reasoningEffort;
+    state.providerCodexCatalog = (preset.modelCatalog ?? []).map((entry) => ({ ...entry }));
+    renderProviderCodexCatalog();
   } else if (app === "gemini") {
     elements["provider-gemini-model"].value = models.model ?? "";
   } else {
     elements[`provider-${app}-model`].value = models.model ?? "";
+  }
+  if (app === "grokbuild") {
+    const grokConfig = preset.appConfig ?? {};
+    if (elements["provider-grokbuild-profile"]) elements["provider-grokbuild-profile"].value = grokConfig.profile ?? models.model ?? "";
+    if (elements["provider-grokbuild-backend"]) elements["provider-grokbuild-backend"].value = grokConfig.apiBackend ?? "responses";
+    if (elements["provider-grokbuild-context"]) elements["provider-grokbuild-context"].value = grokConfig.contextWindow ?? 500000;
+    if (elements["provider-grokbuild-model"]) elements["provider-grokbuild-model"].value = models.model ?? grokConfig.profile ?? "";
   }
   // 模型目录 → datalist 候选
   const catalogList = elements["provider-catalog-list"];
@@ -9319,11 +9839,23 @@ function applyProviderPreset(app, preset) {
     const keyLink = preset.apiKeyUrl
       ? ` <a href="${escapeHtml(preset.apiKeyUrl)}" target="_blank" rel="noreferrer noopener">获取 API Key</a>`
       : "";
-    hint.innerHTML = `已按「${escapeHtml(preset.name)}」预设填充——只需填写 API Key。${keyLink}再点这张卡片可取消预设。`;
+    hint.innerHTML = `已按「${escapeHtml(preset.name)}」预设填充——只需填写 API Key。${keyLink}${app === "codex" || app === "grokbuild" ? "" : "再点这张卡片可取消预设。"}`;
   }
   const presetClear = elements["provider-preset-clear-button"];
-  if (presetClear) presetClear.hidden = false;
-  elements["provider-key-input"].focus();
+  if (presetClear) presetClear.hidden = app === "codex" || app === "grokbuild";
+  const immutableOfficial = (app === "codex" && preset.name === "OpenAI Official")
+    || (app === "grokbuild" && preset.name === "Grok Official");
+  elements["provider-save-button"].disabled = immutableOfficial;
+  elements["provider-save-button"].title = immutableOfficial
+    ? `${preset.name} 是内置登录项，无需添加且不能删除`
+    : "";
+  if (immutableOfficial && hint) {
+    hint.textContent = app === "grokbuild"
+      ? "Grok Official 已作为内置官方登录项固定置顶，无需添加，且不能编辑或删除。"
+      : "OpenAI Official 已作为内置 Codex 登录项固定置顶，无需添加，且不能编辑或删除。";
+  } else {
+    elements["provider-key-input"].focus();
+  }
   renderProviderPresetGrid();
 }
 
@@ -9334,6 +9866,8 @@ function applyProviderPreset(app, preset) {
 function clearProviderPreset({ silent = false } = {}) {
   if (!state.providerPresetSelected) return;
   state.providerPresetSelected = null;
+  elements["provider-save-button"].disabled = false;
+  elements["provider-save-button"].title = "";
   const catalogList = elements["provider-catalog-list"];
   if (catalogList) catalogList.innerHTML = "";
   const presetClear = elements["provider-preset-clear-button"];
@@ -11272,15 +11806,30 @@ function acknowledgeRecovery() {
 
 // 终态原因：failed/cancelled 时把 run.error / run.recoveryNote 挂到会话流末尾（normalizeRun ...item 已透传）。
 // 失败附"重新发起"——prompt 一键回填 composer 新任务模式，不用手动复制
+function failedRunResumableOwner(run, sessionMap) {
+  const attempts = Array.isArray(run.turnAttempts) ? run.turnAttempts : [];
+  return [run.executionOwnerId, ...Object.keys(sessionMap)].find((agentId) => {
+    const sessionId = agentId ? sessionMap[agentId] : null;
+    if (!sessionId) return false;
+    const attempt = [...attempts].reverse().find((item) => item?.agentId === agentId && item?.sessionId === sessionId);
+    // Grok 曾把预分配 UUID 当作已存在 session。新台账必须显式确认 resumable；
+    // 对其他 Adapter 和旧非 Grok run 保持既有 run.sessions 契约。
+    return attempt?.protocol === "grok-headless-resume" ? attempt.sessionResumable === true : true;
+  }) || null;
+}
+
 function runFailureMarkup(run) {
   if (!["failed", "cancelled", "canceled"].includes(run.status)) return "";
   const reasons = [...new Set([run.error, run.recoveryNote].map((text) => String(text ?? "").trim()).filter(Boolean))];
   if (!reasons.length) return "";
   const failed = run.status === "failed";
+  const sessionMap = runSessionsMap(run);
+  const resumableOwner = failed ? failedRunResumableOwner(run, sessionMap) : null;
   return `
     <div class="run-end-note ${failed ? "is-failed" : "is-cancelled"}" data-stream-key="tail:failure">
       <strong>${failed ? "任务失败" : "任务已取消"}</strong>
       ${reasons.map((reason) => `<span>${escapeHtml(redact(reason))}</span>`).join("")}
+      ${resumableOwner ? `<button class="button primary" type="button" data-focus-failed-session="${escapeHtml(resumableOwner)}">继续当前会话</button>` : ""}
       ${failed ? `<button class="button secondary retry-run-button" type="button" data-retry-run="${escapeHtml(run.id)}">以同一任务重新发起</button>` : ""}
       ${run.worktreePath ? "" : runDiffButtonMarkup(run)}
     </div>
@@ -11402,17 +11951,163 @@ function retryRun(id) {
   toast("任务内容已回填，确认后发送", "info");
 }
 
+function newComposerDraftId() {
+  return globalThis.crypto?.randomUUID?.() || `draft-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function currentAttachmentContextKey() {
+  const run = state.sessionPreview ? null : selectedRun();
+  return attachmentContextKey({ runId: run?.id ?? null, draftId: state.composerDraftId });
+}
+
+function activateAttachmentContext({ render = true } = {}) {
+  const key = currentAttachmentContextKey();
+  const context = ensureAttachmentContext(state.attachmentContexts, key);
+  const changed = state.activeAttachmentContextKey !== key;
+  state.activeAttachmentContextKey = key;
+  state.attachments = context.attachments;
+  state.attachmentUploads = context.uploads;
+  if (changed && render && elements["attach-chips"]) renderAttachments();
+  return context;
+}
+
+function clearAttachmentContext(key) {
+  const context = state.attachmentContexts.get(key);
+  if (context) {
+    context.attachments.splice(0);
+    context.uploads.splice(0);
+    state.attachmentContexts.delete(key);
+  }
+  if (state.activeAttachmentContextKey === key) state.activeAttachmentContextKey = null;
+}
+
 // 胶囊 composer 双模式：run=null → 新任务；run → 续聊当前原生会话（一个输入框，语义随上下文切换）
 function renderAttachments() {
+  const context = activateAttachmentContext({ render: false });
   const box = elements["attach-chips"];
-  box.hidden = !state.attachments.length;
-  box.innerHTML = state.attachments
+  const uploads = context.uploads;
+  box.hidden = !context.attachments.length && !uploads.length;
+  box.setAttribute("aria-busy", uploads.some((item) => item.status === "uploading") ? "true" : "false");
+  const saved = context.attachments
     .map((path, index) => {
       const name = String(path).replace(/[\\/]+$/, "").split(/[\\/]/).pop() || path;
       return `<span class="attach-chip" title="${escapeHtml(path)}">${lucideIcon("paperclip")}<span>${escapeHtml(name)}</span><button type="button" data-detach="${index}" aria-label="移除附件 ${escapeHtml(name)}">${lucideIcon("x")}</button></span>`;
     })
     .join("");
+  const pending = uploads.map((item) => {
+    const failed = item.status === "error";
+    const detail = failed ? item.error || "上传失败" : "正在上传";
+    const cleanup = failed && item.code === "CLIPBOARD_STORAGE_QUOTA_EXCEEDED"
+      ? `<button type="button" data-clipboard-cleanup aria-label="清理未引用的剪贴板文件" title="清理未引用的剪贴板文件">${lucideIcon("trash-2")}</button>`
+      : "";
+    return `<span class="attach-chip ${failed ? "is-error" : "is-uploading"}" title="${escapeHtml(detail)}">
+      ${lucideIcon(failed ? "triangle-alert" : "loader-circle")}
+      <span>${escapeHtml(item.name)}</span>
+      ${cleanup}
+      ${failed ? `<button type="button" data-upload-dismiss="${escapeHtml(item.id)}" aria-label="移除失败附件 ${escapeHtml(item.name)}">${lucideIcon("x")}</button>` : ""}
+    </span>`;
+  }).join("");
+  box.innerHTML = saved + pending;
+  syncSubmitButtonMode();
+  syncSideChatTarget();
   workbenchEnvironmentPanel?.refreshLocal?.();
+}
+
+function attachmentUploadInFlight() {
+  return activateAttachmentContext({ render: false }).uploads.some((item) => item.status === "uploading");
+}
+
+async function queueClipboardImages(files) {
+  const contextKey = currentAttachmentContextKey();
+  const context = ensureAttachmentContext(state.attachmentContexts, contextKey);
+  const outcome = await queueClipboardImageUploads({
+    files,
+    context,
+    upload: (file) => uploadClipboardImage(file, request),
+    claim: (result) => claimClipboardImage(result, request),
+    onChange: () => {
+      if (currentAttachmentContextKey() === contextKey) renderAttachments();
+    },
+  });
+  if (outcome.saved) toast(`${outcome.saved} 张剪贴板图片已附加`, "success", 2400);
+  if (outcome.claimFailed) toast(`${outcome.claimFailed} 张图片已附加，但存储确认失败；本页面仍会保护这些附件`, "warning", 6000);
+  if (outcome.failed) toast(`${outcome.failed} 张剪贴板图片附加失败，请查看附件状态`, "error", 5000);
+  if (outcome.rejected) toast(`当前会话最多附加 ${MAX_ATTACHMENTS_PER_CONTEXT} 个文件，已跳过 ${outcome.rejected} 个`, "warning", 5000);
+}
+
+async function cleanupClipboardStorage() {
+  const confirmed = await confirmAction({
+    eyebrow: "剪贴板存储",
+    title: "清理未被引用的剪贴板图片？",
+    rows: [
+      ["范围", "未被任务或本页面附件引用的受管图片，包括刚写入的文件"],
+      ["保留", "已登记任务来源与本页面所有草稿、会话附件"],
+    ],
+    warning: "其他浏览器页面尚未提交的附件不在保护范围；删除永久生效，不能撤销。",
+    confirmLabel: "永久清理",
+    danger: true,
+    confirmationText: "清理剪贴板",
+  });
+  if (!confirmed) return;
+  const protectedPaths = [...state.attachmentContexts.values()]
+    .flatMap((context) => context.attachments)
+    .filter(Boolean);
+  try {
+    const result = await request("/api/system/clipboard-images/cleanup", {
+      method: "POST",
+      body: { confirmation: "DELETE_UNREFERENCED_CLIPBOARD_IMAGES", protectedPaths },
+    });
+    const retried = { attempted: 0, saved: 0, failed: 0, quotaFailed: 0, claimFailed: 0, usage: null, limits: null };
+    for (const [contextKey, context] of state.attachmentContexts) {
+      const outcome = await retryQuotaClipboardImageUploads({
+        context,
+        upload: (file) => uploadClipboardImage(file, request),
+        claim: (uploadResult) => claimClipboardImage(uploadResult, request),
+        onChange: () => {
+          if (currentAttachmentContextKey() === contextKey) renderAttachments();
+        },
+      });
+      for (const key of ["attempted", "saved", "failed", "quotaFailed", "claimFailed"]) retried[key] += outcome[key];
+      retried.usage = outcome.usage || retried.usage;
+      retried.limits = outcome.limits || retried.limits;
+    }
+    renderAttachments();
+    const usage = retried.usage || result.usage || {};
+    const limits = retried.limits || result.limits || {};
+    if (retried.quotaFailed) {
+      toast(
+        `清理后仍超出剪贴板配额：${usage.files || 0}/${limits.files || 0} 个文件，${formatConfigBytes(usage.bytes || 0)}/${formatConfigBytes(limits.bytes || 0)}。请先从现有任务移除或归档不再需要的附件。`,
+        "warning",
+        9000,
+      );
+    } else if (retried.failed) {
+      toast(`已清理 ${result.deletedFiles || 0} 个文件，但仍有 ${retried.failed} 张图片重试失败；原图片已保留在附件栏。`, "error", 7000);
+    } else if (retried.claimFailed) {
+      toast(`已重新附加 ${retried.saved} 张图片，但其中 ${retried.claimFailed} 张存储确认失败；本页面仍会保护这些附件。`, "warning", 7000);
+    } else {
+      const retryNote = retried.saved ? `，并重新附加 ${retried.saved} 张图片` : "";
+      toast(`已清理 ${result.deletedFiles || 0} 个文件，释放 ${formatConfigBytes(result.freedBytes || 0)}${retryNote}`, "success", 5000);
+    }
+  } catch (error) {
+    toast(`剪贴板清理失败：${error.message}`, "error", 5000);
+  }
+}
+
+// 提交在途锁：createRun / continueSelectedRun 的请求期间置位。必须是模块级状态而不是只写在
+// 按钮上——setComposerMode 由 SSE 事件驱动、一轮跑十几次，只写按钮的锁会被它覆写掉，同一句话
+// 于是能被送出两遍（LO 2026-08-14 报障）。两个提交入口（主 composer / 侧边聊天）共用这把锁。
+let composerSubmitInFlight = false;
+
+/** 在途锁的唯一写入口：置位/复位后立刻同步两个提交入口的可用性。 */
+function setComposerSubmitInFlight(active) {
+  composerSubmitInFlight = Boolean(active);
+  const button = elements["submit-task-button"];
+  // 停止态永不被锁：发送在途时想中止，停止键正是此刻唯一有意义的动作（与审批挂起同理）
+  if (button) {
+    button.disabled = button.dataset.mode !== "stop"
+      && (composerSubmitInFlight || attachmentUploadInFlight() || button.dataset.waitingApproval === "1");
+  }
+  syncSideChatTarget(); // 侧边聊天的发送键复用主提交路径，必须跟随同一把锁
 }
 
 function setComposerMode(run, { waitingApproval = false } = {}) {
@@ -11458,8 +12153,12 @@ function setComposerMode(run, { waitingApproval = false } = {}) {
         : `直接交给 ${targetName} 执行`;
   elements["task-input"].disabled = waitingApproval;
   syncSubmitButtonMode(); // 发送/停止双态（LO 2026-08-10）：run 活跃 + 空输入 = 停止键
-  // 审批挂起时输入禁用，但停止键必须可用——它是此时唯一有意义的动作
-  elements["submit-task-button"].disabled = waitingApproval && elements["submit-task-button"].dataset.mode !== "stop";
+  // 审批挂起时输入禁用，但停止键必须可用——它是此时唯一有意义的动作。
+  // `composerSubmitInFlight` 必须参与裁决：本函数由 SSE 事件驱动，一轮里会跑十几次，
+  // 少了它就会把提交在途锁冲掉，于是同一句话能被送出两遍（LO 2026-08-14 报障：一条 19 字
+  // 消息占掉第 3、4 两轮，同一个问题被回答两遍还给出互相矛盾的结论）。
+  elements["submit-task-button"].dataset.waitingApproval = waitingApproval ? "1" : "0";
+  elements["submit-task-button"].disabled = elements["submit-task-button"].dataset.mode !== "stop" && (composerSubmitInFlight || attachmentUploadInFlight() || waitingApproval);
   elements["followup-agent"].disabled = waitingApproval;
   if (continuing && elements["followup-agent"].dataset.runId !== run.id) {
     // 发送给下拉按团队成员过滤（服务端已强制隔离）+ 预选主脑；仅切 run 时重建
@@ -11474,9 +12173,9 @@ function setComposerMode(run, { waitingApproval = false } = {}) {
   syncComposerTargetUi(target);
 }
 
-// 发送/停止双态键（LO 2026-08-10，对齐官方行为）：续聊 run 活跃 + 输入为空 → 停止键
-// （点击级联取消，走 cancelSelectedRun 既有确认弹窗）；有输入 → 发送键——
-// 轮间插话能力不被停止键吃掉。终态/新任务/预览态恒为发送键。
+// 发送/停止双态键（LO 2026-08-10，对齐官方行为）：续聊 run 活跃 + 输入为空 → 停止键。
+// 停止只中断当前 provider turn；会话头的独立取消按钮才会级联终止整场任务。
+// 有输入 → 发送键，轮间插话能力不被停止键吃掉。终态/新任务/预览态恒为发送键。
 function syncSubmitButtonMode() {
   const button = elements["submit-task-button"];
   if (!button) return;
@@ -11493,9 +12192,10 @@ function syncSubmitButtonMode() {
       ? '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor" /></svg>'
       : '<svg class="icon lucide"><use href="#lucide-arrow-up"></use></svg>';
   }
-  const label = stopMode ? "停止当前任务（级联中止本 run 全部 CLI 子进程）" : "发起协作";
+  const label = stopMode ? "停止当前回复（保留会话、授权与工作树）" : "发起协作";
   button.title = label;
   button.setAttribute("aria-label", label);
+  button.disabled = !stopMode && (composerSubmitInFlight || attachmentUploadInFlight() || button.dataset.waitingApproval === "1");
   // 停止模式必须跳过原生 required 校验（task-input 必填）：空输入正是停止键的使用场景，
   // 不挂 formnovalidate 浏览器会先弹「请填写此字段」，点击根本到不了 createRun 的停止拦截
   button.toggleAttribute("formnovalidate", stopMode);
@@ -11957,6 +12657,7 @@ function releaseConversationWindows(runId) {
 }
 
 function renderSelectedRun({ preserveStreamState = true } = {}) {
+  activateAttachmentContext();
   if (state.sessionPreview) {
     missionControlDock?.selectRun(null);
     syncRailToActiveRun();
@@ -12002,15 +12703,13 @@ function renderSelectedRun({ preserveStreamState = true } = {}) {
   // meta 行补编排模式与隔离态：social=默认社会编排；worktree 存在说明写盘已隔离。
   // run id 只露短码（全量 UUID 是审计场景才需要的技术细节，进 title 悬停）
   const metaParts = [`run ${String(run.id).slice(0, 8)}`, formatDate(run.createdAt)];
-  // 轮次预算常驻可见：以前只有撞到上限时才冒出一句英文报错，用户全程不知道还剩几轮
-  // （LO 2026-08-08：为什么会显示 maximum collaboration rounds reached）
-  if (Number(run.maxRounds) > 0) {
-    const used = Number(run.round) || 0;
-    const cap = Number(run.maxRounds);
-    const refunded = Number(run.roundsRefunded) || 0;
-    const budget = used >= cap ? `轮次 ${used}/${cap} · 已用满` : `轮次 ${used}/${cap}`;
-    metaParts.push(refunded ? `${budget} · 已退还 ${refunded}` : budget);
-  }
+  // round 是全会话审计序号，不封顶；真正受限的是当前用户交互内的自主步骤。
+  const totalRounds = Number(run.round) || 0;
+  const interactionSeq = Number(run.activeInteractionSeq ?? run.interactionSeq) || 1;
+  const interactionStep = Number(run.interactionStep) || 0;
+  const maxSteps = Number(run.maxStepsPerInteraction ?? run.maxRounds) || 0;
+  metaParts.push(`总轮次 ${totalRounds}`);
+  if (maxSteps > 0) metaParts.push(`交互 ${interactionSeq} · 本次步骤 ${interactionStep}/${maxSteps}`);
   if (agentId) metaParts.push(`独立页 · 只看 ${agentLabel(agentId)}`);
   if (run.orchestrationMode === "pipeline") metaParts.push("Pipeline 拓扑");
   if (run.worktreePath) metaParts.push(`wt ${String(run.worktreePath).split(/[\\/]/).pop()}`);
@@ -12019,7 +12718,7 @@ function renderSelectedRun({ preserveStreamState = true } = {}) {
   elements["workbench-run-status"].textContent = runStatusText(run.status, run);
   const successful = ["complete", "completed", "succeeded"].includes(run.status);
   elements["workbench-run-status"].className = `status-label is-${TERMINAL_RUN_STATES.has(run.status) ? (successful ? "ok" : "error") : "warning"}`;
-  elements["cancel-run-button"].disabled = !ACTIVE_RUN_STATES.has(run.status);
+  elements["cancel-run-button"].disabled = !ACTIVE_RUN_STATES.has(run.status) && run.status !== "interrupted";
   const waitingApproval = run.status === "waiting_approval" || run.buildApproval?.status === "pending";
   setComposerMode(run, { waitingApproval });
   renderRecoveryBar(run);
@@ -12180,6 +12879,24 @@ const GOVERNANCE_EVENTS = {
     text: (data) => `${agentLabel(data.agentId || "")} 第 ${data.round ?? "?"} 轮超时且原生轮已确认打断——已自动原生续跑（第 ${data.count ?? "?"}/${data.cap ?? "?"} 次，只读轮无写盘残留）`,
   },
   "run.authorization_revoked": { tone: "rose", text: (data) => `Build 授权已撤销：${data.reason || "运行时策略变更"}` },
+  // 写权限降级不能静默：LO 以为在写盘、其实成员只有只读，就会看到它反复"请确认是否要我执行"
+  "run.write_degraded": {
+    tone: "amber",
+    text: (data) => `${agentLabel(data.agentId || "")} 本轮降为只读——${
+      data.reason === "CAPABILITY_LEASE_INACTIVE" ? "执行租约已过期或被吊销"
+        : data.reason === "BUILD_APPROVAL_INVALID" ? "Build 审批已失效（工作区/执行者/权限档发生变化）"
+        : data.reason || "授权链不完整"
+    }。要继续写盘请重新发起 Build 任务或续期租约。`,
+  },
+  // 无产出轮：轮次与 token 都真实消耗了，静默就等于让人对着空白猜发生了什么
+  "agent.turn_unproductive": {
+    tone: "rose",
+    text: (data) => `第 ${data.round ?? "?"} 轮 ${agentLabel(data.agentId || "")}${
+      data.hasPartialOutput ? "异常中止；已有部分输出仅供排查，未形成交付" : "没有产出内容"
+    }${
+      data.stopReason ? `（provider 收束原因：${data.stopReason}）` : ""
+    }——该轮预算已消耗，任务不会按成功结算。`,
+  },
   // 轮次检查点降噪：正常相位流转（prepared/session_ready/submitting/submitted/completed）由
   // 活跃轮呼吸行实时呈现，注记只留 ambiguous——需要人明白"提交状态不明确"的那一条
   "agent.turn_checkpoint": { tone: "rose", text: (data, event) => (data.phase === "ambiguous" ? `第 ${data.round ?? "?"} 轮 ${agentLabel(data.agentId ?? event.agentId ?? "")} 提交状态不明确——自动重放已阻止，需人工确认` : null) },
@@ -12187,7 +12904,7 @@ const GOVERNANCE_EVENTS = {
   // 轮次退还必须看得见：不播报就等于悄悄改配额。可能触达 provider 的派发上限不随之放松
   "run.round_refunded": {
     tone: "amber",
-    text: (data) => `已退还一轮白烧配额（该轮停在「${data.phase ?? "未完成"}」未产出）· 轮次回到 ${data.round ?? "?"}/${data.maxRounds ?? "?"} · 累计退还 ${data.roundsRefunded ?? "?"} 次`,
+    text: (data) => `已退还一次未提交的自主步骤（停在「${data.phase ?? "未完成"}」）· 总轮次仍为 ${data.round ?? "?"} · 本次步骤 ${data.interactionStep ?? "?"}/${data.maxStepsPerInteraction ?? "?"}`,
   },
   // v3.6 社会模拟编排：agent 间路由可见性（bus.jsonl 的 [[msg:]] 被编排器路由时落一条注记）。
   // memo=全员黑板（violet 记号）、lo=向用户提问、team=广播——不用内部代号直译
@@ -12205,19 +12922,30 @@ const GOVERNANCE_EVENTS = {
   // ask/answer 挂起：团队向你提问，run 等待回答（在下方输入即恢复主循环）
   "run.waiting_input": { tone: "amber", text: (data) => `团队向你提问（来自 ${agentLabel(data.from || "")}），在下方回答即继续：${String(data.text || "").slice(0, 60)}${String(data.text || "").length > 60 ? "…" : ""}` },
   // ask 频次熔断（v3.7：agent 拿结论当提问的 ask→answer 死循环防护）
-  "run.ask_throttled": { tone: "rose", text: (data) => `${agentLabel(data.from || "")} 对你的提问已达单次任务上限（2 次），后续输出按结论处理，不再挂起等待回答` },
-  // v3.6 P3 治理三连：worktree 隔离建立/跳过 + run 级预算耗尽（后端事件已发，此处兑现可见性）
+  // 仅用于渲染旧 run 已持久化的历史事件；新 interaction 模型不再产生整场回答次数上限。
+  "run.ask_throttled": { tone: "rose", text: (data) => `${agentLabel(data.from || "")} 的旧版会话曾触发提问熔断；当前版本已取消整场回答次数上限` },
+  // v3.6 P3 治理三连：worktree 隔离建立/跳过 + 单次交互预算耗尽（后端事件已发，此处兑现可见性）
   "run.worktree_created": { tone: "amber", text: (data) => `已创建隔离工作树：写盘轮在 ${String(data.worktree || "").split(/[\\/]/).pop() || "worktree"} 进行，真实目录零污染` },
   "run.worktree_skipped": { tone: "rose", text: () => "本会话未设项目地址——写盘将发生在默认目录，无工作树隔离" },
-  "run.budget_exhausted": { tone: "rose", text: (data) => `run 累计成本已达硬顶（$${Number(data.costUsdTotal ?? 0).toFixed(2)}），已停止派发新轮` },
+  "run.budget_exhausted": { tone: "rose", text: (data) => `本次交互已知成本已达硬顶（$${Number(data.interactionCostUsd ?? 0).toFixed(2)}），自主派发已收束；可继续发送新消息` },
+  "run.interaction_steps_exhausted": { tone: "amber", text: (data) => `本次交互自主步骤已收束（${data.interactionStep ?? "?"}/${data.maxStepsPerInteraction ?? "?"}），仍有 ${data.queuedWork ?? 0} 项工作保留；发送下一条消息即可继续` },
+  "run.interrupted": { tone: "amber", text: () => "当前回复已中断，原生会话、工作树与有效授权均已保留，可直接继续对话" },
+  "run.interrupt_timeout": { tone: "rose", text: () => "当前 provider turn 在 30 秒内未确认退出；为避免并发占用，继续发送暂时被阻止" },
   // 先脱敏后截断（与 toolCallMarkup 同序）：截断可把密钥模式切半使 redact 失配；旧持久化队列的
   // prompt 不再过 continue 入口的密钥门，此处是最后一道
-  "run.steer_dropped": { tone: "rose", text: (data) => { const safe = redact(String(data.text || "")); return `轮间插话被丢弃（${data.reason === "ROUND_LIMIT" ? "已达最大协作轮次" : data.reason || "未知原因"}）：${safe.slice(0, 60)}${safe.length > 60 ? "…" : ""}`; } },
+  "run.steer_dropped": { tone: "rose", text: (data) => { const safe = redact(String(data.text || "")); return `轮间插话被丢弃（${data.reason === "ROUND_LIMIT" ? "旧版会话轮次限制" : data.reason || "未知原因"}）：${safe.slice(0, 60)}${safe.length > 60 ? "…" : ""}`; } },
 };
 
-// 轮次统计行文案：第 N 轮 · Agent · 模型 · tokens · 成本（缺哪项省哪项，旧事件无 tokens 也能渲）
+// 轮次统计行文案：第 N 轮 · Agent · 权限 · 模型 · tokens · 成本（缺哪项省哪项，旧事件也能渲）
 function turnMetaText(data, event) {
   const parts = [`第 ${data.round ?? "?"} 轮完成`, agentLabel(data.agentId ?? event.agentId ?? "")];
+  if (data.interactionStep != null && data.maxStepsPerInteraction != null) {
+    parts.push(`本次 ${data.interactionStep}/${data.maxStepsPerInteraction}`);
+  }
+  // 本轮到底能不能写盘必须一眼可见（LO 2026-08-14：第 1 轮能写、之后全被降成只读却毫无提示，
+  // 只看到成员反复"请确认是否要我立即执行"）。只读档位不标注——plan/review 本来就不写盘。
+  if (data.permissionMode === "workspace-write") parts.push("可写盘");
+  else if (data.permissionMode && data.permissionMode !== "plan" && data.permissionMode !== "read-only") parts.push(String(data.permissionMode));
   if (data.effectiveModel) parts.push(String(data.effectiveModel));
   // 空/空白串先挡（Number("")===Number(" ")===0 会伪造 "0 tokens"/"$0.00"）——缺哪项省哪项
   if (data.tokens != null && String(data.tokens).trim() !== "" && Number.isFinite(Number(data.tokens))) {
@@ -12888,7 +13616,7 @@ async function renderSocialTopology(run, generation) {
 
 function renderRouteDecision(route) {
   if (!route) {
-    elements["route-decision"].innerHTML = `<span class="route-model">尚未路由</span><p>任务提交后显示候选模型、能力匹配和守卫条件。</p>`;
+    elements["route-decision"].innerHTML = `<span class="route-model">尚未路由</span><p>任务提交后显示候选模型、路由权重和守卫条件。</p>`;
     return;
   }
   const name = route.primary?.name || "未选择";
@@ -13635,7 +14363,7 @@ function renderRouter() {
     elements["router-primary-decision"].innerHTML = `<span class="agent-avatar">--</span><div><span>主执行</span><strong>等待任务画像</strong></div>`;
     elements["router-decision-facts"].innerHTML = "";
     elements["router-reason-list"].innerHTML = "";
-    elements["router-candidate-body"].innerHTML = `<tr><td colspan="5" class="subtle">生成路由预览后显示全部候选与排除原因。</td></tr>`;
+    elements["router-candidate-body"].innerHTML = `<tr><td colspan="4" class="subtle">生成路由预览后显示全部候选与排除原因。</td></tr>`;
     return;
   }
   const primary = route.primary ?? { name: "未选择", adapter: "" };
@@ -13669,12 +14397,11 @@ function renderRouter() {
       return `<tr class="${candidate.excluded ? "is-excluded" : isSelected ? "is-selected" : ""}">
         <td><strong>${escapeHtml(candidate.label ?? candidate.id ?? "?")}</strong><br><span class="subtle mono">${escapeHtml(candidate.id ?? "")}</span></td>
         <td class="mono">${escapeHtml(String(candidate.score ?? "--"))}</td>
-        <td class="mono">${escapeHtml(String(candidate.capabilityMatch ?? "--"))}</td>
         <td><span class="status-label is-${normalizeStatus(healthStatus)}">${escapeHtml(statusText(healthStatus))}</span></td>
         <td>${escapeHtml(redact(verdict))}</td>
       </tr>`;
     })
-    .join("") || `<tr><td colspan="5" class="subtle">路由结果未携带候选明细。</td></tr>`;
+    .join("") || `<tr><td colspan="4" class="subtle">路由结果未携带候选明细。</td></tr>`;
 }
 
 function renderModels() {
@@ -13686,7 +14413,7 @@ function renderModels() {
             <tr>
               <td><span class="model-role">${escapeHtml(model.role)}</span></td>
               <td><strong>${escapeHtml(model.adapter)}</strong><br><span class="subtle">${escapeHtml(model.model)}</span></td>
-              <td>${escapeHtml(model.strengths.join(" · "))}</td>
+              <td>${escapeHtml(model.strengths.includes("*") ? "默认全能力" : model.strengths.join(" · "))}</td>
               <td><span class="status-label is-${status}">${escapeHtml(statusText(status))}</span></td>
               <td>${escapeHtml(formatDate(model.verifiedAt, "未验证"))}</td>
             </tr>`;
@@ -13730,8 +14457,11 @@ async function previewRoute(
       taskType,
       risk,
       needsCurrentSource: Boolean(currentSource),
+      // 附件随预览一起送：multimodal 由真实图/视频附件判定，服务端从 sources 推导（不信客户端直提标志）
+      sources: state.attachments.length ? [...state.attachments] : undefined,
       teamId: composerTarget.teamId || state.selectedTeamId, // 预览与正式路由同一团队契约
       startAgentId: composerTarget.memberId || undefined,
+      requestedProvider: composerTarget.memberId || undefined, // “直接发送”同时约束路由，不让推荐席位与执行 owner 分裂
       requestedAgentIds: requestedAgentIds.length ? [...requestedAgentIds] : undefined,
     },
   });
@@ -13768,9 +14498,9 @@ async function handleRouterSubmit(event) {
 
 async function createRun(event) {
   event.preventDefault();
-  // 停止模式：活跃 run + 空输入时发送键已切为停止键——级联取消（走既有确认弹窗），不走发送路径
+  // 停止模式只中断当前 provider turn；完整取消仍由会话头的「取消任务」显式执行。
   if (elements["submit-task-button"]?.dataset.mode === "stop") {
-    void cancelSelectedRun();
+    void interruptSelectedRun();
     return;
   }
   // 胶囊双模式分流：选中任务且非历史预览 → 续聊当前原生会话；否则新建任务
@@ -13784,11 +14514,13 @@ async function createRun(event) {
   // 档位对标 CLI：/effort 折叠下拉恒有值；权限折叠下拉（plan/build）；路由风险固定 medium
   const risk = "medium";
   const fullPrompt = effectivePrompt;
-  const submissionSources = [...state.attachments];
+  const attachmentContextKeyAtSubmit = currentAttachmentContextKey();
+  const attachmentContext = ensureAttachmentContext(state.attachmentContexts, attachmentContextKeyAtSubmit);
+  const submissionSources = [...attachmentContext.attachments];
   const submission = captureComposerConfig({ includeRequestedAgents: !legacy });
   const composerTarget = submission.target;
   if (!composerTarget.memberId) return toast("当前团队没有可发送的主脑或成员", "warning");
-  elements["submit-task-button"].disabled = true;
+  setComposerSubmitInFlight(true);
 
   let route = null;
   try {
@@ -13815,6 +14547,7 @@ async function createRun(event) {
         collaborationMode: "deep",
         orchestrationMode: legacy ? "pipeline" : undefined, // v3.6：默认社会模拟；/pipeline 走旧拓扑
         startAgentId: composerTarget.memberId, // 活动目标标签就是首个直接收件人
+        requestedProvider: composerTarget.memberId, // 直接收件人的 runtime profile 必须实际满足本轮能力
         requestedAgentIds: submission.requestedAgentIds.length ? [...submission.requestedAgentIds] : undefined,
         permissionMode: submission.permissionMode,
         teamId: composerTarget.teamId || state.selectedTeamId, // 会话按所选团队隔离能力配比
@@ -13834,8 +14567,8 @@ async function createRun(event) {
     syncSideChatDraftFromComposer();
     state.requestedAgentIds = [];
     renderRequestedAgentChips();
-    state.attachments = [];
-    renderAttachments();
+    clearAttachmentContext(attachmentContextKeyAtSubmit);
+    state.composerDraftId = newComposerDraftId();
     openTab(run.id, composerTarget.memberId);
     // 严格归属制（LO 2026-08-10）：选了目录的任务，项目未归属时自动归属创建团队——
     // 团队树下只挂归属项目，不自动归属就等于任务在跑、文件夹却在「未归属」组里
@@ -13846,7 +14579,7 @@ async function createRun(event) {
     toast(error.message, "error");
     appendDiagnostic(`任务创建失败：${error.message}`, "error");
   } finally {
-    elements["submit-task-button"].disabled = false;
+    setComposerSubmitInFlight(false);
   }
 }
 
@@ -13870,8 +14603,10 @@ async function continueSelectedRun(event) {
   const run = selectedRun();
   const prompt = elements["task-input"].value.trim();
   if (!run || !prompt) return;
-  const button = elements["submit-task-button"];
-  button.disabled = true;
+  const attachmentContextKeyAtSubmit = currentAttachmentContextKey();
+  const attachmentContext = ensureAttachmentContext(state.attachmentContexts, attachmentContextKeyAtSubmit);
+  const submissionSources = [...attachmentContext.attachments];
+  setComposerSubmitInFlight(true);
   try {
     // 恢复条确认后，本次续聊带服务端要求的 acknowledgeRecovery:true（orchestrator 584-590 的消费点）
     const acknowledge = state.recoveryAckRunId === run.id;
@@ -13885,12 +14620,8 @@ async function continueSelectedRun(event) {
       agentLock,
       acknowledgeRecovery: acknowledge,
     });
-    if (state.attachments.length) {
-      await request(`/api/runs/${encodeURIComponent(run.id)}/sources`, {
-        method: "POST",
-        body: { sources: [...state.attachments] },
-      });
-    }
+    // 文本与附件必须是一个服务端事务；先 /sources 再 /messages 会在第二段拒绝时把旧图遗留给下一条消息。
+    if (submissionSources.length) message.sources = submissionSources;
     const payload = await request(`/api/runs/${encodeURIComponent(run.id)}/messages`, {
       method: "POST",
       body: message,
@@ -13900,8 +14631,8 @@ async function continueSelectedRun(event) {
     state.recoveryAckRunId = null; // 确认标记一次性消费
     elements["task-input"].value = "";
     syncSideChatDraftFromComposer();
-    state.attachments = [];
-    renderAttachments();
+    clearAttachmentContext(attachmentContextKeyAtSubmit);
+    if (currentAttachmentContextKey() === attachmentContextKeyAtSubmit) renderAttachments();
     // 排队与即时送达如实区分：活跃 run 的 continue 进 pendingSteer，不是"已完成"
     const queuedDepth = Array.isArray(updated.pendingSteer) ? updated.pendingSteer.length : 0;
     toast(queuedDepth
@@ -13912,31 +14643,61 @@ async function continueSelectedRun(event) {
     toast(sendErrorText(error, run), "error");
     appendDiagnostic(`会话续接失败 ${run.id}: ${error.message}`, "error");
   } finally {
-    button.disabled = false;
+    setComposerSubmitInFlight(false);
   }
 }
 
 /**
  * 续接失败的人话文案。服务端错误按约定是英文技术串（statusFor 靠 code 分流），
- * 直接 toast 出来等于把内部实现丢给人看——ROUND_LIMIT 的原文 "maximum collaboration
- * rounds reached" 既没说上限是多少，也没说下一步该做什么（LO 2026-08-08 问的就是这条）。
+ * 直接 toast 出来等于把内部实现丢给人看；自主步骤收束不等于整场会话终止。
  */
 function sendErrorText(error, run) {
   const code = error?.payload?.error?.code ?? error?.code ?? "";
-  if (code === "ROUND_LIMIT") {
-    const used = Number(run?.round) || 0;
-    const cap = Number(run?.maxRounds) || used;
-    return `本任务已用满 ${used}/${cap} 轮协作上限，无法再续接。请「在新任务中继续」——原生会话历史会带过去，不会从零开始。`;
+  if (code === "PROVIDER_TURN_INCOMPLETE") {
+    return "Provider 本轮异常中止，部分输出仅供排查，任务未按成功结算。请先查看失败原因或恢复条。";
   }
+  if (code === "INTERACTION_STEP_LIMIT" || code === "ROUND_LIMIT") {
+    const used = Number(run?.interactionStep) || 0;
+    const cap = Number(run?.maxStepsPerInteraction ?? run?.maxRounds) || used;
+    return `本次交互的自主步骤已收束（${used}/${cap}），会话没有封顶；请直接发送下一条消息继续。`;
+  }
+  if (code === "DUPLICATE_MESSAGE") {
+    return "这句话已经在队列里了（还没被处理），不用再发一次——重复发送会让同一个问题被回答两遍，各烧一轮预算。";
+  }
+  if (code === "RUN_INTERRUPTING") return "当前回复仍在中断并等待 provider 退出，请稍候再继续发送。";
   if (code === "INSUFFICIENT_ROUNDS") {
     return `所选协作拓扑至少需要 ${Number(error?.payload?.error?.minimumRounds) || "更多"} 轮，请提高轮次上限或换更简单的拓扑。`;
   }
   return error?.message ?? "续接失败";
 }
 
-async function cancelSelectedRun() {
+async function interruptSelectedRun() {
   const run = selectedRun();
   if (!run || !ACTIVE_RUN_STATES.has(run.status)) return;
+  setComposerSubmitInFlight(true);
+  try {
+    const payload = await request(`/api/runs/${encodeURIComponent(run.id)}/interrupt`, {
+      method: "POST",
+      body: { source: "composer-stop" },
+    });
+    const updated = normalizeRun(payload?.run ?? payload, 0);
+    state.runs = [updated, ...state.runs.filter((item) => item.id !== updated.id)];
+    toast(updated.status === "recovery_required"
+      ? "Provider 尚未确认退出，继续已暂时锁住"
+      : "当前回复已中断，可在同一会话继续", updated.status === "recovery_required" ? "warning" : "success", 5000);
+    renderRuns();
+    renderSelectedRun();
+  } catch (error) {
+    toast(sendErrorText(error, run), "error");
+    appendDiagnostic(`会话中断失败 ${run.id}: ${error.message}`, "error");
+  } finally {
+    setComposerSubmitInFlight(false);
+  }
+}
+
+async function cancelSelectedRun() {
+  const run = selectedRun();
+  if (!run || (!ACTIVE_RUN_STATES.has(run.status) && run.status !== "interrupted")) return;
   const members = [...new Set([
     ...(Array.isArray(run.teamMembers) ? run.teamMembers : []),
     run.coordinatorId,
@@ -14257,7 +15018,7 @@ function pushEvent(event) {
   // 状态；user.message/agent.turn_started 让"确认恢复后继续"尽快翻页——直接续聊的 HTTP 要等整轮跑完
   // 才返回（orchestrator continue 返回 tracked），期间 state.runs 停在 recovery_required 旧快照，
   // 恢复条会被 SSE 重渲染反复挂回（LO 2026-08-09：确认后恢复条一整轮不消失）。
-  if (/run\.(created|updated|completed|failed|cancelled|steer_queued|steer_dropped|waiting_input|budget_exhausted|worktree_created|recovery_required|recovery_acknowledged|round_refunded|control_changed)|task\.|agent\.(turn_started|turn_completed)|user\.message|assistant\.message/i.test(event.type)) scheduleRunsReload();
+  if (/run\.(created|updated|completed|failed|cancelled|interrupted|interrupt_timeout|steer_queued|steer_dropped|waiting_input|budget_exhausted|worktree_created|recovery_required|recovery_acknowledged|round_refunded|control_changed)|task\.|agent\.(turn_started|turn_completed)|user\.message|assistant\.message/i.test(event.type)) scheduleRunsReload();
   if (/^automation\./.test(event.type)) void loadAutomations().catch(() => {});
   if (/config\.(changed|applied|rolled_back|updated)/i.test(event.type)) scheduleSourcesReload();
   if (/approval\.(pending|resolved|expired)/i.test(event.type)) void loadApprovals().catch(() => {});
@@ -15751,9 +16512,12 @@ function bindEvents() {
     event.preventDefault();
     const sideInput = byId("mission-side-chat-input");
     if (!sideInput?.value.trim() || !elements["task-input"]) return;
+    // 在途时明确告知而不是静默无反应：静默正是让人反复点、把同一句话送出两遍的原因
+    if (composerSubmitInFlight || attachmentUploadInFlight()) return toast("消息或附件仍在发送中，请稍候", "warning");
     elements["task-input"].value = sideInput.value;
     elements["task-input"].dispatchEvent(new Event("input", { bubbles: true }));
     elements["submit-task-button"]?.click();
+    sideInput.value = ""; // 草稿已交给主提交路径；留在框里只会诱导重发
   });
   NAV_MOBILE_QUERY.addEventListener("change", syncNavAccessibility);
   syncNavAccessibility();
@@ -16136,6 +16900,8 @@ function bindEvents() {
     if (leaseRevoke) void revokeCapabilityLease(leaseRevoke.dataset.leaseRevokeRun);
     const recoveryAck = event.target.closest("[data-recovery-ack]");
     if (recoveryAck) acknowledgeRecovery();
+    const failedSession = event.target.closest("[data-focus-failed-session]");
+    if (failedSession) selectComposerTarget(failedSession.dataset.focusFailedSession, { focusInput: true });
     // ask 回答卡：先切到提问成员标签，再聚焦输入框；否则发送会成为 steer。
     const focusAnswer = event.target.closest("[data-focus-answer]");
     if (focusAnswer) selectComposerTarget(focusAnswer.dataset.focusAnswer, { focusInput: true });
@@ -16376,6 +17142,15 @@ function bindEvents() {
     }
   });
 
+  // live 热加载：回到前台/切页立刻重算轮询归属，并补一次对齐（LO 在别处改完 CLI 配置切回来即见真值）
+  document.addEventListener("visibilitychange", () => {
+    reconcileProviderLivePoll();
+    if (providerLiveViewVisible()) void refreshProviderLive();
+  });
+  window.addEventListener("focus", () => {
+    if (providerLiveViewVisible()) void refreshProviderLive();
+  });
+
   window.addEventListener("hashchange", () => {
     const route = parseForgeRoute();
     if (!FORGE_VIEW_TITLES[route.view]) return;
@@ -16489,12 +17264,23 @@ function bindEvents() {
   elements["attach-button"].addEventListener("click", async () => {
     // ➕ 附件：服务端原生文件选择框（多选），路径入 chips、提交时并入 prompt
     const button = elements["attach-button"];
+    const contextKey = currentAttachmentContextKey();
+    const context = ensureAttachmentContext(state.attachmentContexts, contextKey);
     button.disabled = true;
     try {
       const result = await request("/api/system/pick-file", { method: "POST" });
       if (Array.isArray(result.paths) && result.paths.length) {
-        for (const path of result.paths) if (!state.attachments.includes(path)) state.attachments.push(path);
-        renderAttachments();
+        let rejected = 0;
+        for (const path of result.paths) {
+          if (context.attachments.includes(path)) continue;
+          if (context.attachments.length + context.uploads.length >= MAX_ATTACHMENTS_PER_CONTEXT) {
+            rejected += 1;
+            continue;
+          }
+          context.attachments.push(path);
+        }
+        if (currentAttachmentContextKey() === contextKey) renderAttachments();
+        if (rejected) toast(`当前会话最多附加 ${MAX_ATTACHMENTS_PER_CONTEXT} 个文件，已跳过 ${rejected} 个`, "warning", 5000);
       }
     } catch (error) {
       toast(`附件选择失败：${error.message}`, "error");
@@ -16503,9 +17289,22 @@ function bindEvents() {
     }
   });
   elements["attach-chips"].addEventListener("click", (event) => {
+    const context = activateAttachmentContext({ render: false });
+    const cleanup = event.target.closest("[data-clipboard-cleanup]");
+    if (cleanup) {
+      void cleanupClipboardStorage();
+      return;
+    }
     const detach = event.target.closest("[data-detach]");
-    if (!detach) return;
-    state.attachments.splice(Number(detach.dataset.detach), 1);
+    if (detach) {
+      context.attachments.splice(Number(detach.dataset.detach), 1);
+      renderAttachments();
+      return;
+    }
+    const dismiss = event.target.closest("[data-upload-dismiss]");
+    if (!dismiss) return;
+    const index = context.uploads.findIndex((item) => item.id === dismiss.dataset.uploadDismiss);
+    if (index >= 0) context.uploads.splice(index, 1);
     renderAttachments();
   });
   // 会话向导：源文件夹选择区（原生目录框，与会话对话框旧「浏览…」同接口）
@@ -16805,6 +17604,25 @@ function bindEvents() {
       if (provider) openProviderDialog(provider);
       return;
     }
+    const duplicateButton = event.target.closest("[data-provider-duplicate]");
+    if (duplicateButton) {
+      void duplicateProvider(duplicateButton.dataset.providerDuplicate);
+      return;
+    }
+    const usageConfigButton = event.target.closest("[data-provider-usage-config]");
+    if (usageConfigButton) {
+      const provider = providerById(usageConfigButton.dataset.providerUsageConfig);
+      if (provider) {
+        openProviderDialog(provider);
+        if (state.providerDialogTargetApp === "codex" || state.providerDialogTargetApp === "grokbuild") {
+          elements["provider-advanced-details"].open = true;
+          elements["provider-usage-enabled"]?.focus();
+        } else {
+          setProviderDialogTab("usage");
+        }
+      }
+      return;
+    }
     const deleteButton = event.target.closest("[data-provider-delete]");
     if (deleteButton) {
       void deleteProvider(deleteButton.dataset.providerDelete);
@@ -16952,6 +17770,15 @@ function bindEvents() {
       setProviderDialogTab(tab.dataset.providerTab);
       return;
     }
+    // live 漂移通知条：在 live 值与档案值之间来回切换（只改表单，保存前不落盘）
+    const driftToggle = event.target.closest("[data-provider-live-drift]");
+    if (driftToggle) {
+      const next = driftToggle.dataset.providerLiveDrift === "live" ? "live" : "stored";
+      applyProviderLiveDriftValues(next);
+      renderProviderLiveDriftNotice(next);
+      void loadProviderConfigPreview();
+      return;
+    }
     const endpointRemove = event.target.closest("[data-endpoint-remove]");
     if (endpointRemove) {
       state.providerDialogEndpoints.splice(Number(endpointRemove.dataset.endpointRemove), 1);
@@ -16991,12 +17818,41 @@ function bindEvents() {
     if (!card) return;
     // 再点已选中的卡片 = 取消预设（选错了要能退回来，不必关窗重开）
     if (state.providerPresetSelected?.key === card.dataset.presetKey) {
+      if (card.dataset.presetKey === "codex:OpenAI Official" || card.dataset.presetKey === "grokbuild:Grok Official") return;
       clearProviderPreset();
       return;
     }
     const [app, ...nameParts] = card.dataset.presetKey.split(":");
-    const preset = (state.providerPresets?.[app] ?? []).find((entry) => entry.name === nameParts.join(":"));
+    const preset = card.dataset.presetKind === "custom"
+      ? { name: "自定义配置", syntheticCustom: true }
+      : (state.providerPresets?.[app] ?? []).find((entry) => entry.name === nameParts.join(":"));
     if (preset) applyProviderPreset(app, preset);
+  });
+  elements["provider-codex-fetch-models-button"]?.addEventListener("click", () => void fetchProviderCodexModels());
+  elements["provider-codex-catalog-fetch-button"]?.addEventListener("click", () => void fetchProviderCodexModels());
+  elements["provider-grokbuild-fetch-models-button"]?.addEventListener("click", () => void fetchProviderCodexModels());
+  elements["provider-codex-full-url"]?.addEventListener("change", () => {
+    updateCodexBaseUrlHint();
+    refreshProviderConfigPreview();
+  });
+  elements["provider-codex-catalog-add-button"]?.addEventListener("click", () => addProviderCodexCatalogRow());
+  elements["provider-codex-catalog-list"]?.addEventListener("input", (event) => {
+    const row = event.target.closest("[data-codex-catalog-row]");
+    const field = event.target.dataset.codexCatalogField;
+    if (!row || !field) return;
+    const index = Number(row.dataset.codexCatalogRow);
+    const current = state.providerCodexCatalog[index] ?? {};
+    state.providerCodexCatalog[index] = {
+      ...current,
+      [field]: field === "contextWindow" ? event.target.value.replace(/[^\d]/g, "") : event.target.value,
+    };
+  });
+  elements["provider-codex-catalog-list"]?.addEventListener("click", (event) => {
+    const remove = event.target.closest("[data-codex-catalog-remove]");
+    if (!remove) return;
+    state.providerCodexCatalog.splice(Number(remove.dataset.codexCatalogRemove), 1);
+    renderProviderCodexCatalog();
+    refreshProviderConfigPreview();
   });
   elements["provider-preset-clear-button"]?.addEventListener("click", () => clearProviderPreset());
   elements["provider-reset-button"]?.addEventListener("click", resetProviderDialog);
@@ -17103,6 +17959,8 @@ function bindEvents() {
   // composer 成熟产品键位：Enter 发送、Shift+Enter 换行；@ 提及 / 斜杠命令激活时拦截
   const taskInput = elements["task-input"];
   if (taskInput) {
+    bindClipboardImagePaste(taskInput, queueClipboardImages);
+    bindClipboardImagePaste(byId("mission-side-chat-input"), queueClipboardImages);
     taskInput.addEventListener("keydown", (event) => {
       if ((state.mentionActive || state.slashActive) && event.key === "Escape" && !event.isComposing) {
         event.preventDefault();

@@ -213,6 +213,47 @@ test("本地代理 takeover：Anthropic 请求真实转发、用量计价、停�
   assert.equal(liveRestored.env.ANTHROPIC_AUTH_TOKEN, "sk-upstream-secret");
 });
 
+test("Codex 完整请求 URL 经本地代理原样转发，不重复追加 responses", async (t) => {
+  let seenUrl = null;
+  const upstream = await listen(async (request, response) => {
+    seenUrl = request.url;
+    for await (const _chunk of request) { /* drain */ }
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      id: "response-full-url",
+      object: "response",
+      status: "completed",
+      model: "gpt-full-url",
+      output_text: "ok",
+      output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "ok" }] }],
+      usage: { input_tokens: 1, output_tokens: 1 },
+    }));
+  });
+  t.after(upstream.close);
+
+  const { providers, proxy } = await fixture(t);
+  const provider = await providers.create({
+    name: "Full URL upstream",
+    baseUrl: `${upstream.origin}/custom/responses?api-version=2026-08-13`,
+    apiKey: "full-url-key",
+    apps: { codex: true },
+    models: { codex: { model: "gpt-full-url" } },
+    meta: { apiFormat: "openai_responses", isFullUrl: true },
+  });
+  await providers.switchTo("codex", provider.id);
+  await proxy.updateConfig({ listenPort: 0 });
+  await proxy.start();
+
+  const response = await fetch(`${proxy.origin}/codex/v1/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${proxy.config.token}` },
+    body: JSON.stringify({ model: "gpt-full-url", input: "hello", max_output_tokens: 1 }),
+  });
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).output_text, "ok");
+  assert.equal(seenUrl, "/custom/responses?api-version=2026-08-13");
+});
+
 test("档案级代理覆盖：UA/Header 注入上游、Body 浅合并、认证头不受影", async (t) => {
   let seen = null;
   const upstream = await listen(async (request, response) => {

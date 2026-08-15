@@ -8,18 +8,14 @@
       "label": "Claude Fable",
       "role": "primary-coordinator",
       "description": "团队主脑候选，负责目标澄清、任务拆解、派工编排、冲突收敛与最终综合。",
-      "systemPrompt": "你负责团队规划与编排。先澄清目标和约束，再按成员能力派工；持续维护证据链、风险与未决项。不要把默认席位当成固定主脑，最终结论必须基于真实执行和验证结果。",
+      "systemPrompt": "你负责团队规划与编排。先澄清目标和约束，再按成员职责、健康状态与显式路由规则派工；持续维护证据链、风险与未决项。不要把默认席位当成固定主脑，最终结论必须基于真实执行和验证结果。",
       "provider": "anthropic",
       "adapter": "claude-stream-json",
       "command": "claude",
       "model": "fable",
       "systemPromptFile": "config/control-center/claude-coordinator.md",
       "capabilities": [
-        "planning",
-        "orchestration",
-        "requirements",
-        "synthesis",
-        "delegation"
+        "*"
       ],
       "defaultPermissionMode": "plan",
       "quality": 0.96,
@@ -34,8 +30,18 @@
         },
         {
           "source": "governance",
-          "detail": "web-search capability intentionally NOT declared: claude-cli no longer disables local CLI tools, but it supplies no authenticated search MCP and runs with strict MCP configuration. Tool availability follows permissionMode and observed runtime results; current-research therefore fails closed without a verified search result.",
+          "detail": "current-research is an explicit special route to the authenticated Grok Search MCP transport. This is a transport constraint with an auditable reason, not an Adapter or member capability envelope.",
           "verifiedAt": "2026-07-28"
+        },
+        {
+          "source": "local-cli",
+          "detail": "multimodal/document-analysis/long-context basis: the Claude Code Read tool renders images (PNG/JPG) natively and paginates PDFs, and run sources inject absolute local paths, so attached visuals reach this seat over the existing sources channel. Context window is 1M (claude-opus-5[1m]), so long documents need no proxy chunking. Not yet exercised end-to-end through a control-center turn.",
+          "verifiedAt": "2026-08-14"
+        },
+        {
+          "source": "governance",
+          "detail": "LO 2026-08-15 removed capability envelopes and capability-weighted admission after they caused multimodal NO_ROUTE failures. All profiles now use capabilities=['*']; ordinary image and long-context routes are soft preferences, while true transport-only routes must declare constraints and a human-readable reason.",
+          "verifiedAt": "2026-08-15"
         }
       ],
       "modelOptions": [
@@ -76,12 +82,7 @@
       "command": "codex",
       "model": "gpt-5.6-sol",
       "capabilities": [
-        "coding",
-        "debugging",
-        "review",
-        "architecture",
-        "testing",
-        "execution"
+        "*"
       ],
       "defaultPermissionMode": "read-only",
       "quality": 0.97,
@@ -160,12 +161,7 @@
       "command": "gemini",
       "model": null,
       "capabilities": [
-        "long-context",
-        "multimodal",
-        "document-analysis",
-        "research",
-        "web-search",
-        "synthesis"
+        "*"
       ],
       "defaultPermissionMode": "plan",
       "quality": 0.88,
@@ -204,9 +200,7 @@
       "command": null,
       "model": null,
       "capabilities": [
-        "current-research",
-        "web-search",
-        "fast-synthesis"
+        "*"
       ],
       "defaultPermissionMode": "read-only",
       "quality": 0.84,
@@ -244,13 +238,11 @@
       "provider": "xai",
       "adapter": "grok-build-headless",
       "command": "grok",
-      "model": "grok45-514",
+      "model": "grok-4.6",
       "capabilities": [
-        "coding",
-        "execution",
-        "fast-synthesis"
+        "*"
       ],
-      "defaultPermissionMode": "read-only",
+      "defaultPermissionMode": "workspace-write",
       "quality": 0.82,
       "speed": 0.94,
       "costTier": 3,
@@ -258,8 +250,8 @@
       "evidence": [
         {
           "source": "local-cli",
-          "detail": "Grok Build 0.2.118 installed at ~/.grok/bin/grok.exe (official x.ai installer); 2026-08-03 update readback was up-to-date and the custom grok45-514 route remains configured through 514claude.xyz",
-          "verifiedAt": "2026-08-06"
+          "detail": "Grok Build 1.0.3 is installed at ~/.grok/bin/grok.exe. A local grok-4.6 session read PNG and JPEG files by absolute path, including paths outside the session cwd, and emitted ACP image content blocks with image/png and image/jpeg MIME types. Control Center run.sources uses the same absolute-path + read_file channel for clipboard images.",
+          "verifiedAt": "2026-08-14"
         },
         {
           "source": "official-docs",
@@ -277,17 +269,18 @@
       "modelOptions": [
         {
           "id": "",
-          "label": "grok45-514（默认）"
+          "label": "grok-4.6（默认）"
         },
         {
-          "id": "grok45-514",
-          "label": "grok45-514"
+          "id": "grok-4.6",
+          "label": "grok-4.6"
         }
       ],
       "effortLevels": [
         "low",
         "high"
-      ]
+      ],
+      "defaultEffort": null
     },
     {
       "id": "kimi-frontend",
@@ -301,10 +294,7 @@
       "command": "kimi",
       "model": null,
       "capabilities": [
-        "frontend",
-        "ui",
-        "coding",
-        "execution"
+        "*"
       ],
       "defaultPermissionMode": "read-only",
       "quality": 0.82,
@@ -360,11 +350,7 @@
       "command": "pi",
       "model": null,
       "capabilities": [
-        "resident-session",
-        "custom-tools",
-        "extensions",
-        "lightweight-execution",
-        "provider-routing"
+        "*"
       ],
       "defaultPermissionMode": "read-only",
       "quality": 0.8,
@@ -403,13 +389,7 @@
       "command": "opencode",
       "model": null,
       "capabilities": [
-        "planning",
-        "coding",
-        "execution",
-        "debugging",
-        "review",
-        "testing",
-        "synthesis"
+        "*"
       ],
       "defaultPermissionMode": "workspace-write",
       "coordinatorEligible": true,
@@ -425,6 +405,38 @@
         }
       ],
       "providerId": "provider-762665b6-ef34-4749-a1d5-84ee95102e5a",
+      "defaultEffort": null,
+      "modelOptions": [],
+      "effortLevels": []
+    },
+    {
+      "id": "SEAT-BRAIN-001",
+      "builtin": false,
+      "label": "首席系统架构师与中央决策中枢",
+      "role": "Chief System Orchestrator & Architect",
+      "description": "作为项目团队的绝对指挥核心，负责全局态势感知、复杂需求解构、工作流路由调度以及最终成果的质量终审。它不直接从事具体的基层操作，而是通过逻辑推理与策略调配，指挥其他专业席位协同高效作战。\n\n运行职责 (Runtime Responsibilities)",
+      "systemPrompt": "运行职责 (Runtime Responsibilities)\n需求剖析与任务拓扑化：将模糊的用户输入拆解为有向无环图（DAG）结构的子任务链。\n\n动态路由与资源调度：评估下属席位（如代码编写、文档生成、数据分析等）的能力边界与当前状态，精确分配子任务。\n\n上下文与状态维护：维护全局共享记忆（Global Shared State），确保跨席位交互时信息的完整性与一致性。\n\n异常监控与纠偏重试：实时监控各席位输出，当发现偏离目标、逻辑矛盾或执行报错时，触发反思（Reflect）与修正回路。\n\n终态收敛与质量校验：将多源执行结果整合为结构清晰、逻辑严密的最终交付物，进行最终质量把关。",
+      "provider": "xai",
+      "adapter": "grok-build-headless",
+      "command": "grok",
+      "model": null,
+      "capabilities": [
+        "*"
+      ],
+      "defaultPermissionMode": "read-only",
+      "coordinatorEligible": true,
+      "quality": 0.82,
+      "speed": 0.94,
+      "costTier": 3,
+      "enabled": true,
+      "evidence": [
+        {
+          "source": "control-center",
+          "detail": "由 Control Center 创建的自定义运行席位；尚待真实运行验证。",
+          "verifiedAt": "2026-08-14"
+        }
+      ],
+      "providerId": "provider-99193a73-7f96-40bf-a964-051c1577b84c",
       "defaultEffort": null,
       "modelOptions": [],
       "effortLevels": []

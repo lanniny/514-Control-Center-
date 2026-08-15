@@ -594,12 +594,12 @@
                   </section>
                   <div class="composer-collaborators" id="composer-collaborators" aria-label="额外协作者" hidden></div>
                   <label class="sr-only" id="composer-mode-hint" for="task-input">任务内容</label>
-                  <div class="attach-chips" id="attach-chips" hidden aria-label="已附加的资料文件"></div>
+                  <div class="attach-chips" id="attach-chips" hidden aria-label="已附加的资料文件" aria-live="polite"></div>
                   <textarea id="task-input" name="prompt" rows="2" role="combobox" aria-autocomplete="list" aria-controls="mention-menu slash-menu" aria-expanded="false" placeholder="描述目标 · @ 点名 · / 命令 · Ctrl+K 面板" required></textarea>
                   <div class="mention-menu" id="mention-menu" role="listbox" aria-label="点名团队成员" hidden></div>
                   <div class="slash-menu" id="slash-menu" role="listbox" aria-label="斜杠命令" hidden></div>
                   <div class="composer-footer">
-                    <button type="button" class="attach-button" id="attach-button" title="附加资料文件（路径随任务提交，Claude 会读取作为上下文）" aria-label="附加资料文件">
+                    <button type="button" class="attach-button" id="attach-button" title="附加资料文件；也可在输入框直接粘贴图片" aria-label="附加资料文件">
                       <svg class="icon lucide"><use href="#lucide-plus"></use></svg>
                     </button>
                     <label class="model-pick" id="task-model-pick" title="当前目标 CLI 的真实模型目录">
@@ -692,7 +692,7 @@
                     </div>
                     <div class="route-decision" id="route-decision">
                       <span class="route-model">尚未路由</span>
-                      <p>任务提交后显示候选模型、能力匹配和守卫条件。</p>
+                    <p>任务提交后显示候选模型、路由权重和守卫条件。</p>
                     </div>
                   </section>
                   <section class="rail-section event-rail" aria-labelledby="live-events-title">
@@ -1083,12 +1083,12 @@
                     <div class="member-editor-section-heading">
                       <div>
                         <span class="eyebrow">Dispatch Profile</span>
-                        <h4 id="member-capabilities-title">能力与身份提示</h4>
+                        <h4 id="member-capabilities-title">默认能力与身份提示</h4>
                       </div>
                       <button class="text-button" id="member-open-capabilities-button" type="button">Skill / MCP</button>
                     </div>
                     <div class="field">
-                      <span class="field-label">能力声明</span>
+                      <span class="field-label">能力策略</span>
                       <div class="chip-wall member-capability-wall" id="member-capabilities-wall"></div>
                     </div>
                     <label class="field">
@@ -1422,10 +1422,10 @@
 
                     <section class="runtime-seat-form-section" aria-labelledby="runtime-seat-capability-title">
                       <div class="runtime-seat-section-heading">
-                        <div><span class="eyebrow">Routing Envelope</span><h4 id="runtime-seat-capability-title">能力与路由权重</h4></div>
+                        <div><span class="eyebrow">Routing Policy</span><h4 id="runtime-seat-capability-title">默认能力与路由权重</h4></div>
                       </div>
                       <div class="field">
-                        <span class="field-label">能力包络</span>
+                        <span class="field-label">能力策略</span>
                         <div class="chip-wall runtime-seat-capability-wall" id="runtime-seat-capabilities-wall"></div>
                       </div>
                       <div class="runtime-seat-metric-grid">
@@ -1622,8 +1622,8 @@
                 <h3 class="candidate-title">候选评分</h3>
                 <div class="table-scroll">
                   <table class="data-table candidate-table">
-                    <thead><tr><th>候选</th><th>综合得分</th><th>能力匹配</th><th>健康</th><th>结论</th></tr></thead>
-                    <tbody id="router-candidate-body"><tr><td colspan="5" class="subtle">生成路由预览后显示全部候选与排除原因。</td></tr></tbody>
+                    <thead><tr><th>候选</th><th>综合得分</th><th>健康</th><th>结论</th></tr></thead>
+                    <tbody id="router-candidate-body"><tr><td colspan="4" class="subtle">生成路由预览后显示全部候选与排除原因。</td></tr></tbody>
                   </table>
                 </div>
               </div>
@@ -1634,7 +1634,7 @@
             <div class="section-heading">
               <div>
                 <h2 id="model-registry-title">模型与适配器</h2>
-                <p>能力声明、当前可用性与最近验证</p>
+                <p>默认全能力、当前可用性与最近验证</p>
               </div>
             </div>
             <div class="table-scroll">
@@ -2211,9 +2211,9 @@
     </dialog>
 
     <!-- 供应商档案对话框（cc-switch 式统一录入：Base URL + Key 一处，按应用投影） -->
-    <dialog class="dialog" id="provider-dialog" aria-labelledby="provider-dialog-title">
+    <dialog class="action-dialog provider-dialog" id="provider-dialog" aria-labelledby="provider-dialog-title">
       <form id="provider-form" method="dialog">
-        <div class="dialog-header">
+        <div class="dialog-heading provider-dialog-heading">
           <div>
             <span class="eyebrow">供应商方案</span>
             <h2 id="provider-dialog-title">新增供应商</h2>
@@ -2223,7 +2223,7 @@
           </button>
         </div>
         <div class="dialog-body">
-          <div class="provider-tabs" role="tablist" aria-label="供应商配置分区">
+          <div class="provider-tabs" id="provider-tabs" role="tablist" aria-label="供应商配置分区">
             <button class="provider-tab is-active" type="button" data-provider-tab="basic" role="tab" aria-selected="true">基本</button>
             <button class="provider-tab" type="button" data-provider-tab="endpoints" role="tab" aria-selected="false">端点</button>
             <button class="provider-tab" type="button" data-provider-tab="usage" role="tab" aria-selected="false">用量</button>
@@ -2233,10 +2233,10 @@
           </div>
           <div class="provider-tab-panel" data-provider-panel="basic">
           <div class="provider-preset-block" id="provider-preset-block">
-            <p class="form-section-label">预设供应商<span>内置预设目录——选中即自动填好端点与模型，只需再填 API Key；再点一次可取消</span></p>
+            <p class="form-section-label">预设供应商<span id="provider-preset-description">选中即自动填好端点与模型，只需再填 API Key</span></p>
             <div class="provider-preset-toolbar">
               <svg class="icon lucide"><use href="#lucide-search"></use></svg>
-              <input id="provider-preset-search" type="search" maxlength="60" placeholder="搜索预设（Kimi / DeepSeek / GLM / PackyCode…）" autocomplete="off" />
+              <input id="provider-preset-search" type="search" maxlength="60" placeholder="搜索预设供应商" autocomplete="off" />
               <button class="button secondary" id="provider-preset-clear-button" type="button" hidden title="取消选中的预设：附加配置不再随档案保存，已填字段保留可手改">
                 <svg class="icon lucide"><use href="#lucide-x"></use></svg>
                 不使用预设
@@ -2248,7 +2248,7 @@
           <div class="provider-form-grid">
             <label class="field">
               <span class="field-label">供应商名称</span>
-              <input id="provider-name-input" type="text" maxlength="60" placeholder="例：Claude 官方" required />
+              <input id="provider-name-input" type="text" maxlength="60" placeholder="例：OpenAI 兼容供应商" required />
             </label>
             <label class="field">
               <span class="field-label">备注（可选）</span>
@@ -2259,30 +2259,52 @@
             <span class="field-label">官网链接（可选）</span>
             <input id="provider-website-input" type="url" maxlength="300" placeholder="https://example.com" />
           </label>
+          <div class="provider-live-drift" id="provider-live-drift" role="status" aria-live="polite" hidden></div>
+          <div class="provider-grok-fields" id="provider-grok-fields" hidden>
+            <div class="provider-form-grid provider-grok-field-grid">
+              <label class="field">
+                <span class="field-label">客户端模型档位</span>
+                <input id="provider-grokbuild-profile" type="text" maxlength="80" placeholder="grok-4.5" autocomplete="off" />
+              </label>
+              <label class="field">
+                <span class="field-label">API Backend</span>
+                <select id="provider-grokbuild-backend">
+                  <option value="responses" selected>Responses</option>
+                  <option value="chat_completions">Chat Completions</option>
+                </select>
+              </label>
+              <label class="field">
+                <span class="field-label">上下文窗口</span>
+                <input id="provider-grokbuild-context" type="number" min="1" max="10000000" step="1" placeholder="500000" />
+              </label>
+            </div>
+          </div>
           <label class="field">
             <span class="field-label">API Key</span>
             <input id="provider-key-input" type="password" maxlength="300" autocomplete="new-password" placeholder="sk-…" />
             <span class="field-hint" id="provider-key-hint">只需要填这里，下方配置会自动填充；Key 只出不进——保存后永不回显，编辑留空 = 保持原 Key 不变。</span>
           </label>
-          <label class="field">
-            <span class="field-label">请求地址</span>
+          <div class="field">
+            <span class="provider-field-label-row">
+              <label class="field-label" for="provider-baseurl-input">API 请求地址</label>
+              <label class="provider-inline-switch" title="开启后按输入值原样投影；模型列表会由该地址推导 /v1/models">
+                <input id="provider-codex-full-url" type="checkbox" />
+                <span>完整 URL</span>
+              </label>
+            </span>
             <input id="provider-baseurl-input" type="url" maxlength="300" placeholder="https://your-api-endpoint.com（留空 = 官方默认端点）" />
-          </label>
+          </div>
           <p class="provider-hint-bar" id="provider-baseurl-hint">填写兼容 Claude API 的服务端点地址，不要以斜杠结尾</p>
           <div class="provider-models-block" id="provider-models-codex" hidden>
-            <p class="form-section-label">Codex 模型<span>Base URL 为纯域名时自动补 /v1（cc-switch 同款规则）</span></p>
-            <div class="provider-form-grid">
-              <label class="field"><span class="field-label">模型</span><input id="provider-codex-model" type="text" maxlength="80" placeholder="gpt-5-codex" list="provider-catalog-list" /></label>
-              <label class="field"><span class="field-label">推理强度</span>
-                <select id="provider-codex-effort">
-                  <option value="">不动现有</option>
-                  <option value="low">low</option>
-                  <option value="medium">medium</option>
-                  <option value="high">high</option>
-                  <option value="xhigh">xhigh</option>
-                </select>
-              </label>
+            <p class="form-section-label">默认模型<span>Codex 默认请求的模型，可随时修改</span></p>
+            <div class="provider-codex-model-row">
+              <input id="provider-codex-model" type="text" maxlength="80" placeholder="gpt-5.6-sol" list="provider-catalog-list" />
+              <button class="icon-button" id="provider-codex-fetch-models-button" type="button" title="获取模型列表" aria-label="获取模型列表">
+                <svg class="icon lucide"><use href="#lucide-download"></use></svg>
+              </button>
             </div>
+            <span class="field-hint">留空且配置了模型映射时，默认使用映射第一行。</span>
+            <span class="provider-model-fetch-result" id="provider-codex-fetch-models-result" aria-live="polite"></span>
           </div>
           <div class="provider-models-block" id="provider-models-gemini" hidden>
             <p class="form-section-label">Gemini 模型</p>
@@ -2291,8 +2313,15 @@
             </div>
           </div>
           <div class="provider-models-block" id="provider-models-grokbuild" hidden>
-            <p class="form-section-label">Grok Build 模型</p>
-            <label class="field"><span class="field-label">默认模型</span><input id="provider-grokbuild-model" type="text" maxlength="80" list="provider-catalog-list" /></label>
+            <p class="form-section-label">默认模型<span>Grok 默认请求的模型，可随时修改</span></p>
+            <div class="provider-codex-model-row">
+              <input id="provider-grokbuild-model" type="text" maxlength="80" placeholder="grok-4.5" list="provider-catalog-list" />
+              <button class="icon-button" id="provider-grokbuild-fetch-models-button" type="button" title="获取模型列表" aria-label="获取模型列表">
+                <svg class="icon lucide"><use href="#lucide-download"></use></svg>
+              </button>
+            </div>
+            <span class="field-hint">留空时使用客户端模型档位；官方登录不需要填写。</span>
+            <span class="provider-model-fetch-result" id="provider-grokbuild-fetch-models-result" aria-live="polite"></span>
           </div>
           <div class="provider-models-block" id="provider-models-kimi" hidden>
             <p class="form-section-label">Kimi Code 模型<span>投影 ~/.kimi-code/config.toml：default_model + providers/models 标记块</span></p>
@@ -2311,6 +2340,7 @@
             <label class="field"><span class="field-label">默认模型</span><input id="provider-hermes-model" type="text" maxlength="80" list="provider-catalog-list" /></label>
           </div>
           <datalist id="provider-catalog-list"></datalist>
+          <div id="provider-codex-advanced-slot"></div>
           <details class="provider-config-json" id="provider-config-json-block" open>
             <summary>配置预览<span class="provider-config-json-sub">服务端干跑生成——启用后该应用 live 配置的完整文件；点击文本区载入明文后可编辑，手改随保存存为原文覆盖</span></summary>
             <div class="provider-preview-tabs" id="provider-preview-tabs" hidden></div>
@@ -2417,8 +2447,14 @@
               <span class="provider-usage-result" id="provider-model-test-result" aria-live="polite"></span>
             </div>
           </div>
-          <div class="provider-tab-panel" data-provider-panel="advanced" hidden>
-            <div class="provider-form-grid">
+          <div class="provider-tab-panel" id="provider-advanced-panel" data-provider-panel="advanced" hidden>
+            <details class="provider-advanced-section" id="provider-advanced-details" open>
+              <summary>
+                <span>高级选项</span>
+                <small>包含上游格式、模型映射、推理强度、自定义 User-Agent 与请求覆盖</small>
+              </summary>
+              <div class="provider-advanced-content">
+            <div class="provider-form-grid provider-advanced-admin-grid">
               <label class="field"><span class="field-label">类别</span>
                 <select id="provider-category">
                   <option value="custom">custom（自定义）</option>
@@ -2437,18 +2473,49 @@
                   <option value="ANTHROPIC_API_KEY">ANTHROPIC_API_KEY（官方 Key）</option>
                 </select>
               </label>
-              <label class="field"><span class="field-label">API 格式</span>
+              <label class="field provider-api-format-field"><span class="field-label">上游格式</span>
                 <select id="provider-api-format">
                   <option value="anthropic">Anthropic Messages（原生）</option>
                   <option value="openai_chat">OpenAI Chat Completions</option>
                   <option value="openai_responses">OpenAI Responses</option>
                   <option value="gemini_native">Gemini 原生</option>
                 </select>
-                <span class="field-hint">决定 Codex wire_api 与本地代理上游协议</span>
+                <span class="field-hint">Responses 原生直连；Chat Completions 与 Anthropic Messages 需要本地路由转换。</span>
               </label>
               <label class="field"><span class="field-label">费用倍率</span><input id="provider-cost-multiplier" type="number" min="0.01" max="1000" step="0.01" placeholder="1" /></label>
               <label class="field"><span class="field-label">日限额（USD，空 = 不限）</span><input id="provider-limit-daily" type="number" min="0" max="1000000" step="0.01" /></label>
               <label class="field"><span class="field-label">月限额（USD，空 = 不限）</span><input id="provider-limit-monthly" type="number" min="0" max="1000000" step="0.01" /></label>
+            </div>
+            <div class="provider-codex-advanced" id="provider-codex-advanced" hidden>
+              <label class="field provider-codex-effort-field"><span class="field-label">推理强度</span>
+                <select id="provider-codex-effort">
+                  <option value="">不动现有</option>
+                  <option value="low">low</option>
+                  <option value="medium">medium</option>
+                  <option value="high">high</option>
+                  <option value="xhigh">xhigh</option>
+                  <option value="max">max</option>
+                </select>
+              </label>
+              <section class="provider-codex-catalog" aria-labelledby="provider-codex-catalog-title">
+                <div class="provider-codex-catalog-heading">
+                  <div>
+                    <strong id="provider-codex-catalog-title">模型映射</strong>
+                    <span>生成 Codex 模型目录；菜单显示名称可读，实际请求模型按右侧值发送。</span>
+                  </div>
+                  <div class="provider-codex-catalog-actions">
+                    <button class="button secondary" id="provider-codex-catalog-fetch-button" type="button">
+                      <svg class="icon lucide"><use href="#lucide-download"></use></svg>
+                      获取模型列表
+                    </button>
+                    <button class="button secondary" id="provider-codex-catalog-add-button" type="button">
+                      <svg class="icon lucide"><use href="#lucide-plus"></use></svg>
+                      添加模型
+                    </button>
+                  </div>
+                </div>
+                <div class="provider-codex-catalog-list" id="provider-codex-catalog-list"></div>
+              </section>
             </div>
             <div class="provider-models-block" id="provider-models-claude">
               <p class="form-section-label">模型映射（Claude）<span>角色留空回落「默认兜底」（Subagent 除外）；显示名称只影响 /model 菜单；1M 声明给实际模型加 [1m] 后缀</span></p>
@@ -2493,6 +2560,8 @@
                 <label class="field"><span class="field-label">Body 覆盖（JSON 对象）</span><textarea id="provider-proxy-body" rows="5" spellcheck="false" placeholder='{ "temperature": 0.2 }'></textarea><span class="field-hint">浅合并到协议转换后的上游请求体，值限标量</span></label>
               </div>
             </div>
+              </div>
+            </details>
           </div>
         </div>
         <div class="dialog-actions">

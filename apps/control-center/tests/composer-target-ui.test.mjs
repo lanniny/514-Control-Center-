@@ -31,6 +31,10 @@ test("composer target tabs are the only visible direct-recipient control", async
   assert.match(app, /function keepActiveComposerTargetVisible/);
   assert.match(app, /strip\.scrollLeft \+=/);
   assert.match(app, /startAgentId:\s*composerTarget\.memberId/);
+  const previewRoute = app.slice(app.indexOf("async function previewRoute"), app.indexOf("async function handleRouterSubmit"));
+  const createRun = app.slice(app.indexOf("async function createRun"), app.indexOf("function buildContinueMessage"));
+  assert.match(previewRoute, /requestedProvider:\s*composerTarget\.memberId \|\| undefined/);
+  assert.match(createRun, /requestedProvider:\s*composerTarget\.memberId/);
   assert.match(app, /agentId:\s*composerTarget\.memberId/);
   assert.match(app, /function captureComposerConfig/);
   assert.match(app, /requestedAgentIds:\s*submission\.requestedAgentIds\.length/);
@@ -118,7 +122,7 @@ test("a stale composer blur timer cannot close a newly reopened command menu", a
   assert.match(blurHandler, /hideMentionMenu\(\);\s*hideSlashMenu\(\);/s);
 });
 
-// LO 2026-08-10：发送键随工作状态双态——活跃 run + 空输入 = 停止键（级联取消）；
+// LO 2026-08-10：发送键随工作状态双态——活跃 run + 空输入 = 停止当前回复；
 // 有输入 = 发送键（轮间插话不被吃掉）；审批挂起时停止键保持可用。
 test("the send button becomes a stop key while the run is active and the input is empty", async () => {
   const [app, css, html] = await Promise.all([
@@ -135,10 +139,18 @@ test("the send button becomes a stop key while the run is active and the input i
   assert.match(app, /: '<svg class="icon lucide"><use href="#lucide-arrow-up"><\/use><\/svg>';/);
   // 状态翻页链路：loadRuns 是 run.completed/failed 等纯状态事件的唯一通道，必须连会话视图一起刷
   assert.match(app, /renderOverview\(\);\s*\n\s*\/\/ 状态翻页必须连会话视图一起刷[\s\S]*?renderSelectedRun\(\);/);
-  // 停止路径：submit 入口拦截走级联取消（既有确认弹窗），不进发送路径
-  assert.match(app, /if \(elements\["submit-task-button"\]\?\.dataset\.mode === "stop"\) \{\s*\n\s*void cancelSelectedRun\(\);/);
-  // 审批挂起：输入禁用，但停止键必须可用——它是此时唯一有意义的动作
-  assert.match(app, /elements\["submit-task-button"\]\.disabled = waitingApproval && elements\["submit-task-button"\]\.dataset\.mode !== "stop";/);
+  // 停止路径：只中断当前 provider turn，不撤销整场会话的 session/租约/工作树。
+  assert.match(app, /if \(elements\["submit-task-button"\]\?\.dataset\.mode === "stop"\) \{\s*\n\s*void interruptSelectedRun\(\);/);
+  assert.match(app, /request\(`\/api\/runs\/\$\{encodeURIComponent\(run\.id\)\}\/interrupt`/);
+  assert.match(app, /停止当前回复（保留会话、授权与工作树）/);
+  assert.doesNotMatch(app, /停止当前任务（级联中止本 run 全部 CLI 子进程）/);
+  assert.match(app, /run\\\.\(created\|updated\|completed\|failed\|cancelled\|interrupted\|interrupt_timeout\|/);
+  // 审批挂起 / 提交在途：输入禁用，但停止键必须可用——它是此时唯一有意义的动作。
+  // 在途锁（composerSubmitInFlight）必须参与裁决：本行由 SSE 驱动的 setComposerMode 反复执行，
+  // 少了它就会把提交锁冲掉，同一句话被送出两遍（LO 2026-08-14 报障）。
+  assert.match(app, /elements\["submit-task-button"\]\.disabled = elements\["submit-task-button"\]\.dataset\.mode !== "stop" && \(composerSubmitInFlight \|\| attachmentUploadInFlight\(\) \|\| waitingApproval\);/);
+  assert.match(app, /function setComposerSubmitInFlight\(active\)/);
+  assert.match(app, /submit\.disabled = composerSubmitInFlight \|\| attachmentUploadInFlight\(\) \|\| !target\.memberId;/); // 侧边聊天不得成为绕过锁的第二入口
   // 联动：composer 重算（setComposerMode）与输入事件都刷新双态
   assert.match(app, /syncSubmitButtonMode\(\); \/\/ 发送\/停止双态/);
   assert.match(app, /syncSubmitButtonMode\(\); \/\/ 输入有无决定发送\/停止双态/);

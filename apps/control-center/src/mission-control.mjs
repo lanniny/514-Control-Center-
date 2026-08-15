@@ -686,8 +686,13 @@ export function projectMissionControl({
     ...boundedEvents.map((item) => item?.timestamp),
     ...rawApprovals.flatMap((item) => [item?.createdAt, item?.expiresAt]),
   ];
-  const maxRounds = positiveInteger(run.maxRounds, 10_000);
-  const round = Math.min(positiveInteger(run.round, 10_000), maxRounds || 10_000);
+  const round = positiveInteger(run.round, 10_000);
+  const maxStepsPerInteraction = positiveInteger(run.maxStepsPerInteraction ?? run.maxRounds, 10_000);
+  const interactionStep = Math.min(
+    positiveInteger(run.interactionStep, 10_000),
+    maxStepsPerInteraction || 10_000,
+  );
+  const interactionSeq = positiveInteger(run.activeInteractionSeq ?? run.interactionSeq, 10_000);
   const taskStatus = shortText(run.status, 32, "unknown").toLowerCase();
   const asOf = lastTimestamp(observedTimes);
   const auditDegraded = run.auditDegraded === true || busDegraded;
@@ -710,7 +715,7 @@ export function projectMissionControl({
     selectedAgentId: participant(run.route?.selected?.id) || null,
     createdAt: timestamp(run.createdAt),
     updatedAt: timestamp(run.updatedAt),
-    progress: { round, maxRounds },
+    progress: { round, interactionSeq, interactionStep, maxStepsPerInteraction },
     waitingForInput: Boolean(run.pendingAsk),
     auditDegraded,
   };

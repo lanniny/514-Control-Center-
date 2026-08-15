@@ -6,7 +6,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import JSON5 from "json5";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { checkReachability, parseDeeplink as parseProviderDeeplink } from "../provider-net.mjs";
-import { PROVIDER_APPS } from "../providers.mjs";
+import { PROVIDER_APPS, PROVIDER_SCHEME_APPS } from "../providers.mjs";
 import { CCSWITCH_ENVIRONMENT_WATCH, createEnvironmentAdapter } from "./environment.mjs";
 
 const STATE_VERSION = 1;
@@ -680,7 +680,7 @@ export class CcSwitchDomainService {
     });
   }
 
-  profileSnapshot({ id = null, name, description = "", apps = PROVIDER_APPS } = {}) {
+  profileSnapshot({ id = null, name, description = "", apps = PROVIDER_SCHEME_APPS } = {}) {
     const selectedApps = uniqueApps(apps);
     const profileId = id ? cleanId(id, "profile id") : `profile-${randomUUID()}`;
     const existing = this.state.profiles[profileId] ?? null;
@@ -736,7 +736,7 @@ export class CcSwitchDomainService {
     });
   }
 
-  async applyProfile(idValue, { apps = PROVIDER_APPS } = {}) {
+  async applyProfile(idValue, { apps = PROVIDER_SCHEME_APPS } = {}) {
     const id = cleanId(idValue, "profile id");
     const selectedApps = uniqueApps(apps);
     const profile = this.state.profiles[id];
@@ -776,8 +776,9 @@ export class CcSwitchDomainService {
     };
   }
 
-  async restoreSnapshot(snapshot, { syncLive = true } = {}) {
+  async restoreSnapshot(snapshot, { syncLive = true, apps = PROVIDER_SCHEME_APPS } = {}) {
     if (snapshot?.schema !== "514cc.ccswitch-snapshot/v1" || !snapshot.domain || !snapshot.providers) fail("invalid CC-Switch snapshot", "BACKUP_INVALID");
+    const selectedApps = syncLive ? uniqueApps(apps) : [];
     const nextState = normalizeState(snapshot.domain);
     for (const [app, configured] of Object.entries(nextState.settings.configDirs)) {
       if (!configured) continue;
@@ -799,7 +800,7 @@ export class CcSwitchDomainService {
       if (previous.auth && this.authService) await this.authService.importState(previous.auth).catch(() => {});
       throw error;
     }
-    const warnings = syncLive ? await this.syncAllLive() : [];
+    const warnings = syncLive ? await this.syncAllLive({ apps: selectedApps }) : [];
     return { restoredAt: now(), warnings };
   }
 
@@ -845,15 +846,17 @@ export class CcSwitchDomainService {
     return { removed: filename };
   }
 
-  async syncAllLive() {
+  async syncAllLive({ apps = PROVIDER_SCHEME_APPS } = {}) {
+    const selectedApps = uniqueApps(apps);
+    const selected = new Set(selectedApps);
     const warnings = [];
     const current = this.providerStore.list().current;
-    for (const app of PROVIDER_APPS) {
+    for (const app of selectedApps) {
       if (current[app]) await this.providerStore.switchTo(app, current[app]).catch((error) => warnings.push({ app, kind: "provider", message: error.message }));
     }
-    for (const item of Object.values(this.state.mcps)) for (const app of PROVIDER_APPS) if (item.apps?.[app]) await this.#materializeMcp(app, item.id, true).catch((error) => warnings.push({ app, kind: "mcp", id: item.id, message: error.message }));
-    for (const item of Object.values(this.state.skills)) for (const app of SKILL_APPS) if (item.apps?.[app]) await this.#materializeSkill(app, item.id, true).catch((error) => warnings.push({ app, kind: "skill", id: item.id, message: error.message }));
-    for (const app of PROMPT_APPS) {
+    for (const item of Object.values(this.state.mcps)) for (const app of selectedApps) if (item.apps?.[app]) await this.#materializeMcp(app, item.id, true).catch((error) => warnings.push({ app, kind: "mcp", id: item.id, message: error.message }));
+    for (const item of Object.values(this.state.skills)) for (const app of SKILL_APPS) if (selected.has(app) && item.apps?.[app]) await this.#materializeSkill(app, item.id, true).catch((error) => warnings.push({ app, kind: "skill", id: item.id, message: error.message }));
+    for (const app of PROMPT_APPS.filter((app) => selected.has(app))) {
       const active = Object.values(this.state.prompts[app]).find((item) => item.enabled);
       if (active) await atomicWrite(this.#promptPath(app), active.content).catch((error) => warnings.push({ app, kind: "prompt", id: active.id, message: error.message }));
     }
@@ -1371,13 +1374,13 @@ export class CcSwitchDomainService {
     }
   }
 
-  async syncDownload(kindValue, { syncLive = true } = {}) {
+  async syncDownload(kindValue, { syncLive = true, apps = PROVIDER_SCHEME_APPS } = {}) {
     const kind = kindValue === "webdav" || kindValue === "s3" ? kindValue : fail("sync kind must be webdav or s3", "VALIDATION_FAILED");
     const settings = this.#syncSettings(kind);
     try {
       const response = kind === "webdav" ? await this.#webdavRequest(settings, "GET") : await this.#s3Request(settings, "GET");
       const snapshot = JSON.parse(await response.text());
-      const result = await this.restoreSnapshot(snapshot, { syncLive });
+      const result = await this.restoreSnapshot(snapshot, { syncLive, apps });
       this.state.settings[kind].status = { lastSuccessAt: now(), lastDirection: "download", lastError: null };
       await this.#serialize(async () => this.#commit());
       return { ok: true, kind, ...result };

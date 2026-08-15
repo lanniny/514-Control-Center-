@@ -70,3 +70,28 @@ test("request() rejects an external URL before attaching the bearer token", asyn
     setAccessToken("");
   }
 });
+
+test("request() exposes the structured server error code on ApiError", async () => {
+  const { ApiError, request } = await import("../public/api.js");
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    error: {
+      code: "CLIPBOARD_STORAGE_QUOTA_EXCEEDED",
+      message: "clipboard image storage quota is exhausted",
+    },
+  }), {
+    status: 507,
+    headers: { "content-type": "application/json" },
+  });
+  try {
+    await assert.rejects(
+      () => request("/api/system/clipboard-image", { method: "POST", body: {} }),
+      (error) => error instanceof ApiError
+        && error.status === 507
+        && error.code === "CLIPBOARD_STORAGE_QUOTA_EXCEEDED"
+        && error.payload?.error?.code === error.code,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

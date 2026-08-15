@@ -8,6 +8,9 @@ const root = fileURLToPath(new URL("..", import.meta.url));
 
 // 这些方法只读写传入的 run，不碰适配器/磁盘——直接在原型上调，测真实逻辑而非源码字面量
 const refundContext = {
+  policy: { limits: { maxRounds: 6 } },
+  maxStepsForInteraction: Orchestrator.prototype.maxStepsForInteraction,
+  ensureInteractionState: Orchestrator.prototype.ensureInteractionState,
   refundableAbandonedAttempt: Orchestrator.prototype.refundableAbandonedAttempt,
   refundAbandonedRound: Orchestrator.prototype.refundAbandonedRound,
 };
@@ -21,13 +24,29 @@ function runAt(phase, overrides = {}) {
     status: "recovery_required",
     round: 5,
     maxRounds: 6,
+    maxStepsPerInteraction: 6,
+    interactionSeq: 4,
+    activeInteractionId: "interaction-4",
+    activeInteractionSeq: 4,
+    interactionStep: 5,
+    interactionStepsRefunded: 0,
+    interactionAutoRecoveries: 0,
+    interactionCostUsd: 0,
     roundsRefunded: 0,
+    refundedAttemptIds: [],
     resumeQueue: [{ itemId: "item-1" }, { itemId: "item-2" }],
     pendingSteer: [{ id: "steer-1" }, { id: "steer-2" }],
     resumeClaim: { itemId: "item-1" },
     activeSteer: { steerId: "steer-1" },
     inflightTurns: { "codex-technical": "attempt-9" },
-    turnAttempts: [{ attemptId: "attempt-9", round: 5, phase }],
+    turnAttempts: [{
+      attemptId: "attempt-9",
+      round: 5,
+      interactionId: "interaction-4",
+      interactionSeq: 4,
+      interactionStep: 5,
+      phase,
+    }],
     ...overrides,
   };
 }
@@ -37,51 +56,65 @@ test("a provably unaccepted round is refunded", () => {
   for (const phase of ["prepared", "session_ready", "rejected"]) {
     const run = runAt(phase);
     const result = refund(run);
-    assert.equal(run.round, 4, `${phase} 应退还轮次`);
+    assert.equal(run.round, 5, `${phase} 不得回退全会话审计轮号`);
+    assert.equal(run.interactionStep, 4, `${phase} 应退还当前交互步骤`);
+    assert.equal(run.interactionStepsRefunded, 1);
     assert.equal(run.roundsRefunded, 1);
     assert.equal(result.phase, phase);
     assert.equal(result.attemptId, "attempt-9");
   }
 });
 
-// submitting/submitted/ambiguous 都可能已到 provider；退还会允许超过 maxRounds 次真实调用。
+// submitting/submitted/ambiguous 都可能已到 provider；退还会允许超过单 interaction 的真实调用上限。
 test("possibly submitted or completed rounds are never refunded", () => {
   for (const phase of ["submitting", "submitted", "ambiguous", "completed", "failed"]) {
     const run = runAt(phase);
     assert.equal(refund(run), null, `${phase} 不该退还`);
     assert.equal(run.round, 5);
+    assert.equal(run.interactionStep, 5);
     assert.equal(run.roundsRefunded, 0);
   }
   const noAttempts = runAt("rejected", { turnAttempts: [] });
   assert.equal(refund(noAttempts), null);
-  const atZero = runAt("rejected", { round: 0 });
-  assert.equal(refund(atZero), null, "round 0 无可退");
+  const atZero = runAt("rejected", { interactionStep: 0 });
+  assert.equal(refund(atZero), null, "当前交互 step 0 无可退");
 });
 
 test("one attempt cannot be refunded twice", () => {
   const run = runAt("rejected");
   assert.ok(refund(run));
-  assert.equal(refund(run), null, "旧 attempt 的 round 已不再拥有当前 round，不得重复退还");
-  assert.equal(run.round, 4);
+  assert.equal(refund(run), null, "同一 attempt 必须由 refundedAttemptIds 阻止重复退还");
+  assert.equal(run.round, 5);
+  assert.equal(run.interactionStep, 4);
   assert.equal(run.roundsRefunded, 1);
 });
 
 // 退还需要人点一次「确认恢复」，但脚本化调用方不能靠人的耐心兜底——必须有显式硬顶
-test("refunds are capped so a scripted retry cannot loop forever", () => {
-  const run = runAt("rejected", { round: 6, roundsRefunded: 6, maxRounds: 6, turnAttempts: [{ attemptId: "attempt-9", round: 6, phase: "rejected" }] });
+test("interaction step refunds are capped so a scripted retry cannot loop forever", () => {
+  const attempt = {
+    attemptId: "attempt-9", round: 6, interactionId: "interaction-4", interactionSeq: 4,
+    interactionStep: 6, phase: "rejected",
+  };
+  const run = runAt("rejected", {
+    round: 6, interactionStep: 6, interactionStepsRefunded: 6, roundsRefunded: 6, turnAttempts: [attempt],
+  });
   assert.equal(refund(run), null);
-  assert.equal(run.round, 6, "达到退还上限后不再退");
-  const justUnder = runAt("rejected", { round: 6, roundsRefunded: 5, maxRounds: 6, turnAttempts: [{ attemptId: "attempt-9", round: 6, phase: "rejected" }] });
+  assert.equal(run.interactionStep, 6, "达到单交互退还上限后不再退");
+  const justUnder = runAt("rejected", {
+    round: 6, interactionStep: 6, interactionStepsRefunded: 5, roundsRefunded: 5, turnAttempts: [attempt],
+  });
   assert.ok(refund(justUnder));
+  assert.equal(justUnder.interactionStepsRefunded, 6);
   assert.equal(justUnder.roundsRefunded, 6);
 });
 
-// maxRounds 不动还不够；关键是可能已提交的 attempt 绝不能退，否则真实 provider 调用数会穿顶。
-test("refunding preserves the provider-call ceiling", () => {
+// maxStepsPerInteraction 不动还不够；关键是可能已提交的 attempt 绝不能退，否则单交互真实调用数会穿顶。
+test("refunding preserves the per-interaction provider-call ceiling", () => {
   const run = runAt("rejected");
-  const before = run.maxRounds;
+  const before = run.maxStepsPerInteraction;
   refund(run);
-  assert.equal(run.maxRounds, before);
+  assert.equal(run.maxStepsPerInteraction, before);
+  assert.equal(run.round, 5, "退款不得改写全局调用审计序号");
   const ambiguous = runAt("ambiguous");
   assert.equal(refund(ambiguous), null);
   assert.equal(ambiguous.round, 5);
@@ -99,7 +132,8 @@ test("acknowledgement clears claimed work, inflight accounting and safe refund i
   assert.deepEqual(run.inflightTurns, {});
   assert.ok(run.recoveryAcknowledgedAt);
   assert.match(run.recoveryNote, /abandoned the claimed work/);
-  assert.equal(run.round, 4);
+  assert.equal(run.round, 5);
+  assert.equal(run.interactionStep, 4);
   assert.equal(result.roundsRefunded, 1);
 });
 
@@ -119,7 +153,11 @@ test("all recovery paths go through the shared collection point", async () => {
   // 之前两条路径各写一份，结果 inflightTurns 只有排队那条清、注记文案还不一样；
   // 第三条合法路径是 updateRunControls（确认恢复随热改一次性携带）——也必须走同一收口
   assert.equal(source.split("this.acknowledgeAbandonedWork(run)").length - 1, 3, "恢复确认路径没有全部收口");
-  assert.equal(source.split("run.inflightTurns = {};").length - 1, 1, "inflight 清理又散回多处");
+  const acknowledgementBody = source.slice(
+    source.indexOf("acknowledgeAbandonedWork(run) {"),
+    source.indexOf("refundableAbandonedAttempt(run) {"),
+  );
+  assert.equal(acknowledgementBody.split("run.inflightTurns = {};").length - 1, 1, "恢复确认的 inflight 清理又散回多处");
   assert.equal(source.split("run.recoveryNote = \"Operator acknowledged").length - 1, 1, "恢复注记文案又出现多份");
   // 退还只在落盘成功后播报，回滚过的账目不得进会话流
   assert.ok(source.includes("if (refund) await this.emitRoundRefund(run, refund);"));
@@ -127,7 +165,7 @@ test("all recovery paths go through the shared collection point", async () => {
   assert.ok(source.includes("if (recoveryRefund) await this.emitRoundRefund(run, recoveryRefund);"), "热改路径的退还也必须在落盘后播报");
   const app = await readFile(`${root}/public/app.js`, "utf8");
   assert.ok(app.includes('"run.round_refunded": {'), "退还没有会话流可见性");
-  assert.ok(app.includes("metaParts.push(refunded ? `${budget} · 已退还 ${refunded}` : budget);"));
+  assert.ok(app.includes("已退还一次未提交的自主步骤"), "退还事件没有解释全局轮次与交互步骤的区别");
 });
 
 // —— 接线验证：走真实 continue() 而非直接调 helper ——
@@ -216,21 +254,31 @@ test("an explicit provider rejection is checkpointed and refunded on the next co
   }
   const retried = fx.orchestrator.get(created.id);
   assert.equal(retried.roundsRefunded, 1);
-  assert.equal(retried.round, 1, "明确拒绝不占有效轮，重试复用同一轮号");
+  assert.equal(retried.round, 2, "全局审计轮号必须单调，明确拒绝后的重试使用新轮号");
+  assert.equal(retried.interactionStep, 1, "重试是新用户交互，获得独立步骤预算");
   assert.equal(retried.turnAttempts.at(-1).phase, "completed");
   const refundIndex = fx.events.findIndex((event, index) => index > failedIndex && event.type === "run.round_refunded");
   const restartedIndex = fx.events.findIndex((event, index) => index > refundIndex && event.type === "agent.turn_started");
   assert.ok(refundIndex > failedIndex && restartedIndex > refundIndex, "事件顺序必须是 rejected -> failed -> refunded -> restarted");
 });
 
-test("continue() refunds an explicitly rejected final round and reuses its number", async (t) => {
+test("continue() refunds an explicitly rejected interaction step without reusing the global round number", async (t) => {
   const fx = await wiredFixture();
   t.after(async () => { await fx.orchestrator.close().catch(() => {}); await rm(fx.dataRoot, { recursive: true, force: true }); });
   const created = await fx.orchestrator.create({ prompt: "implement", execute: false, permissionMode: "plan" });
   const run = fx.orchestrator.get(created.id);
   run.status = "failed";
   run.round = 6;
-  run.turnAttempts = [{ attemptId: "attempt-rejected", round: 6, agentId: "codex-technical", phase: "rejected" }];
+  run.interactionStep = 6;
+  run.turnAttempts = [{
+    attemptId: "attempt-rejected",
+    round: 6,
+    interactionId: run.activeInteractionId,
+    interactionSeq: run.activeInteractionSeq,
+    interactionStep: 6,
+    agentId: "codex-technical",
+    phase: "rejected",
+  }];
   run.inflightTurns = {};
 
   await fx.orchestrator.continue(created.id, { prompt: "继续", agentId: "codex-technical" });
@@ -239,13 +287,15 @@ test("continue() refunds an explicitly rejected final round and reuses its numbe
     await new Promise((tick) => setTimeout(tick, 10));
   }
   const after = fx.orchestrator.get(created.id);
-  assert.equal(after.roundsRefunded, 1, "明确拒绝的第 6 轮没有退还");
-  assert.equal(after.round, 6, "退还后重试应复用第 6 轮，而不是越过硬顶");
+  assert.equal(after.roundsRefunded, 1, "明确拒绝的旧交互步骤没有退还");
+  assert.equal(after.round, 7, "全局 round 必须单调，不复用第 6 轮");
+  assert.equal(after.interactionStep, 1, "新消息获得完整的新交互预算");
   assert.deepEqual(after.inflightTurns, {});
   const refundEvent = fx.events.find((event) => event.type === "run.round_refunded");
   assert.ok(refundEvent, "退还没有落审计事件");
-  assert.equal(refundEvent.data.round, 5);
-  assert.equal(refundEvent.data.maxRounds, 6, "退还不得抬高 maxRounds（成本硬顶不放松）");
+  assert.equal(refundEvent.data.round, 6);
+  assert.equal(refundEvent.data.interactionStep, 5);
+  assert.equal(refundEvent.data.maxStepsPerInteraction, 6, "退还不得抬高单交互步骤上限");
   assert.equal(refundEvent.data.phase, "rejected");
 });
 
@@ -256,7 +306,8 @@ test("acknowledged ambiguous work is abandoned but never refunded", async (t) =>
   const run = fx.orchestrator.get(created.id);
   run.status = "recovery_required";
   run.round = 5;
-  run.turnAttempts = [{ attemptId: "attempt-ambiguous", round: 5, agentId: "codex-technical", phase: "ambiguous" }];
+  run.interactionStep = 5;
+  run.turnAttempts = [{ attemptId: "attempt-ambiguous", round: 5, interactionId: run.activeInteractionId, interactionStep: 5, agentId: "codex-technical", phase: "ambiguous" }];
   run.inflightTurns = { "codex-technical": "attempt-ambiguous" };
 
   await fx.orchestrator.continue(created.id, { prompt: "继续", agentId: "codex-technical", acknowledgeRecovery: true });
@@ -271,21 +322,23 @@ test("acknowledged ambiguous work is abandoned but never refunded", async (t) =>
   assert.ok(!fx.events.some((event) => event.type === "run.round_refunded"));
 });
 
-test("a final ambiguous round remains blocked by the hard limit", async (t) => {
+test("a final ambiguous round can continue only after acknowledgement and starts a new interaction", async (t) => {
   const fx = await wiredFixture();
   t.after(async () => { await fx.orchestrator.close().catch(() => {}); await rm(fx.dataRoot, { recursive: true, force: true }); });
   const created = await fx.orchestrator.create({ prompt: "implement", execute: false, permissionMode: "plan" });
   const run = fx.orchestrator.get(created.id);
   run.status = "recovery_required";
   run.round = 6;
-  run.turnAttempts = [{ attemptId: "attempt-final-ambiguous", round: 6, agentId: "codex-technical", phase: "ambiguous" }];
-  const before = JSON.parse(JSON.stringify(run));
+  run.interactionStep = 6;
+  run.turnAttempts = [{ attemptId: "attempt-final-ambiguous", round: 6, interactionId: run.activeInteractionId, interactionStep: 6, agentId: "codex-technical", phase: "ambiguous" }];
+  run.inflightTurns = { "codex-technical": "attempt-final-ambiguous" };
 
-  await assert.rejects(
-    fx.orchestrator.continue(created.id, { prompt: "继续", agentId: "codex-technical", acknowledgeRecovery: true }),
-    { code: "ROUND_LIMIT" },
-  );
-  assert.deepEqual(JSON.parse(JSON.stringify(fx.orchestrator.get(created.id))), before, "封顶拒绝不得半改恢复状态");
+  await fx.orchestrator.continue(created.id, { prompt: "继续", agentId: "codex-technical", acknowledgeRecovery: true });
+  const after = fx.orchestrator.get(created.id);
+  assert.equal(after.status, "succeeded");
+  assert.equal(after.round, 7, "旧 ambiguous 调用保留审计，新交互继续使用下一轮号");
+  assert.equal(after.interactionStep, 1);
+  assert.equal(after.roundsRefunded, 0, "ambiguous 调用绝不能退款");
 });
 
 // 没有退还时的对照：末轮已 completed（真跑过），重试必须照常扣配额，不能白送
@@ -296,7 +349,8 @@ test("a completed final round is not refunded, so the retry still costs a round"
   const run = fx.orchestrator.get(created.id);
   run.status = "recovery_required";
   run.round = 4;
-  run.turnAttempts = [{ attemptId: "attempt-done", round: 4, agentId: "codex-technical", phase: "completed" }];
+  run.interactionStep = 4;
+  run.turnAttempts = [{ attemptId: "attempt-done", round: 4, interactionId: run.activeInteractionId, interactionStep: 4, agentId: "codex-technical", phase: "completed" }];
 
   await fx.orchestrator.continue(created.id, { prompt: "继续", agentId: "codex-technical", acknowledgeRecovery: true });
   const deadline = Date.now() + 15_000;

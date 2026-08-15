@@ -4,11 +4,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   checkReachability,
+  buildModelsUrlCandidates,
+  fetchProviderModels,
   parseDeeplink,
   queryProviderUsage,
   queryUsageScript,
@@ -17,6 +19,7 @@ import {
   USAGE_TEMPLATES,
 } from "../src/provider-net.mjs";
 import { ProviderStore, claudeEnvProjection, geminiEnvProjection, proxyUrlOf } from "../src/providers.mjs";
+import { spawnTestServer, stopTestServer, waitForUrl } from "./server-fixture.mjs";
 
 async function withServer(handler, run) {
   const server = createServer(handler);
@@ -49,6 +52,19 @@ const baseInput = (over = {}) => ({
   ...over,
 });
 
+async function jsonRequest(origin, token, path, { method = "GET", body } = {}) {
+  const response = await fetch(`${origin}${path}`, {
+    method,
+    headers: {
+      authorization: `Bearer ${token}`,
+      accept: "application/json",
+      ...(body === undefined ? {} : { "content-type": "application/json" }),
+    },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  return { response, payload: await response.json().catch(() => null) };
+}
+
 // ── testEndpoints（speedtest.rs 复刻面）──────────────────────────────────
 test("testEndpoints: 并发测速返回 latency/status，无效与空 URL 如实报错", async () => {
   await withServer((req, res) => {
@@ -69,6 +85,128 @@ test("testEndpoints: 连接失败如实回报（不吞错误）", async () => {
   const results = await testEndpoints(["http://127.0.0.1:1"], 3);
   assert.equal(results[0].latency, null);
   assert.match(results[0].error, /连接失败|请求超时/);
+});
+
+test("buildModelsUrlCandidates: base URL and full request URL derive structured model endpoints", () => {
+  assert.deepEqual(buildModelsUrlCandidates("https://api.example.com"), [
+    "https://api.example.com/v1/models",
+    "https://api.example.com/models",
+  ]);
+  assert.deepEqual(buildModelsUrlCandidates("https://api.example.com/v1/responses", { isFullUrl: true }), [
+    "https://api.example.com/v1/models",
+  ]);
+  assert.throws(() => buildModelsUrlCandidates("http://api.example.com"), { code: "MODEL_FETCH_HTTPS_REQUIRED" });
+});
+
+test("fetchProviderModels: parses data/models/top-level arrays and falls back after 404", async () => {
+  const calls = [];
+  const fetchImpl = async (url, options) => {
+    calls.push({ url: String(url), authorization: options.headers.authorization });
+    if (String(url).endsWith("/v1/models")) return new Response("missing", { status: 404 });
+    return new Response(JSON.stringify({ models: [{ id: "m-1", owned_by: "vendor" }, "m-2", { id: "m-1" }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  };
+  const result = await fetchProviderModels({ baseUrl: "https://api.example.com", apiKey: "secret", fetchImpl });
+  assert.deepEqual(calls.map((entry) => entry.url), ["https://api.example.com/v1/models", "https://api.example.com/models"]);
+  assert.ok(calls.every((entry) => entry.authorization === "Bearer secret"));
+  assert.deepEqual(result.models, [{ id: "m-1", ownedBy: "vendor" }, { id: "m-2" }]);
+});
+
+test("fetchProviderModels: blocks credentialed cross-origin redirects", async () => {
+  let leaked = false;
+  const fetchImpl = async (url, options) => {
+    if (new URL(url).origin === "https://other.example") leaked = Boolean(options.headers.authorization);
+    return new Response(null, { status: 302, headers: { location: "https://other.example/models" } });
+  };
+  await assert.rejects(
+    fetchProviderModels({ baseUrl: "https://api.example.com", apiKey: "secret", fetchImpl }),
+    { code: "MODEL_FETCH_REDIRECT_BLOCKED" },
+  );
+  assert.equal(leaked, false);
+});
+
+test("fetch-models HTTP route reuses a stored key only within its original URL origin", { timeout: 45_000 }, async (t) => {
+  let trustedAuthorization = null;
+  let untrustedCalls = 0;
+  await withServer((request, response) => {
+    trustedAuthorization = request.headers.authorization ?? null;
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ data: [{ id: "trusted-model" }] }));
+  }, async (trustedOrigin) => {
+    await withServer((request, response) => {
+      untrustedCalls += 1;
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ data: [{ id: "stolen-model" }] }));
+    }, async (untrustedOrigin) => {
+      const root = await mkdtemp(join(tmpdir(), "forge-provider-model-route-"));
+      const dataRoot = join(root, "data");
+      const runtimeHome = join(root, "home");
+      await mkdir(runtimeHome, { recursive: true });
+      const token = "provider-model-route-token";
+      const child = spawnTestServer({
+        env: {
+          CONTROL_CENTER_TOKEN: token,
+          CONTROL_CENTER_DATA_DIR: dataRoot,
+          CONTROL_CENTER_RUNTIME_HOME: runtimeHome,
+          CONTROL_CENTER_PORT: "0",
+        },
+      });
+      const controlOrigin = new URL(await waitForUrl(child)).origin;
+      t.after(async () => {
+        await stopTestServer(child, { token });
+        await rm(root, { recursive: true, force: true });
+      });
+
+      const created = await jsonRequest(controlOrigin, token, "/api/providers", {
+        method: "POST",
+        body: {
+          name: "Scoped credential",
+          baseUrl: `${trustedOrigin}/stored-path`,
+          apiKey: "stored-secret-key",
+          apps: { codex: true },
+          models: { codex: { model: "trusted-model" } },
+        },
+      });
+      assert.equal(created.response.status, 201);
+
+      const blocked = await jsonRequest(controlOrigin, token, "/api/providers/fetch-models", {
+        method: "POST",
+        body: { providerId: created.payload.id, baseUrl: `${untrustedOrigin}/attacker`, apiKey: "" },
+      });
+      assert.equal(blocked.response.status, 422);
+      assert.equal(blocked.payload.error.code, "PROVIDER_CREDENTIAL_SCOPE_MISMATCH");
+      assert.equal(untrustedCalls, 0, "the stored credential must not reach a changed origin");
+
+      const allowed = await jsonRequest(controlOrigin, token, "/api/providers/fetch-models", {
+        method: "POST",
+        body: { providerId: created.payload.id, baseUrl: `${trustedOrigin}/changed-path`, apiKey: "" },
+      });
+      assert.equal(allowed.response.status, 200);
+      assert.deepEqual(allowed.payload.models, [{ id: "trusted-model" }]);
+      assert.equal(trustedAuthorization, "Bearer stored-secret-key");
+    });
+  });
+});
+
+test("fetchProviderModels: timeout and response size have stable errors", async () => {
+  const hangingFetch = (_url, { signal }) => new Promise((_resolve, reject) => {
+    signal.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })), { once: true });
+  });
+  await assert.rejects(
+    fetchProviderModels({ baseUrl: "https://api.example.com", apiKey: "secret", fetchImpl: hangingFetch, timeoutMs: 25 }),
+    { code: "MODEL_FETCH_TIMEOUT" },
+  );
+  await assert.rejects(
+    fetchProviderModels({
+      baseUrl: "https://api.example.com",
+      apiKey: "secret",
+      maxResponseBytes: 1024,
+      fetchImpl: async () => new Response(JSON.stringify({ data: [{ id: "x".repeat(2000) }] })),
+    }),
+    { code: "MODEL_FETCH_RESPONSE_TOO_LARGE" },
+  );
 });
 
 // ── checkReachability（stream_check.rs 复刻面）────────────────────────────

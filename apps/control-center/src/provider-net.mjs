@@ -19,6 +19,10 @@ const clampTimeout = (secs, fallback = 8) => {
 };
 
 const trimUrl = (url) => String(url ?? "").trim().replace(/\/+$/, "");
+const MODEL_FETCH_TIMEOUT_MS = 8000;
+const MODEL_FETCH_MAX_BYTES = 1024 * 1024;
+const MODEL_FETCH_MAX_REDIRECTS = 3;
+const MODEL_FETCH_MAX_MODELS = 500;
 
 function isLoopbackHost(url) {
   const host = url.hostname.toLowerCase();
@@ -33,6 +37,172 @@ function parseUrl(raw, label) {
     return new URL(raw);
   } catch (error) {
     fail(`${label}: ${error.message}`, "USAGE_URL_INVALID");
+  }
+}
+
+function validateProviderHttpUrl(raw, label = "请求地址") {
+  const parsed = parseUrl(String(raw ?? "").trim(), `${label}无效`);
+  if (!/^https?:$/.test(parsed.protocol)) fail(`${label}仅支持 HTTP(S)`, "MODEL_FETCH_URL_INVALID");
+  if (parsed.username || parsed.password) fail(`${label}不能包含 URL 用户名或密码`, "MODEL_FETCH_URL_INVALID");
+  if (parsed.protocol !== "https:" && !isLoopbackHost(parsed)) {
+    fail(`${label}必须使用 HTTPS（localhost 除外）`, "MODEL_FETCH_HTTPS_REQUIRED");
+  }
+  parsed.hash = "";
+  return parsed;
+}
+
+function appendUniqueUrl(target, seen, parsed) {
+  const href = parsed.href;
+  if (seen.has(href)) return;
+  seen.add(href);
+  target.push(href);
+}
+
+/** Derive OpenAI-compatible /models endpoints without ad-hoc string replacement. */
+export function buildModelsUrlCandidates(baseUrl, { isFullUrl = false } = {}) {
+  const parsed = validateProviderHttpUrl(baseUrl);
+  const candidates = [];
+  const seen = new Set();
+  const sourcePath = parsed.pathname.replace(/\/+$/, "") || "/";
+  const add = (pathname) => {
+    const candidate = new URL(parsed.href);
+    candidate.pathname = pathname.replace(/\/{2,}/g, "/");
+    appendUniqueUrl(candidates, seen, candidate);
+  };
+
+  if (isFullUrl) {
+    if (/\/models$/i.test(sourcePath)) add(sourcePath);
+    else if (/\/chat\/completions$/i.test(sourcePath)) add(sourcePath.replace(/\/chat\/completions$/i, "/models"));
+    else if (/\/(?:responses|completions)$/i.test(sourcePath)) add(sourcePath.replace(/\/(?:responses|completions)$/i, "/models"));
+    else add("/v1/models");
+    if (!/\/v1\/models$/i.test(candidates[0] ? new URL(candidates[0]).pathname : "")) add("/v1/models");
+  } else if (/\/models$/i.test(sourcePath)) {
+    add(sourcePath);
+  } else if (/\/v\d+(?:beta)?$/i.test(sourcePath)) {
+    add(`${sourcePath}/models`);
+  } else {
+    add(`${sourcePath === "/" ? "" : sourcePath}/v1/models`);
+    add(`${sourcePath === "/" ? "" : sourcePath}/models`);
+  }
+  return candidates;
+}
+
+function safeModelSource(raw) {
+  const parsed = new URL(raw);
+  for (const key of [...parsed.searchParams.keys()]) {
+    if (/(?:api[-_]?key|token|secret|authorization)/i.test(key)) parsed.searchParams.set(key, "[REDACTED]");
+  }
+  return parsed.href;
+}
+
+async function readBoundedResponse(response, maxBytes) {
+  const declared = Number(response.headers?.get?.("content-length"));
+  if (Number.isFinite(declared) && declared > maxBytes) fail("模型列表响应超过大小上限", "MODEL_FETCH_RESPONSE_TOO_LARGE");
+  if (!response.body?.getReader) {
+    const text = await response.text();
+    if (Buffer.byteLength(text) > maxBytes) fail("模型列表响应超过大小上限", "MODEL_FETCH_RESPONSE_TOO_LARGE");
+    return text;
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let bytes = 0;
+  let text = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      if (bytes > maxBytes) {
+        await reader.cancel().catch(() => {});
+        fail("模型列表响应超过大小上限", "MODEL_FETCH_RESPONSE_TOO_LARGE");
+      }
+      text += decoder.decode(value, { stream: true });
+    }
+    return text + decoder.decode();
+  } finally {
+    reader.releaseLock?.();
+  }
+}
+
+function normalizeFetchedModels(payload) {
+  const source = Array.isArray(payload) ? payload : Array.isArray(payload?.data) ? payload.data : Array.isArray(payload?.models) ? payload.models : null;
+  if (!source) fail("模型接口没有返回 data、models 或顶层数组", "MODEL_FETCH_INVALID_RESPONSE");
+  const seen = new Set();
+  const models = [];
+  for (const item of source) {
+    const id = String(typeof item === "string" ? item : item?.id ?? item?.name ?? item?.slug ?? item?.model ?? "").trim();
+    if (!id || id.length > 200 || seen.has(id)) continue;
+    seen.add(id);
+    const ownedBy = typeof item === "object" && item
+      ? String(item.owned_by ?? item.ownedBy ?? item.provider ?? item.organization ?? "").trim().slice(0, 120)
+      : "";
+    models.push({ id, ...(ownedBy ? { ownedBy } : {}) });
+    if (models.length >= MODEL_FETCH_MAX_MODELS) break;
+  }
+  return models;
+}
+
+async function fetchModelCandidate(url, { apiKey, customUserAgent, fetchImpl, signal, maxResponseBytes }) {
+  let current = validateProviderHttpUrl(url, "模型地址");
+  for (let redirects = 0; redirects <= MODEL_FETCH_MAX_REDIRECTS; redirects += 1) {
+    const headers = { accept: "application/json", "accept-encoding": "identity", authorization: `Bearer ${apiKey}` };
+    if (customUserAgent) headers["user-agent"] = customUserAgent;
+    const response = await fetchImpl(current, { headers, signal, redirect: "manual" });
+    if ([301, 302, 303, 307, 308].includes(response.status)) {
+      const location = response.headers?.get?.("location");
+      if (!location) fail("模型接口重定向缺少 Location", "MODEL_FETCH_REDIRECT_BLOCKED");
+      if (redirects >= MODEL_FETCH_MAX_REDIRECTS) fail("模型接口重定向次数过多", "MODEL_FETCH_REDIRECT_LIMIT");
+      const next = validateProviderHttpUrl(new URL(location, current).href, "模型重定向地址");
+      if (next.origin !== current.origin) fail("模型接口拒绝携带凭据跨源重定向", "MODEL_FETCH_REDIRECT_BLOCKED");
+      current = next;
+      continue;
+    }
+    const text = await readBoundedResponse(response, maxResponseBytes);
+    if (response.status === 404) return { notFound: true, source: current.href };
+    if (response.status === 401 || response.status === 403) {
+      fail(`模型接口拒绝凭据（HTTP ${response.status}）`, "MODEL_FETCH_UNAUTHORIZED");
+    }
+    if (!response.ok) fail(`模型接口返回 HTTP ${response.status}`, "MODEL_FETCH_UPSTREAM_FAILED");
+    let payload;
+    try { payload = JSON.parse(text); } catch { fail("模型接口返回的不是有效 JSON", "MODEL_FETCH_INVALID_RESPONSE"); }
+    return { notFound: false, source: current.href, models: normalizeFetchedModels(payload) };
+  }
+  fail("模型接口重定向次数过多", "MODEL_FETCH_REDIRECT_LIMIT");
+}
+
+export async function fetchProviderModels({
+  baseUrl,
+  apiKey,
+  isFullUrl = false,
+  customUserAgent = "",
+  fetchImpl = globalThis.fetch,
+  timeoutMs = MODEL_FETCH_TIMEOUT_MS,
+  maxResponseBytes = MODEL_FETCH_MAX_BYTES,
+} = {}) {
+  const key = String(apiKey ?? "").trim();
+  if (!key) fail("API Key 不能为空", "VALIDATION_FAILED");
+  const userAgent = String(customUserAgent ?? "").trim();
+  if (userAgent.length > 200 || /[\r\n]/.test(userAgent)) fail("User-Agent 必须是 200 字符以内的单行文本", "VALIDATION_FAILED");
+  const candidates = buildModelsUrlCandidates(baseUrl, { isFullUrl });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), Math.min(30000, Math.max(100, Number(timeoutMs) || MODEL_FETCH_TIMEOUT_MS)));
+  try {
+    for (const candidate of candidates) {
+      const result = await fetchModelCandidate(candidate, {
+        apiKey: key,
+        customUserAgent: userAgent,
+        fetchImpl,
+        signal: controller.signal,
+        maxResponseBytes: Math.min(4 * 1024 * 1024, Math.max(1024, Number(maxResponseBytes) || MODEL_FETCH_MAX_BYTES)),
+      });
+      if (!result.notFound) return { source: safeModelSource(result.source), models: result.models };
+    }
+    fail("模型接口候选地址均返回 HTTP 404", "MODEL_FETCH_NOT_FOUND");
+  } catch (error) {
+    if (error?.name === "AbortError") fail("获取模型列表超时", "MODEL_FETCH_TIMEOUT");
+    throw error;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -614,13 +784,13 @@ export async function testModelRequest(provider, app) {
     };
   } else if (protocol === "openai-chat") {
     request = {
-      url: `${codexBaseUrl(baseUrl)}/chat/completions`,
+      url: app === "codex" && provider.meta?.isFullUrl ? baseUrl : `${codexBaseUrl(baseUrl)}/chat/completions`,
       headers: { "content-type": "application/json", authorization: `Bearer ${provider.apiKey}` },
       body: { model, max_tokens: 1, messages: [{ role: "user", content: prompt }] },
     };
   } else if (protocol === "openai-responses") {
     request = {
-      url: `${codexBaseUrl(baseUrl)}/responses`,
+      url: app === "codex" && provider.meta?.isFullUrl ? baseUrl : `${codexBaseUrl(baseUrl)}/responses`,
       headers: { "content-type": "application/json", authorization: `Bearer ${provider.apiKey}` },
       body: { model, input: prompt, max_output_tokens: 1 },
     };

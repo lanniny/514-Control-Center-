@@ -107,11 +107,11 @@ function policy() {
   };
 }
 
-function route() {
+function route(selectedId = "codex-technical") {
   return {
     taskType: "coding",
     risk: "medium",
-    selected: { id: "codex-technical", label: "Codex" },
+    selected: { id: selectedId, label: selectedId },
     independent: { id: "claude-fable", label: "Fable" },
     independentRequired: false,
     reason: "test route",
@@ -149,7 +149,7 @@ async function fixture(replies, { models = null, policyOverride = null, costUsdP
   ]);
   const events = [];
   const orchestrator = await new Orchestrator({
-    router: { preview: async () => route() },
+    router: { preview: async ({ requestedProvider } = {}) => route(requestedProvider || "codex-technical") },
     adapters,
     eventStore: { emit: async (type, data) => { events.push({ type, data }); } },
     dataRoot: root,
@@ -495,13 +495,74 @@ test("a targeted legacy continuation queued before an ask stays a steer for that
 
   const paused = await waitPausedForInput(orchestrator, created.id);
   assert.equal(paused.pendingSteer?.[0]?.answerCandidate, undefined);
+  const previousInteractionId = paused.activeInteractionId;
+  const previousInteractionSeq = paused.interactionSeq;
+  paused.interactionStep = paused.maxStepsPerInteraction;
+  await orchestrator.save(paused);
   await orchestrator.continue(created.id, { prompt: "方向 A", answerToAskId: paused.pendingAsk.id });
+  const answered = orchestrator.get(created.id);
+  assert.notEqual(answered.activeInteractionId, previousInteractionId, "回答必须开启新 interaction，不能继承已耗尽预算");
+  assert.equal(answered.interactionSeq, previousInteractionSeq + 1);
   const terminal = await waitTerminal(orchestrator, created.id);
   assert.equal(terminal.status, "succeeded", terminal.error);
   const messages = await new BusStore({ dataRoot: root }).read(created.id);
   assert.ok(messages.some((item) => item.kind === "steer" && item.to === "codex-technical" && item.text === "只问 Codex"));
   assert.ok(!messages.some((item) => item.kind === "answer" && item.text === "只问 Codex"));
   assert.ok(calls.some((call) => call.id === "codex-technical"));
+});
+
+test("an image answer reaches the asking member without a capability subset gate", async (t) => {
+  const fx = await fixture({ "claude-fable": ["unused"] }, {
+    models: {
+      profiles: [
+        { id: "claude-fable", capabilities: [] },
+        { id: "codex-technical", capabilities: ["image-analysis"] },
+      ],
+    },
+  });
+  const { root, orchestrator } = fx;
+  t.after(async () => {
+    await orchestrator.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const created = await orchestrator.create({
+    prompt: "answer attachment validation",
+    execute: false,
+    permissionMode: "plan",
+    teamId: "team-514cc",
+    orchestrationMode: "social",
+  });
+  const run = orchestrator.get(created.id);
+  run.status = "waiting_agent";
+  const ask = await orchestrator.appendBus(run, {
+    from: "claude-fable",
+    to: "lo",
+    kind: "ask",
+    text: "请提供证据",
+  });
+  run.pendingAsk = { id: ask.id, from: ask.from, text: ask.text, at: ask.ts };
+  run.pausedForInput = true;
+  await orchestrator.save(run);
+  const image = resolve(root, "default-full-capability-answer.png");
+
+  await orchestrator.continue(created.id, {
+    prompt: "这是图片证据",
+    answerToAskId: ask.id,
+    agentId: "claude-fable",
+    sources: [image],
+  });
+
+  const after = orchestrator.get(created.id);
+  assert.equal(after.pendingAsk, null);
+  assert.equal(after.pausedForInput, false);
+  assert.deepEqual(after.sources.map((source) => source.path), [image]);
+  assert.deepEqual(after.pendingInteractionSources, []);
+  const messages = await orchestrator.bus.read(created.id);
+  assert.equal(
+    messages.filter((message) => message.kind === "answer" && message.refs?.answerToAskId === ask.id).length,
+    1,
+    "图片回答必须先 durable append 再恢复提问成员",
+  );
 });
 
 test("a targeted member-page steer is never repointed to a pending ask", async (t) => {
@@ -704,7 +765,8 @@ test("fresh-process startup drains a persisted resume queue without requiring a 
   assert.equal(terminal.status, "succeeded", terminal.error);
   assert.equal(terminal.resumeClaim, null);
   assert.deepEqual(terminal.resumeQueue, []);
-  assert.equal(calls.filter((call) => call.id === "claude-fable").length, 2, "恢复轮与 leader 收敛轮各执行一次");
+  // 单成员会话只跑恢复轮：冗余 leader 收敛轮已取消（本用例测的是队列排干，不是收敛轮存在）
+  assert.equal(calls.filter((call) => call.id === "claude-fable").length, 1, "恢复轮执行一次");
 });
 
 test("a two-item resume queue remains fully durable while the first item is only prepared", async (t) => {
@@ -944,10 +1006,14 @@ test("initial native acceptance failure is recovery_required in memory, on disk,
 });
 
 test("prepared leader finalization resumes from its durable work item exactly once after restart", async (t) => {
-  const fx = await fixture({ "claude-fable": ["unused"] });
+  // finalize 只在真有多方产出需要综合时才发生（socialFinalizationWorthwhile）——首轮把话
+  // 路由给第二个成员，才构造出「leader 需要收敛」的真实场景。单成员会话已不再有收敛轮，
+  // 用它做 setup 就永远到不了本用例要测的 prepared 边界。
+  const fx = await fixture({ "claude-fable": ["unused"], "codex-technical": ["unused"] });
   const { root, orchestrator } = fx;
   let restarted;
   let initialDispatches = 0;
+  let routeDispatches = 0;
   let finalDispatches = 0;
   t.after(async () => {
     await restarted?.close();
@@ -970,8 +1036,18 @@ test("prepared leader finalization resumes from its durable work item exactly on
     initialDispatches += 1;
     return {
       sessionId: "initial-completed-session",
-      text: "initial team contribution",
+      text: "[[msg:codex-technical]] 你接手技术部分。",
       protocol: "initial-mock",
+      tokens: 100,
+      costUsd: 0.01,
+    };
+  };
+  orchestrator.adapters.get("codex-technical").send = async () => {
+    routeDispatches += 1;
+    return {
+      sessionId: "route-completed-session",
+      text: "技术部分已完成。",
+      protocol: "route-mock",
       tokens: 100,
       costUsd: 0.01,
     };
@@ -980,7 +1056,7 @@ test("prepared leader finalization resumes from its durable work item exactly on
   const originalEmitEvent = orchestrator.emitEvent.bind(orchestrator);
   let simulatedShutdown = false;
   orchestrator.emitEvent = async (run, type, data, context) => {
-    if (!simulatedShutdown && type === "agent.turn_started" && data.round === 2) {
+    if (!simulatedShutdown && type === "agent.turn_started" && data.round === 3) { // 第 3 轮 = leader 收敛轮
       simulatedShutdown = true;
       orchestrator.controllers.get(run.id)?.abort();
       throw Object.assign(new Error("simulated shutdown after prepared final checkpoint"), { code: "ABORTED" });
@@ -1000,6 +1076,7 @@ test("prepared leader finalization resumes from its durable work item exactly on
 
   assert.equal(simulatedShutdown, true, "test never reached the prepared finalization boundary");
   assert.equal(initialDispatches, 1, "the initial social turn must complete once before finalization");
+  assert.equal(routeDispatches, 1, "the routed member turn must complete once before finalization");
   assert.equal(finalDispatches, 0, "the final provider dispatched before the prepared checkpoint boundary");
   const prepared = JSON.parse(await readFile(resolve(root, "runs", `${created.id}.json`), "utf8"));
   const finalItem = prepared.resumeQueue?.find((item) => item.kind === "finalize");
@@ -1015,7 +1092,7 @@ test("prepared leader finalization resumes from its durable work item exactly on
   assert.equal(terminal.status, "succeeded", terminal.error);
   assert.equal(initialDispatches, 1, "restart repeated the already completed initial social turn");
   assert.equal(finalDispatches, 1, "prepared finalization must dispatch exactly once after restart");
-  assert.equal(terminal.round, 2, "prepared-attempt recovery must not consume another round");
+  assert.equal(terminal.round, 3, "prepared-attempt recovery must not consume another round");
   assert.equal(terminal.resumeClaim, null);
   assert.deepEqual(terminal.resumeQueue, []);
   const finalAttempts = terminal.turnAttempts.filter((attempt) => attempt.sourceWorkItemId === finalItem.itemId);
@@ -2029,12 +2106,14 @@ test("social mode honors startAgentId (leader is not the mandatory entry)", asyn
   const run = await orchestrator.create({ prompt: "技术任务", execute: true, permissionMode: "plan", teamId: "team-514cc", orchestrationMode: "social", startAgentId: "codex-technical" });
   const terminal = await waitTerminal(orchestrator, run.id);
   assert.equal(terminal.status, "succeeded", terminal.error);
-  assert.deepEqual(calls.map((call) => call.id), ["codex-technical", "claude-fable"]); // 首轮直接给指定成员，收敛轮归 leader
+  // 首轮直接给指定成员；只有它一个发言 → 不再派 leader 收敛轮（LO 点某个成员对话时，
+  // leader 插一轮"综合"是零信息增量的冗余轮）
+  assert.deepEqual(calls.map((call) => call.id), ["codex-technical"]);
   assert.equal(terminal.executionOwnerId, "codex-technical");
   assert.ok(calls.every((call) => call.permissionMode === "plan"));
 });
 
-test("social Build assigns workspace-write to the explicit direct recipient, not route.selected", async (t) => {
+test("social Build validates and assigns workspace-write to the explicit direct recipient", async (t) => {
   const { root, calls, orchestrator } = await fixture({
     "claude-fable": ["已按批准执行。", "最终综合。"],
     "codex-technical": ["不应获得写权限。"],
@@ -2051,7 +2130,7 @@ test("social Build assigns workspace-write to the explicit direct recipient, not
   });
   const terminal = await waitTerminal(orchestrator, run.id);
   assert.equal(terminal.status, "succeeded", terminal.error);
-  assert.equal(terminal.route.selected.id, "codex-technical");
+  assert.equal(terminal.route.selected.id, "claude-fable");
   assert.equal(terminal.executionOwnerId, "claude-fable");
   assert.equal(calls[0].id, "claude-fable");
   assert.equal(calls[0].permissionMode, "workspace-write");
@@ -2244,7 +2323,7 @@ test("social is the default orchestration mode (no explicit flag needed)", async
   const terminal = await waitTerminal(orchestrator, run.id);
   assert.equal(terminal.status, "succeeded", terminal.error);
   assert.equal(terminal.orchestrationMode, "social");
-  assert.deepEqual(calls.map((call) => call.id), ["claude-fable", "claude-fable"]); // 起始轮 + 收敛轮
+  assert.deepEqual(calls.map((call) => call.id), ["claude-fable"]); // 单成员会话只有起始轮（冗余收敛轮已取消）
 });
 
 test("ask/answer: [[msg:lo]] pauses the run and continue() resumes back to the asker", async (t) => {
@@ -2263,18 +2342,19 @@ test("ask/answer: [[msg:lo]] pauses the run and continue() resumes back to the a
   assert.ok(paused.pendingAsk?.id);
   const askId = paused.pendingAsk.id;
   assert.ok(events.some((event) => event.type === "run.waiting_input"));
-  // LO 回答 → 恢复主循环：回答轮给发问者 + 收敛轮
+  // LO 回答 → 恢复主循环：回答轮给发问者（单成员会话不再追加冗余 leader 收敛轮）
   await orchestrator.continue(run.id, { prompt: "预算给 2 刀" });
   const terminal = await waitTerminal(orchestrator, run.id);
   assert.equal(terminal.status, "succeeded", terminal.error);
   assert.equal(terminal.pendingAsk, null);
-  assert.deepEqual(calls.map((call) => call.id), ["claude-fable", "claude-fable", "claude-fable"]);
+  assert.deepEqual(calls.map((call) => call.id), ["claude-fable", "claude-fable"]);
   assert.ok(calls[1].prompt.includes("预算给 2 刀")); // 回答进快照
   const bus = new BusStore({ dataRoot: root });
   const messages = await bus.read(run.id);
   assert.ok(messages.some((message) => message.kind === "ask" && message.to === "lo"));
   assert.ok(messages.some((message) => message.kind === "answer" && message.from === "lo" && message.refs?.answerToAskId === askId));
-  assert.ok(messages.some((message) => message.kind === "decide"));
+  // 恢复后的答复以 say 落 bus；decide 只在真跑 leader 收敛轮时才有（前端不消费 decide）
+  assert.ok(messages.some((message) => message.kind === "say" && message.text.includes("继续推进完成")));
 });
 
 test("one provider turn accepts only one [[msg:lo]] ask", async (t) => {
@@ -2438,6 +2518,199 @@ test("write turns fail closed when the adapter cannot honor the worktree cwd", a
   assert.equal(calls.filter((call) => call.id === "codex-technical").length, 0, "unsupported write adapter reached provider dispatch");
 });
 
+// ===== LO 2026-08-14 报障（run d63b839d）：协作台对话逻辑四条根因的反例闸 =====
+// 现象：新建会话点成员对话 → ①只说「你好」，系统自己派了第 2 轮官腔收敛（见上方 social
+// 默认模式/startAgentId 用例的轮数断言）②同一句话被回答两遍且结论互相矛盾 ③说「请你继续
+// 执行」它反复要授权、永不动手 ④第 5 轮一片空白。②③④ 的闸如下。
+
+test("续轮沿用建 run 时批过的写权限——直发续聊不再被降成只读", async (t) => {
+  const { root, calls, orchestrator } = await fixture({ "claude-fable": ["首轮已执行。", "续轮已执行。"] });
+  t.after(async () => { await orchestrator.close(); await rm(root, { recursive: true, force: true }); });
+  const run = await orchestrator.create({
+    prompt: "先做第一步",
+    execute: true,
+    permissionMode: "build",
+    teamId: "team-514cc",
+    orchestrationMode: "social",
+    startAgentId: "claude-fable",
+    maxRounds: 6,
+  });
+  const first = await waitTerminal(orchestrator, run.id);
+  assert.equal(first.status, "succeeded", first.error);
+  assert.equal(calls[0].permissionMode, "workspace-write");
+  await orchestrator.continue(run.id, { prompt: "请你继续执行", agentId: "claude-fable", messageIntent: "steer" });
+  const continued = await waitTerminal(orchestrator, run.id);
+  assert.equal(continued.status, "succeeded", continued.error);
+  // 这一条就是 LO 撞的死循环：审批/租约/工作树全就绪却只给 plan，成员只能反复回
+  // 「请确认是否要我立即执行」，指令与权限两端一起锁死
+  assert.equal(calls.at(-1).permissionMode, "workspace-write", "直发续轮仍被降级为只读");
+});
+
+test("排队插话（轮间边界送达）同样沿用批过的写权限", async (t) => {
+  const fx = await fixture({ "claude-fable": ["插话轮已执行。"] });
+  const { root, calls, orchestrator } = fx;
+  t.after(async () => { await orchestrator.close(); await rm(root, { recursive: true, force: true }); });
+  const gate = deferFirstTurn(fx, "claude-fable", "首轮已执行。");
+  const run = await orchestrator.create({
+    prompt: "先做第一步",
+    execute: true,
+    permissionMode: "build",
+    teamId: "team-514cc",
+    orchestrationMode: "social",
+    startAgentId: "claude-fable",
+    maxRounds: 6,
+  });
+  await gate.started;
+  await orchestrator.continue(run.id, { prompt: "顺手把第二步也做掉", agentId: "claude-fable", messageIntent: "steer" });
+  gate.release();
+  const terminal = await waitTerminal(orchestrator, run.id);
+  assert.equal(terminal.status, "succeeded", terminal.error);
+  const steerCall = calls.find((call) => call.prompt === "顺手把第二步也做掉");
+  assert.ok(steerCall, "排队插话没有派出去");
+  assert.equal(steerCall.permissionMode, "workspace-write", "排队插话轮被降级为只读");
+});
+
+test("续轮授权链失效时降级只读并明确播报，而不是把整轮打死", async (t) => {
+  const { root, calls, orchestrator, events } = await fixture({ "claude-fable": ["首轮已执行。", "本轮只读。"] });
+  t.after(async () => { await orchestrator.close(); await rm(root, { recursive: true, force: true }); });
+  const run = await orchestrator.create({
+    prompt: "先做第一步",
+    execute: true,
+    permissionMode: "build",
+    teamId: "team-514cc",
+    orchestrationMode: "social",
+    startAgentId: "claude-fable",
+    maxRounds: 6,
+  });
+  const first = await waitTerminal(orchestrator, run.id);
+  assert.equal(calls[0].permissionMode, "workspace-write");
+  // 模拟租约到期/被吊销：预检拿不到授权 → 只读续跑 + 播报，绝不静默（安全底座禁 silent fallback）
+  const live = orchestrator.get(run.id);
+  live.buildApproval.lease.status = "revoked";
+  await orchestrator.save(live);
+  await orchestrator.continue(run.id, { prompt: "继续执行", agentId: "claude-fable", messageIntent: "steer" });
+  const continued = await waitTerminal(orchestrator, run.id);
+  assert.equal(continued.status, "succeeded", continued.error); // 降级可继续，不是 POLICY_VIOLATION
+  assert.equal(calls.at(-1).permissionMode, "plan");
+  const degraded = events.filter((event) => event.type === "run.write_degraded");
+  assert.equal(degraded.length, 1);
+  assert.equal(degraded[0].data.reason, "CAPABILITY_LEASE_INACTIVE");
+  assert.equal(degraded[0].data.agentId, "claude-fable");
+});
+
+test("同一条未消费的消息重复提交被幂等门拦住；已消费后的重发照常放行", async (t) => {
+  const fx = await fixture({ "claude-fable": ["插话轮。", "重发轮。"] });
+  const { root, calls, orchestrator } = fx;
+  t.after(async () => { await orchestrator.close(); await rm(root, { recursive: true, force: true }); });
+  const gate = deferFirstTurn(fx, "claude-fable", "首轮已执行。");
+  const run = await orchestrator.create({
+    prompt: "任务",
+    execute: true,
+    permissionMode: "plan",
+    teamId: "team-514cc",
+    orchestrationMode: "social",
+    startAgentId: "claude-fable",
+    maxRounds: 8,
+  });
+  await gate.started;
+  await orchestrator.continue(run.id, { prompt: "同一句话", agentId: "claude-fable", messageIntent: "steer" });
+  try {
+    // 客户端在途锁被 UI 同步冲掉时的第二次提交：拦住，否则同一句话派两轮、各烧一轮预算
+    await assert.rejects(
+      () => orchestrator.continue(run.id, { prompt: "同一句话", agentId: "claude-fable", messageIntent: "steer" }),
+      (error) => error.code === "DUPLICATE_MESSAGE",
+    );
+  } finally {
+    gate.release(); // 断言失败也必须放行首轮，否则 t.after 的 close() 会等一个永不结束的 turn
+  }
+  const terminal = await waitTerminal(orchestrator, run.id);
+  assert.equal(terminal.status, "succeeded", terminal.error);
+  assert.equal(calls.filter((call) => call.prompt === "同一句话").length, 1, "同一句话被派了不止一轮");
+  // 已经被回答过之后，LO 有意重发同一句话是合法的——幂等门只拦「还没被处理」的重复
+  await orchestrator.continue(run.id, { prompt: "同一句话", agentId: "claude-fable", messageIntent: "steer" });
+  assert.equal(calls.filter((call) => call.prompt === "同一句话").length, 2, "已消费的重发被误拦");
+});
+
+test("social durable claim 遇到 cancelled 时进入 recovery_required，不伪造完成", async (t) => {
+  const { root, orchestrator, events } = await fixture({ "claude-fable": ["unused"] });
+  t.after(async () => { await orchestrator.close(); await rm(root, { recursive: true, force: true }); });
+  const adapter = orchestrator.adapters.get("claude-fable");
+  adapter.send = async (input) => {
+    await input.onSessionStarted?.({ sessionId: "cancelled-session" });
+    // Grok 现场形态：exit 0 + partial text + stopReason=cancelled（reasoning/token 已计费）
+    return { sessionId: "cancelled-session", text: "开始处理，但写工具未获授权。", protocol: "mock", stopReason: "cancelled", tokens: 443, costUsd: 0.01 };
+  };
+  const run = await orchestrator.create({
+    prompt: "会被中断的任务",
+    execute: true,
+    permissionMode: "plan",
+    teamId: "team-514cc",
+    orchestrationMode: "social",
+    startAgentId: "claude-fable",
+    maxRounds: 6,
+  });
+  const first = await waitRecoveryOrTerminal(orchestrator, run.id);
+  assert.equal(first.status, "recovery_required", first.error);
+  assert.equal(first.turnAttempts.at(-1).phase, "failed");
+  assert.equal(first.turns.at(-1).outcome, "incomplete");
+  assert.equal(first.turns.at(-1).text, "开始处理，但写工具未获授权。");
+  assert.equal(first.turns.at(-1).tokens, 443);
+  const unproductive = events.filter((event) => event.type === "agent.turn_unproductive");
+  assert.equal(unproductive.length, 1, "异常收束轮没有如实播报");
+  assert.equal(unproductive[0].data.reason, "ABNORMAL_STOP");
+  assert.equal(unproductive[0].data.stopReason, "cancelled");
+  assert.equal(unproductive[0].data.hasPartialOutput, true);
+  assert.equal(events.some((event) => event.type === "agent.turn_completed"), false, "cancelled 轮仍写了 turn_completed");
+  assert.equal(events.some((event) => event.type === "run.completed"), false, "cancelled 轮仍把根任务写成成功");
+  // partial text 只留诊断记录，不进 team bus 冒充交付
+  const messages = await new BusStore({ dataRoot: root }).read(run.id);
+  assert.equal(messages.some((message) => message.kind === "say" && message.text.includes("写工具未获授权")), false);
+});
+
+test("无 durable claim 的直发续轮遇到零文本时进入 failed，轮次不退还", async (t) => {
+  const { root, orchestrator, events } = await fixture({ "claude-fable": ["首轮正常完成。"] });
+  t.after(async () => { await orchestrator.close(); await rm(root, { recursive: true, force: true }); });
+  const run = await orchestrator.create({
+    prompt: "先正常执行一轮",
+    execute: true,
+    permissionMode: "plan",
+    teamId: "team-514cc",
+    orchestrationMode: "social",
+    startAgentId: "claude-fable",
+    maxRounds: 6,
+  });
+  const first = await waitTerminal(orchestrator, run.id);
+  assert.equal(first.status, "succeeded", first.error);
+  const adapter = orchestrator.adapters.get("claude-fable");
+  adapter.send = async (input) => {
+    await input.onSessionStarted?.({ sessionId: "empty-session" });
+    return { sessionId: "empty-session", text: "", protocol: "mock", stopReason: "end_turn", tokens: 19, costUsd: 0.01 };
+  };
+  await assert.rejects(
+    () => orchestrator.continue(run.id, { prompt: "继续", agentId: "claude-fable", messageIntent: "steer" }),
+    { code: "PROVIDER_TURN_INCOMPLETE" },
+  );
+  const failed = orchestrator.get(run.id);
+  assert.equal(failed.status, "failed");
+  assert.equal(failed.round, 2, "provider 已执行并计费的轮次被错误退还");
+  assert.equal(failed.turnAttempts.at(-1).phase, "failed");
+  assert.equal(failed.turns.at(-1).outcome, "incomplete");
+  const unproductive = events.filter((event) => event.type === "agent.turn_unproductive").at(-1);
+  assert.equal(unproductive.data.reason, "EMPTY_OUTPUT");
+  assert.equal(unproductive.data.hasPartialOutput, false);
+  assert.equal(events.filter((event) => event.type === "agent.turn_completed").length, 1, "异常续轮仍写了 turn_completed");
+});
+
+test("socialFinalizationWorthwhile：只有第二个成员发过言才值得烧 leader 收敛轮", async (t) => {
+  const { root, orchestrator } = await fixture({ "claude-fable": ["unused"] });
+  t.after(async () => { await orchestrator.close(); await rm(root, { recursive: true, force: true }); });
+  assert.equal(orchestrator.socialFinalizationWorthwhile({ turns: [] }), false);
+  assert.equal(orchestrator.socialFinalizationWorthwhile({ turns: [{ agentId: "a" }] }), false);
+  assert.equal(orchestrator.socialFinalizationWorthwhile({ turns: [{ agentId: "a" }, { agentId: "a" }] }), false);
+  assert.equal(orchestrator.socialFinalizationWorthwhile({ turns: [{ agentId: "a" }, { agentId: "b" }] }), true);
+  assert.equal(orchestrator.socialFinalizationWorthwhile({ turns: [{ agentId: null }, { agentId: "a" }] }), false);
+});
+
 import { parseCodexCatalog, parseGrokCatalog } from "../src/model-discovery.mjs";
 
 test("parseCodexCatalog maps codex debug models JSON (slug/display_name/reasoning levels)", () => {
@@ -2468,12 +2741,12 @@ test("parseGrokCatalog parses text list with default marker", () => {
   assert.equal(result.defaultModel, "grok45-514");
 });
 
-// 烛 v3.6 致命5：ask 曾在轮次烧尽后挂起——continue() 被 ROUND_LIMIT 挡住，run 永久 waiting_agent。
-// 修复后：ask 立即停止派发（省下回答轮），且 answer 分支先于 ROUND_LIMIT 检查。
-test("ask raised near the round cap preserves same-turn member routes and can still be answered", async (t) => {
+// ask 立即停止当前 interaction；LO 的回答开启新 interaction，冻结的同轮成员路由和最终收敛
+// 都从新预算继续，不再与提问前的全会话 round 争最后一个名额。
+test("an answer starts a fresh interaction and preserves routes frozen beside the ask", async (t) => {
   const { root, calls, orchestrator } = await fixture(
     {
-      // 起始轮就 ask，且 policy 硬顶收得很紧：修复前 ask 后继续消费队列会烧光轮次
+      // 起始轮就 ask，且单 interaction 上限收得很紧；回答后的新 interaction 恰好容纳三步完整链。
       "claude-fable": ["先问一句。\n[[msg:lo]] 方向 A 还是 B？\n[[msg:codex-technical]] 你先预研", "答案收到，收敛。"],
       "codex-technical": ["预研完毕。"],
     },
@@ -2488,18 +2761,75 @@ test("ask raised near the round cap preserves same-turn member routes and can st
     paused = orchestrator.get(run.id);
   }
   assert.ok(paused.status === "waiting_agent" && paused.pendingAsk && paused.pausedForInput, `expected a parked ask, got ${paused.status} (${paused.error ?? "no error"}) | diag=${JSON.stringify({ round: paused.round, maxRounds: paused.maxRounds, pendingAsk: paused.pendingAsk, pausedForInput: paused.pausedForInput, attempts: (paused.turnAttempts ?? []).map((a) => `${a.agentId}:${a.phase}`) })}`);
-  // ask 是硬状态转换：挂起时队列剩余项（codex 预研轮）被冻结，轮次留给回答
+  // ask 是硬状态转换：挂起时队列剩余项（codex 预研轮）被冻结，等待下一次用户交互。
   assert.equal(paused.round, 1, `ask 后不该继续消费队列，round=${paused.round}`);
-  // 关键断言：回答不被 ROUND_LIMIT 拒绝
+  // 关键断言：回答不被全会话累计 round 拒绝。
   await orchestrator.continue(run.id, { prompt: "方向 A" });
   const terminal = await waitTerminal(orchestrator, run.id);
   assert.equal(terminal.status, "succeeded", terminal.error);
   assert.equal(terminal.pendingAsk, null);
   assert.deepEqual(
     calls.map((call) => call.id),
-    ["claude-fable", "claude-fable", "codex-technical"],
-    "the route frozen beside the ask must execute after the asker consumes LO's answer",
+    ["claude-fable", "claude-fable", "codex-technical", "claude-fable"],
+    "the fresh answer interaction must consume the answer, run the frozen route, then finalize",
   );
+});
+
+test("social durable work restores its original interaction after an image steer", async (t) => {
+  const initialImage = resolve(appRoot, "social-initial.png");
+  const steerImage = resolve(appRoot, "social-steer.png");
+  const { root, calls, orchestrator } = await fixture({
+    "claude-fable": ["初始结论。\n[[msg:codex-technical]] 继续旧工作", "最终收敛。"],
+    "codex-technical": ["图片插话已答。", "旧工作已完成。"],
+  }, {
+    models: { profiles: [{ id: "codex-technical", capabilities: ["image-analysis"] }] },
+  });
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const claude = orchestrator.adapters.get("claude-fable");
+  const originalSend = claude.send.bind(claude);
+  const entered = deferred();
+  const release = deferred();
+  let first = true;
+  claude.send = async (input) => {
+    if (first) {
+      first = false;
+      entered.resolve();
+      await release.promise;
+    }
+    return originalSend(input);
+  };
+
+  const created = await orchestrator.create({
+    prompt: "social 主任务",
+    execute: true,
+    permissionMode: "plan",
+    teamId: "team-514cc",
+    orchestrationMode: "social",
+    maxRounds: 8,
+    sources: [initialImage],
+  });
+  await entered.promise;
+  await orchestrator.continue(created.id, {
+    prompt: "只看这张新图",
+    agentId: "codex-technical",
+    messageIntent: "steer",
+    sources: [steerImage],
+  });
+  release.resolve();
+  const terminal = await waitTerminal(orchestrator, created.id);
+  assert.equal(terminal.status, "succeeded", terminal.error);
+
+  const steerCalls = calls.filter((call) => call.prompt.includes(steerImage));
+  assert.equal(steerCalls.length, 1, "新图只能进入 steer turn");
+  assert.doesNotMatch(steerCalls[0].prompt, /social-initial\.png/);
+  const originalWorkCalls = calls.filter((call) => call !== steerCalls[0]);
+  assert.ok(originalWorkCalls.some((call) => call.id === "codex-technical" && call.prompt.includes(initialImage)), "旧 durable route 没有恢复原附件");
+  for (const call of originalWorkCalls) assert.doesNotMatch(call.prompt, /social-steer\.png/);
+  assert.deepEqual(terminal.activeInteractionSources.map((source) => source.path), [initialImage]);
+  const steerState = Object.values(terminal.interactionStates || {}).find((state) =>
+    state.sources?.some((source) => source.path === steerImage));
+  assert.equal(steerState?.interactionStep, 1);
+  assert.ok(terminal.interactionStep >= 2, "旧 durable work 的 interaction step 没有恢复");
 });
 
 // 烛 v3.6 致命6：两个并发 answer 曾会并行执行（一个走恢复、一个走直接续聊）
@@ -2560,12 +2890,11 @@ test("answer submitted inside the pause-parking window is still consumed (owners
   assert.equal(answers.length, 1, "回答未落 bus");
 });
 
-// v3.7 ask 频次熔断（LO 报障实锤：grok 每轮拿体检结论当提问，ask→answer→resume 无限打转，
-// LO 答一次它问一次）——同 agent 每 run 至多挂起 2 次，第三次降级为普通发言走自然收敛
-test("ask->answer loop is throttled after two asks from the same agent", async (t) => {
+// 对话往返不占用自主执行额度：即使同一 agent 连续澄清，LO 的每次回答都开启新 interaction。
+test("ask->answer remains available beyond two replies in the same conversation", async (t) => {
   const { root, orchestrator, events } = await fixture({
     // grok 模式复刻：每一轮都用 [[msg:lo]] 结尾
-    "claude-fable": ["[[msg:lo]] 第一次提问？", "[[msg:lo]] 第二次提问？", "[[msg:lo]] 第三次还问（应被熔断成结论）", "最终收敛。"],
+    "claude-fable": ["[[msg:lo]] 第一次提问？", "[[msg:lo]] 第二次提问？", "[[msg:lo]] 第三次提问？", "最终收敛。"],
   });
   t.after(() => rm(root, { recursive: true, force: true }));
   const run = await orchestrator.create({ prompt: "复刻死循环", execute: true, permissionMode: "plan", teamId: "team-514cc", orchestrationMode: "social", maxRounds: 8 });
@@ -2587,26 +2916,29 @@ test("ask->answer loop is throttled after two asks from the same agent", async (
   paused = await waitPaused();
   assert.equal(paused.pendingAsk?.text?.includes("第二次"), true);
   await orchestrator.continue(run.id, { prompt: "答二" });
-  // 第 3 次 ask：熔断——不再挂起，run 直接走收敛终态
+  // 第 3 次 ask：仍允许回答，不因整场对话累计轮数被截断
+  paused = await waitPaused();
+  assert.equal(paused.pendingAsk?.text?.includes("第三次"), true);
+  await orchestrator.continue(run.id, { prompt: "答三" });
   const terminal = await waitTerminal(orchestrator, run.id);
-  // flaky 追凶诊断（全量并发下偶发"熔断事件未发"）：失败时 dump 全相位
   const diag = () => JSON.stringify({
     status: terminal.status, round: terminal.round, maxRounds: terminal.maxRounds,
-    askCounts: terminal.askCounts, error: terminal.error,
+    interactionSeq: terminal.interactionSeq, interactionStep: terminal.interactionStep, error: terminal.error,
     events: events.map((event) => event.type),
   });
   assert.equal(terminal.status, "succeeded", `${terminal.error} | ${diag()}`);
-  assert.equal(terminal.pendingAsk, null, `第三次 ask 不得再挂起 | ${diag()}`);
-  assert.ok(events.some((event) => event.type === "run.ask_throttled"), `熔断事件未发 | ${diag()}`);
+  assert.equal(terminal.pendingAsk, null, `第三次回答后应正常收敛 | ${diag()}`);
+  assert.ok(!events.some((event) => event.type === "run.ask_throttled"), `不得再产生 run 级回答限额 | ${diag()}`);
   const bus = new BusStore({ dataRoot: root });
   const messages = await bus.read(run.id);
-  assert.ok(messages.some((message) => message.kind === "system" && message.text.includes("已达单 run 上限")), "bus 无熔断证据");
   const asks = messages.filter((message) => message.kind === "ask");
-  assert.equal(asks.length, 2, `ask 消息应恰好 2 条，得到 ${asks.length}`);
+  const answers = messages.filter((message) => message.kind === "answer");
+  assert.equal(asks.length, 3, `ask 消息应恰好 3 条，得到 ${asks.length}`);
+  assert.equal(answers.length, 3, `answer 消息应恰好 3 条，得到 ${answers.length}`);
 });
 
-// 烛 v3.6 致命9：run 级累计成本闸——已知成本回执超硬顶即停派新轮
-test("social loop stops dispatching when the accumulated cost hits the run cap", async (t) => {
+// 当前 interaction 的已知成本回执超硬顶即停派；新用户消息可开启新预算。
+test("social loop stops dispatching when the interaction cost hits its cap", async (t) => {
   const { root, orchestrator, events } = await fixture(
     {
       // 每轮互相点名（修复前会一直路由到轮顶）；单轮成本 0.5、单轮预算 0.05 → cap=0.05*8=0.4，首轮即超

@@ -49,8 +49,257 @@ const MODEL_MAX = 80;
 const SCRIPT_MAX = 20000;
 const COMMON_CONFIG_MAX = 8000;
 const APP_CONFIG_MAX = 50000;
+export const CODEX_MANAGED_CATALOG_FILENAME = "514-forge-model-catalog.json";
+export const OFFICIAL_PROVIDER_SWITCH_ID = "__official__";
+const CODEX_RESERVED_PROVIDER_NAME = "openai official";
+const CODEX_LEGACY_OFFICIAL_PROVIDER_NAME = "OpenAI API Key (Legacy)";
+const GROK_RESERVED_PROVIDER_NAME = "grok official";
+const GROK_LEGACY_OFFICIAL_PROVIDER_NAME = "Grok API Key (Legacy)";
+const GROK_API_BACKENDS = new Set(["chat_completions", "responses"]);
+const DEFAULT_GROK_API_BACKEND = "responses";
+const PROVIDER_ID_PATTERN = /^(?!.*::)(?!.*:$)[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/;
+const LEGACY_CODEX_OFFICIAL_FIELDS = new Set([
+  "id", "name", "providerType", "baseUrl", "apiKey", "apps", "models", "websiteUrl", "notes",
+  "icon", "iconColor", "category", "meta", "sortIndex", "createdAt", "updatedAt",
+]);
+const LEGACY_CODEX_OFFICIAL_META_FIELDS = new Set(["endpointAutoSelect", "costMultiplier"]);
+const LEGACY_GROK_OFFICIAL_FIELDS = new Set([
+  "id", "name", "providerType", "baseUrl", "apiKey", "apps", "models", "websiteUrl", "notes",
+  "icon", "iconColor", "category", "meta", "sortIndex", "createdAt", "updatedAt",
+]);
+const LEGACY_GROK_OFFICIAL_META_FIELDS = new Set(["endpointAutoSelect", "costMultiplier", "appConfig"]);
+const LEGACY_GROK_OFFICIAL_APPCONFIG_FIELDS = new Set(["profile", "apiBackend", "contextWindow", "official"]);
 const TRANSACTION_RENAME_RETRY_DELAYS_MS = Object.freeze([5, 10, 20]);
 const TRANSACTION_RENAME_BUDGET_MS = TRANSACTION_RENAME_RETRY_DELAYS_MS.reduce((total, value) => total + value, 0) + 2;
+
+function isReservedCodexProvider(provider) {
+  return Boolean(provider?.apps?.codex)
+    && String(provider?.name ?? "").trim().toLowerCase() === CODEX_RESERVED_PROVIDER_NAME;
+}
+
+function isReservedGrokProvider(provider) {
+  return Boolean(provider?.apps?.grokbuild)
+    && String(provider?.name ?? "").trim().toLowerCase() === GROK_RESERVED_PROVIDER_NAME;
+}
+
+function reservedOfficialNameConflict(provider) {
+  if (isReservedCodexProvider(provider)) return "OpenAI Official is a reserved Codex provider name";
+  if (isReservedGrokProvider(provider)) return "Grok Official is a reserved Grok Build provider name";
+  return "";
+}
+
+function isPlainRecord(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function validatePersistedProviderIds(providers) {
+  const seen = new Set();
+  for (const provider of providers) {
+    if (!isPlainRecord(provider) || typeof provider.id !== "string" || !PROVIDER_ID_PATTERN.test(provider.id)) {
+      fail("providers.json contains a provider with an invalid id", "PROVIDER_STORE_CORRUPT");
+    }
+    if (seen.has(provider.id)) {
+      fail("providers.json contains duplicate provider ids", "PROVIDER_STORE_CORRUPT");
+    }
+    seen.add(provider.id);
+  }
+}
+
+function isSafeLegacyCodexOfficialProvider(provider) {
+  if (!isPlainRecord(provider) || !isReservedCodexProvider(provider)) return false;
+  if (Object.keys(provider).some((key) => !LEGACY_CODEX_OFFICIAL_FIELDS.has(key))) return false;
+  if (typeof provider.id !== "string" || !provider.id.trim()) return false;
+  if (provider.category !== "official" || provider.providerType !== "custom") return false;
+  if (typeof provider.baseUrl !== "string" || provider.baseUrl.trim()) return false;
+  if (typeof provider.apiKey !== "string" || !provider.apiKey.trim() || provider.apiKey.length > KEY_MAX) return false;
+  if (!isPlainRecord(provider.apps) || provider.apps.codex !== true) return false;
+  if (Object.entries(provider.apps).some(([app, enabled]) => (
+    !PROVIDER_APPS.includes(app) || typeof enabled !== "boolean" || (app !== "codex" && enabled)
+  ))) return false;
+  if (!isPlainRecord(provider.models) || Object.keys(provider.models).length) return false;
+  if (!isPlainRecord(provider.meta)
+    || Object.keys(provider.meta).some((key) => !LEGACY_CODEX_OFFICIAL_META_FIELDS.has(key))) return false;
+  if (Object.hasOwn(provider.meta, "endpointAutoSelect") && typeof provider.meta.endpointAutoSelect !== "boolean") return false;
+  if (Object.hasOwn(provider.meta, "costMultiplier")) {
+    const multiplier = provider.meta.costMultiplier;
+    if (typeof multiplier !== "number" || !Number.isFinite(multiplier) || multiplier <= 0 || multiplier > 1000) return false;
+  }
+  if (String(provider.notes ?? "").trim()) return false;
+  if (!["", "https://chatgpt.com/codex", "https://chatgpt.com/codex/"].includes(String(provider.websiteUrl ?? "").trim())) return false;
+  if (!["", "openai"].includes(String(provider.icon ?? "").trim().toLowerCase())) return false;
+  if (!["", "#00a67e"].includes(String(provider.iconColor ?? "").trim().toLowerCase())) return false;
+  if (provider.sortIndex !== undefined && !Number.isInteger(provider.sortIndex)) return false;
+  for (const field of ["createdAt", "updatedAt"]) {
+    if (provider[field] !== undefined && typeof provider[field] !== "string") return false;
+  }
+  return true;
+}
+
+function isSafeLegacyGrokOfficialProvider(provider) {
+  if (!isPlainRecord(provider) || !isReservedGrokProvider(provider)) return false;
+  if (Object.keys(provider).some((key) => !LEGACY_GROK_OFFICIAL_FIELDS.has(key))) return false;
+  if (typeof provider.id !== "string" || !provider.id.trim()) return false;
+  if (provider.category !== "official" || provider.providerType !== "custom") return false;
+  if (typeof provider.baseUrl !== "string" || provider.baseUrl.trim()) return false;
+  if (typeof provider.apiKey !== "string" || provider.apiKey.length > KEY_MAX) return false;
+  if (!isPlainRecord(provider.apps) || provider.apps.grokbuild !== true) return false;
+  if (Object.entries(provider.apps).some(([app, enabled]) => (
+    !PROVIDER_APPS.includes(app) || typeof enabled !== "boolean" || (app !== "grokbuild" && enabled)
+  ))) return false;
+  if (!isPlainRecord(provider.models)) return false;
+  if (Object.keys(provider.models).some((app) => app !== "grokbuild")) return false;
+  if (provider.models.grokbuild && (!isPlainRecord(provider.models.grokbuild)
+    || Object.keys(provider.models.grokbuild).some((key) => key !== "model")
+    || (provider.models.grokbuild.model !== undefined && typeof provider.models.grokbuild.model !== "string"))) {
+    return false;
+  }
+  if (provider.meta != null) {
+    if (!isPlainRecord(provider.meta)
+      || Object.keys(provider.meta).some((key) => !LEGACY_GROK_OFFICIAL_META_FIELDS.has(key))) return false;
+    if (Object.hasOwn(provider.meta, "endpointAutoSelect") && typeof provider.meta.endpointAutoSelect !== "boolean") return false;
+    if (Object.hasOwn(provider.meta, "costMultiplier")) {
+      const multiplier = provider.meta.costMultiplier;
+      if (typeof multiplier !== "number" || !Number.isFinite(multiplier) || multiplier <= 0 || multiplier > 1000) return false;
+    }
+    if (Object.hasOwn(provider.meta, "appConfig")) {
+      if (!isPlainRecord(provider.meta.appConfig)) return false;
+      if (Object.keys(provider.meta.appConfig).some((app) => app !== "grokbuild")) return false;
+      const grokConfig = provider.meta.appConfig.grokbuild;
+      if (grokConfig != null) {
+        if (!isPlainRecord(grokConfig)
+          || Object.keys(grokConfig).some((key) => !LEGACY_GROK_OFFICIAL_APPCONFIG_FIELDS.has(key))) return false;
+        if (Object.hasOwn(grokConfig, "official") && grokConfig.official !== true) return false;
+      }
+    }
+  }
+  if (String(provider.notes ?? "").trim()) return false;
+  if (!["", "https://x.ai/grok", "https://x.ai/grok/"].includes(String(provider.websiteUrl ?? "").trim())) return false;
+  if (!["", "grok"].includes(String(provider.icon ?? "").trim().toLowerCase())) return false;
+  if (!["", "currentcolor"].includes(String(provider.iconColor ?? "").trim().toLowerCase())) return false;
+  if (provider.sortIndex !== undefined && !Number.isInteger(provider.sortIndex)) return false;
+  for (const field of ["createdAt", "updatedAt"]) {
+    if (provider[field] !== undefined && typeof provider[field] !== "string") return false;
+  }
+  return true;
+}
+
+/** 官方登录态 = 没有自定义模型表痕迹。允许空文档、注释和 [mcp_servers] 等其它内容。 */
+export function isGrokOfficialLiveConfig(configToml) {
+  const text = String(configToml ?? "");
+  if (!text.trim()) return true;
+  if (/# >>> 514-forge-grokbuild-provider/.test(text)) return false;
+  return !/^\s*\[models(?:\.|\])/m.test(text) && !/^\s*\[model(?:\.|\])/m.test(text);
+}
+
+const escapeRegExp = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** TOML 表体切片：表头行之后到下一个表头（或文件尾）为止。headerLiteral 传表头原文（不含方括号）。 */
+function tomlTableBody(text, headerLiteral) {
+  const head = String(text).match(new RegExp(`^\\[${escapeRegExp(headerLiteral)}\\][^\\S\\r\\n]*$`, "m"));
+  if (!head) return null;
+  const rest = String(text).slice(head.index + head[0].length);
+  const end = rest.search(/^\[/m);
+  return end === -1 ? rest : rest.slice(0, end);
+}
+
+/**
+ * Grok live 配置回读：以 [models].default 指向的 [model."<档位>"] 表为真源。
+ * 不能用"文件里第一个 model =" 猜——存在多张 [model."x"] 表时首匹配会认错档位，
+ * 把非生效档位的模型当成 live 值上报（LO 2026-08-13：live 已是 grok-4.6，界面仍显示 4.5 的同类失真面）。
+ * [models].default 缺席时退回文件里第一张 [model."x"] 表，仍比全局首匹配可靠。
+ */
+export function parseGrokLiveConfig(configToml) {
+  const text = String(configToml ?? "");
+  const empty = { profile: null, model: null, baseUrl: null, name: null, apiBackend: null, contextWindow: null };
+  if (!text.trim()) return empty;
+  const profile = tomlTableBody(text, "models")?.match(/^\s*default\s*=\s*"([^"]+)"/m)?.[1]
+    ?? text.match(/^\s*\[model\."((?:[^"\\]|\\.)+)"\][^\S\r\n]*$/m)?.[1]
+    ?? null;
+  if (!profile) return empty;
+  const body = tomlTableBody(text, `model."${profile}"`);
+  if (body == null) return { ...empty, profile };
+  const str = (key) => body.match(new RegExp(`^\\s*${key}\\s*=\\s*"([^"]*)"`, "m"))?.[1] ?? null;
+  const contextRaw = body.match(/^\s*context_window\s*=\s*(\d+)/m)?.[1] ?? null;
+  return {
+    profile,
+    model: str("model"),
+    baseUrl: str("base_url"),
+    name: str("name"),
+    apiBackend: str("api_backend"),
+    contextWindow: contextRaw == null ? null : Number(contextRaw),
+  };
+}
+
+const normalizeDriftUrl = (value) => String(value).trim().replace(/\/+$/, "");
+
+/**
+ * live ↔ 档案 漂移比对字段谱：live 回读到的值与档案存的值不一致时，界面必须照实说出来。
+ * stored 取档案的"投影后应得值"（含默认值补齐），这样 live 与档案真一致时不会假报漂移。
+ */
+const PROVIDER_LIVE_DRIFT_FIELDS = Object.freeze({
+  claude: [
+    { key: "model", label: "默认模型", stored: (p) => p.models?.claude?.model || null },
+    { key: "baseUrl", label: "API 请求地址", stored: (p) => p.baseUrl || null, normalize: normalizeDriftUrl },
+  ],
+  codex: [
+    { key: "model", label: "默认模型", stored: (p) => p.models?.codex?.model || null },
+    { key: "baseUrl", label: "API 请求地址", stored: (p) => p.baseUrl || null, normalize: normalizeDriftUrl },
+  ],
+  gemini: [
+    { key: "model", label: "默认模型", stored: (p) => p.models?.gemini?.model || null },
+    { key: "baseUrl", label: "API 请求地址", stored: (p) => p.baseUrl || null, normalize: normalizeDriftUrl },
+  ],
+  grokbuild: [
+    // 回落链必须与对话框「客户端模型档位」一致（profile → 模型 → 名称派生 key），
+    // 否则通知条的「档案值」会是界面从未显示过的值，「改回档案值」等于凭空塞新内容。
+    { key: "profile", label: "客户端模型档位", stored: (p) => p.meta?.appConfig?.grokbuild?.profile || p.models?.grokbuild?.model || providerKeyOf(p, "grokbuild") },
+    { key: "model", label: "默认模型", stored: (p) => p.models?.grokbuild?.model || p.models?.claude?.model || "grok-4.5" },
+    { key: "apiBackend", label: "API Backend", stored: (p) => p.meta?.appConfig?.grokbuild?.apiBackend || DEFAULT_GROK_API_BACKEND },
+    { key: "contextWindow", label: "上下文窗口", stored: (p) => p.meta?.appConfig?.grokbuild?.contextWindow ?? 500000 },
+    { key: "baseUrl", label: "API 请求地址", stored: (p) => p.baseUrl || null, normalize: normalizeDriftUrl },
+  ],
+  kimi: [
+    { key: "model", label: "默认模型", stored: (p) => p.models?.kimi?.model || null },
+    { key: "baseUrl", label: "API 请求地址", stored: (p) => p.baseUrl || null, normalize: normalizeDriftUrl },
+  ],
+  opencode: [
+    { key: "model", label: "默认模型", stored: (p) => p.models?.opencode?.model || null },
+    { key: "baseUrl", label: "API 请求地址", stored: (p) => p.baseUrl || null, normalize: normalizeDriftUrl },
+  ],
+  openclaw: [
+    { key: "model", label: "默认模型", stored: (p) => p.models?.openclaw?.model || null },
+    { key: "baseUrl", label: "API 请求地址", stored: (p) => p.baseUrl || null, normalize: normalizeDriftUrl },
+  ],
+  hermes: [
+    { key: "model", label: "默认模型", stored: (p) => p.models?.hermes?.model || null },
+    { key: "baseUrl", label: "API 请求地址", stored: (p) => p.baseUrl || null, normalize: normalizeDriftUrl },
+  ],
+});
+
+/**
+ * 单档案的 live 漂移清单。live 侧读不到（null/undefined）的字段一律跳过——
+ * 读不到不等于不一致，凭"读不到"报漂移会把界面变成狼来了。
+ */
+export function providerLiveDrift(app, provider, liveInfo) {
+  const spec = PROVIDER_LIVE_DRIFT_FIELDS[app];
+  if (!spec || !provider || !isPlainRecord(liveInfo) || liveInfo.official) return [];
+  const drift = [];
+  for (const field of spec) {
+    const live = liveInfo[field.key];
+    if (live == null || live === "") continue;
+    let stored;
+    try {
+      stored = field.stored(provider);
+    } catch {
+      continue;
+    }
+    if (stored == null || stored === "") continue;
+    const shape = field.normalize ?? ((value) => (typeof value === "number" ? value : String(value).trim()));
+    if (shape(live) === shape(stored)) continue;
+    drift.push({ field: field.key, label: field.label, live, stored });
+  }
+  return drift;
+}
 
 const MODEL_KEYS_BY_APP = Object.freeze({
   claude: new Set([
@@ -462,6 +711,23 @@ function spliceManagedBlock(original, app, blockId, lines) {
   return `${trimmed ? `${trimmed}\n\n` : ""}${block}\n`;
 }
 
+/**
+ * Grok config.toml 里 Console 拥有的表命名空间：[models] 与 [model."*"]。
+ * 投影时块外的同命名空间表必须先摘掉——不摘就会和管理块内的表构成 TOML 重复表定义（规范里非法），
+ * 或让块外旧表遮盖新投影，表现为"点了启用不生效"。
+ * 其余表（features / plugins / compat.* / ui / marketplace / mcp_servers…）一概不动。
+ */
+export function stripGrokModelTables(text) {
+  const kept = [];
+  let dropping = false;
+  for (const line of String(text ?? "").split(/\r?\n/)) {
+    // 表头行决定归属；管理块标记是注释，不参与归属判断
+    if (/^\s*\[/.test(line)) dropping = /^\s*\[models?(?:\]|\.)/.test(line);
+    if (!dropping) kept.push(line);
+  }
+  return kept.join("\n").replace(/\n{3,}/g, "\n\n").replace(/\s+$/g, "");
+}
+
 /** cc-switch proxyConfig → 代理 URL（投影到 claude env.HTTPS_PROXY / gemini .env）。 */
 export function proxyUrlOf(proxy) {
   if (!proxy?.enabled || !proxy.host) return "";
@@ -484,6 +750,98 @@ export function codexBaseUrl(baseUrl) {
   if (trimmed.endsWith("/v1")) return trimmed;
   const rest = trimmed.split("://")[1] ?? trimmed;
   return rest.includes("/") ? trimmed : `${trimmed}/v1`;
+}
+
+function codexCatalogPointer(configText) {
+  const lines = String(configText ?? "").split(/\r?\n/);
+  const topEnd = lines.findIndex((line) => /^\s*\[/.test(line));
+  const top = lines.slice(0, topEnd === -1 ? lines.length : topEnd);
+  const line = top.find((entry) => /^\s*model_catalog_json\s*=/.test(entry));
+  if (!line) return null;
+  const match = /^\s*model_catalog_json\s*=\s*(?:"([^"]*)"|'([^']*)')\s*(?:#.*)?$/.exec(line);
+  if (!match) fail("existing Codex model_catalog_json is not a supported quoted path", "CODEX_MODEL_CATALOG_CONFLICT");
+  return match[1] ?? match[2] ?? "";
+}
+
+function isManagedCodexCatalogPointer(value) {
+  return String(value ?? "").split(/[\\/]/).at(-1) === CODEX_MANAGED_CATALOG_FILENAME;
+}
+
+const CODEX_REASONING_LEVELS = Object.freeze(["none", "low", "medium", "high", "xhigh", "max", "ultra"]);
+const CODEX_CATALOG_BASE_INSTRUCTIONS = "You are Codex, a coding agent. You and the user share the same workspace and collaborate to achieve the user's goals.";
+
+function codexContextWindow(value, fallback = 128000) {
+  const parsed = Number(String(value ?? "").replace(/^['"]|['"]$/g, ""));
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+/** Codex >= 0.144.5 external-catalog parser requires a complete ModelInfo shape. */
+export function buildCodexModelCatalog(modelCatalog = [], { reasoningEffort = "high", defaultContextWindow = 128000 } = {}) {
+  const defaultEffort = CODEX_REASONING_LEVELS.includes(reasoningEffort) ? reasoningEffort : "high";
+  const seen = new Set();
+  const models = [];
+  for (const [index, row] of modelCatalog.entries()) {
+    const slug = String(row?.model ?? "").trim();
+    if (!slug || seen.has(slug)) continue;
+    seen.add(slug);
+    const displayName = String(row?.displayName ?? "").trim() || slug;
+    const contextWindow = codexContextWindow(row?.contextWindow, codexContextWindow(defaultContextWindow));
+    models.push({
+      slug,
+      display_name: displayName,
+      description: displayName,
+      base_instructions: CODEX_CATALOG_BASE_INSTRUCTIONS,
+      default_reasoning_level: defaultEffort,
+      supported_reasoning_levels: CODEX_REASONING_LEVELS.map((effort) => ({ effort, description: effort === "none" ? "Disable reasoning" : `${effort} reasoning` })),
+      shell_type: "shell_command",
+      visibility: "list",
+      supported_in_api: true,
+      priority: 1000 + index,
+      additional_speed_tiers: [],
+      service_tiers: [],
+      availability_nux: null,
+      upgrade: null,
+      supports_reasoning_summaries: true,
+      default_reasoning_summary: "none",
+      support_verbosity: false,
+      truncation_policy: { mode: "bytes", limit: 10000 },
+      supports_parallel_tool_calls: false,
+      supports_image_detail_original: false,
+      context_window: contextWindow,
+      max_context_window: contextWindow,
+      effective_context_window_percent: 95,
+      experimental_supported_tools: [],
+      input_modalities: ["text", "image"],
+      supports_search_tool: false,
+    });
+  }
+  return { models };
+}
+
+function hasCodexOauthTokenMaterial(auth) {
+  if (auth?.auth_mode !== "chatgpt") return false;
+  const containers = [auth, auth.tokens, auth.chatgpt_tokens].filter((value) => isPlainObject(value));
+  return containers.some((container) => ["access_token", "refresh_token", "id_token"]
+    .some((key) => typeof container[key] === "string" && Boolean(container[key].trim())));
+}
+
+/** Only returns a redacted classification; auth material never leaves the runtime home. */
+export async function codexAuthStatus(runtimeHome) {
+  try {
+    const auth = JSON.parse(await readFile(join(runtimeHome, ".codex", "auth.json"), "utf8"));
+    if (!isPlainObject(auth)) return { mode: "none", authenticated: false, officialCredentialAvailable: false, authModeLabel: "未登录" };
+    const hasApiKey = typeof auth.OPENAI_API_KEY === "string" && Boolean(auth.OPENAI_API_KEY.trim());
+    const hasOauth = hasCodexOauthTokenMaterial(auth);
+    const mode = hasApiKey ? "api-key" : hasOauth ? "oauth" : "none";
+    return {
+      mode,
+      authenticated: mode !== "none",
+      officialCredentialAvailable: hasOauth,
+      authModeLabel: mode === "oauth" ? "ChatGPT OAuth" : mode === "api-key" ? "API Key" : "未登录",
+    };
+  } catch {
+    return { mode: "none", authenticated: false, officialCredentialAvailable: false, authModeLabel: "未登录" };
+  }
 }
 
 /** Claude 投影（to_claude_provider 移植）：空值键不写——key 缺省=不动现有认证（官方订阅登录场景）。
@@ -523,15 +881,17 @@ export function claudeEnvProjection(provider) {
 
 export function codexConfigProjection(provider) {
   const models = provider.models?.codex ?? {};
+  const modelCatalog = provider.meta?.modelCatalog ?? [];
   return {
     apiKey: provider.apiKey || "",
-    model: models.model || "",
+    model: models.model || modelCatalog[0]?.model || "",
     reasoningEffort: models.reasoningEffort || "",
-    baseUrl: codexBaseUrl(provider.baseUrl),
+    baseUrl: provider.meta?.isFullUrl ? String(provider.baseUrl ?? "").trim() : codexBaseUrl(provider.baseUrl),
     // cc-switch apiFormat → codex wire_api：openai_chat 走 Chat Completions，其余按 Responses
     wireApi: provider.meta?.apiFormat === "openai_chat" ? "chat" : "responses",
     codexTop: provider.meta?.codexTop ?? {},
     codexProviderExtra: provider.meta?.codexProviderExtra ?? {},
+    modelCatalog,
   };
 }
 
@@ -1026,16 +1386,38 @@ export class ProviderStore {
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || !Array.isArray(parsed.providers)) {
         fail("providers.json must contain an object with a providers array", "PROVIDER_STORE_CORRUPT");
       }
+      validatePersistedProviderIds(parsed.providers);
+      const migratedLegacyIds = new Set();
+      const providers = parsed.providers.map((provider) => {
+        if (isReservedCodexProvider(provider)) {
+          if (!isSafeLegacyCodexOfficialProvider(provider)) {
+            fail("providers.json contains the reserved Codex provider name OpenAI Official", "PROVIDER_STORE_CORRUPT");
+          }
+          migratedLegacyIds.add(provider.id);
+          return { ...provider, name: CODEX_LEGACY_OFFICIAL_PROVIDER_NAME };
+        }
+        if (isReservedGrokProvider(provider)) {
+          if (!isSafeLegacyGrokOfficialProvider(provider)) {
+            fail("providers.json contains the reserved Grok Build provider name Grok Official", "PROVIDER_STORE_CORRUPT");
+          }
+          migratedLegacyIds.add(provider.id);
+          return { ...provider, name: GROK_LEGACY_OFFICIAL_PROVIDER_NAME };
+        }
+        return provider;
+      });
+      // 旧版曾把 OpenAI API Key 档案命名为内置登录项。只迁移身份字段；
+      // current/failover 属执行状态，不能因兼容迁移而被静默恢复。
       this.storeStatus = { state: "ready", code: null, message: null };
-      for (const provider of Array.isArray(parsed.providers) ? parsed.providers : []) {
+      for (const provider of providers) {
         if (provider?.id) this.providers.set(provider.id, provider);
       }
       for (const app of PROVIDER_APPS) {
         const id = parsed.current?.[app];
-        if (id && this.providers.has(id)) this.current[app] = id;
+        if (id && !migratedLegacyIds.has(id) && this.providers.has(id)) this.current[app] = id;
         const queue = Array.isArray(parsed.failoverQueue?.[app]) ? parsed.failoverQueue[app] : [];
-        this.failoverQueue[app] = queue.filter((qid) => this.providers.has(qid));
-        this.autoFailover[app] = Boolean(parsed.autoFailover?.[app]);
+        const droppedLegacyExecutionRef = migratedLegacyIds.has(id) || queue.some((qid) => migratedLegacyIds.has(qid));
+        this.failoverQueue[app] = queue.filter((qid) => !migratedLegacyIds.has(qid) && this.providers.has(qid));
+        this.autoFailover[app] = !droppedLegacyExecutionRef && Boolean(parsed.autoFailover?.[app]);
         this.commonConfig[app] = typeof parsed.commonConfig?.[app] === "string"
           ? parsed.commonConfig[app].slice(0, COMMON_CONFIG_MAX)
           : "";
@@ -1120,6 +1502,8 @@ export class ProviderStore {
     const apps = {};
     for (const app of PROVIDER_APPS) apps[app] = Boolean(input.apps?.[app]);
     if (!PROVIDER_APPS.some((app) => apps[app])) fail(`at least one app (${PROVIDER_APPS.join("/")}) must be enabled`, "VALIDATION_FAILED");
+    const reservedName = reservedOfficialNameConflict({ name, apps });
+    if (reservedName) fail(reservedName, "PROVIDER_RESERVED_NAME");
     const models = {};
     for (const app of PROVIDER_APPS) {
       const source = input.models?.[app];
@@ -1266,6 +1650,9 @@ export class ProviderStore {
       if (!API_FORMATS.has(apiFormat)) fail("apiFormat must be anthropic/openai_chat/openai_responses/gemini_native", "VALIDATION_FAILED");
       meta.apiFormat = apiFormat;
     }
+    meta.isFullUrl = input.isFullUrl !== undefined
+      ? Boolean(input.isFullUrl)
+      : Boolean(existing?.isFullUrl);
 
     // extraEnv（预设附带固定 env，如 CLAUDE_CODE_MAX_CONTEXT_TOKENS）：投影铺底、投影键优先
     if (input.extraEnv !== undefined) {
@@ -1353,7 +1740,19 @@ export class ProviderStore {
         const appConfig = {};
         for (const [app, config] of Object.entries(input.appConfig)) {
           if (!PROVIDER_APPS.includes(app)) fail(`meta.appConfig has unknown app: ${app}`, "VALIDATION_FAILED");
-          appConfig[app] = cloneBoundedAppConfig(config, `meta.appConfig.${app}`);
+          const cloned = cloneBoundedAppConfig(config, `meta.appConfig.${app}`);
+          if (app === "grokbuild") {
+            if (!isPlainRecord(cloned)) fail("meta.appConfig.grokbuild must be an object", "VALIDATION_FAILED");
+            const apiBackend = String(cloned.apiBackend || DEFAULT_GROK_API_BACKEND).trim().toLowerCase();
+            if (!GROK_API_BACKENDS.has(apiBackend)) {
+              fail("meta.appConfig.grokbuild.apiBackend must be chat_completions or responses", "VALIDATION_FAILED");
+            }
+            cloned.apiBackend = apiBackend;
+            if (cloned.contextWindow !== undefined) {
+              cloned.contextWindow = clampInt(cloned.contextWindow, 1, 10_000_000, 500_000, "Grok context window");
+            }
+          }
+          appConfig[app] = cloned;
         }
         if (JSON.stringify(appConfig).length > APP_CONFIG_MAX) fail(`meta.appConfig exceeds ${APP_CONFIG_MAX} characters`, "VALIDATION_FAILED");
         if (Object.keys(appConfig).length) meta.appConfig = appConfig;
@@ -1538,6 +1937,35 @@ export class ProviderStore {
       }
       await this.#commitState(candidate);
       return publicView(next);
+    });
+  }
+
+  duplicate(id) {
+    const existing = this.get(id);
+    if (isReservedCodexProvider(existing) || isReservedGrokProvider(existing)) {
+      fail("official login providers cannot be duplicated", "PROVIDER_RESERVED_NAME");
+    }
+    const used = new Set([...this.providers.values()].map((provider) => provider.name));
+    const base = String(existing.name ?? "").replace(/ 副本(?: \d+)?$/, "").trim() || "供应商";
+    let name = `${base} 副本`;
+    let suffix = 2;
+    while (used.has(name) || name.length > NAME_MAX) {
+      const next = `${base} 副本 ${suffix}`;
+      if (next.length > NAME_MAX) {
+        const trimmed = base.slice(0, Math.max(1, NAME_MAX - ` 副本 ${suffix}`.length));
+        name = `${trimmed} 副本 ${suffix}`;
+      } else {
+        name = next;
+      }
+      suffix += 1;
+      if (suffix > 99) fail("could not allocate a unique copy name", "VALIDATION_FAILED");
+    }
+    return this.create({
+      ...existing,
+      name,
+      sortIndex: undefined,
+      createdAt: undefined,
+      updatedAt: undefined,
     });
   }
 
@@ -1729,6 +2157,9 @@ export class ProviderStore {
       const idMap = new Map(); // 旧 id → 新 id（merge 冲突重生成时映射 current/queue）
       for (const raw of list) {
         if (!raw || typeof raw !== "object") continue;
+        if (raw.id !== undefined && (typeof raw.id !== "string" || !PROVIDER_ID_PATTERN.test(raw.id))) {
+          fail('provider id must be 1-160 characters using letters, numbers, dot, underscore, colon or hyphen; "::" and a trailing colon are reserved', "VALIDATION_FAILED");
+        }
         const existing = raw.id && mode === "merge" ? providers.get(raw.id) : null;
         // 导入即信任 payload 内密钥（用户自己的备份）；走 #validate 白名单过滤未知字段
         const fields = this.#validate({ ...raw, apiKey: raw.apiKey ?? "" }, { existing });
@@ -1851,6 +2282,7 @@ export class ProviderStore {
       { app: "claude", label: "Claude settings.json", path: join(this.runtimeHome, ".claude", "settings.json") },
       { app: "codex", label: "Codex config.toml", path: join(this.runtimeHome, ".codex", "config.toml") },
       { app: "codex", label: "Codex auth.json", path: join(this.runtimeHome, ".codex", "auth.json"), credential: true },
+      { app: "codex", label: "Codex 514cc 模型目录", path: join(this.runtimeHome, ".codex", CODEX_MANAGED_CATALOG_FILENAME) },
       { app: "gemini", label: "Gemini .env", path: join(this.runtimeHome, ".gemini", ".env"), credential: true },
       { app: "claude-desktop", label: "Claude Desktop 配置", path: desktop.normal },
       { app: "claude-desktop", label: "Claude Desktop 3p 配置", path: desktop.threep },
@@ -2381,10 +2813,19 @@ export class ProviderStore {
     const projection = codexConfigProjection(provider);
     const authPath = join(this.runtimeHome, ".codex", "auth.json");
     const tomlPath = join(this.runtimeHome, ".codex", "config.toml");
+    const catalogPath = join(this.runtimeHome, ".codex", CODEX_MANAGED_CATALOG_FILENAME);
     const rawAuth = this.#rawOverride(provider, "codex", authPath);
     const rawToml = this.#rawOverride(provider, "codex", tomlPath);
-    return this.#withFileRollback([authPath, tomlPath], async () => {
+    return this.#withFileRollback([authPath, tomlPath, catalogPath], async () => {
       const results = [];
+      const catalog = buildCodexModelCatalog(projection.modelCatalog, {
+        reasoningEffort: projection.reasoningEffort,
+        defaultContextWindow: projection.codexProviderExtra.model_context_window,
+      });
+      const rawCatalogPointer = rawToml == null ? null : codexCatalogPointer(rawToml);
+      if (isManagedCodexCatalogPointer(rawCatalogPointer) && !catalog.models.length) {
+        fail("raw Codex config references the 514cc model catalog but no model mapping is configured", "CODEX_MODEL_CATALOG_REQUIRED");
+      }
       if (rawAuth != null) {
         const backup = await this.#writeRaw(authPath, rawAuth);
         results.push({ target: authPath, backup, keys: ["rawConfig"] });
@@ -2397,10 +2838,22 @@ export class ProviderStore {
       if (rawToml != null) {
         const backup = await this.#writeRaw(tomlPath, rawToml);
         results.push({ target: tomlPath, backup, keys: ["rawConfig"] });
+        if (isManagedCodexCatalogPointer(rawCatalogPointer)) {
+          const catalogBackup = await this.#writeText(catalogPath, `${JSON.stringify(catalog, null, 2)}\n`);
+          results.push({ target: catalogPath, backup: catalogBackup, keys: ["models"] });
+        } else {
+          const catalogBackup = await this.#backup(catalogPath);
+          await this.#removeFile(catalogPath);
+          results.push({ target: catalogPath, backup: catalogBackup, removed: true, keys: [] });
+        }
         return results;
       }
       let original = "";
       original = await this.#readConfigText(tomlPath);
+      const catalogPointer = codexCatalogPointer(original);
+      if (catalog.models.length && catalogPointer && !isManagedCodexCatalogPointer(catalogPointer)) {
+        fail("existing Codex model_catalog_json is user-managed; remove it explicitly before enabling a 514cc model mapping", "CODEX_MODEL_CATALOG_CONFLICT");
+      }
       // 段落布局与 cc-switch generateThirdPartyConfig 对齐：name/base_url/wire_api/requires_openai_auth
       // + 预设 section 附加键（env_key/query_params 等）+ common TOML 片段，随标记块整体摘换
       const sectionBody = [`name = ${JSON.stringify(provider.name)}`];
@@ -2416,6 +2869,8 @@ export class ProviderStore {
         model: projection.model,
         model_reasoning_effort: projection.reasoningEffort,
       };
+      if (catalog.models.length) topKeys.model_catalog_json = CODEX_MANAGED_CATALOG_FILENAME;
+      else if (isManagedCodexCatalogPointer(catalogPointer)) topKeys.model_catalog_json = "";
       for (const key of CODEX_TOP_KEYS) topKeys[key] = { raw: projection.codexTop[key] ?? "" };
       const content = spliceToml(original, {
         blockId: provider.id,
@@ -2425,6 +2880,14 @@ export class ProviderStore {
       });
       const backup = await this.#writeText(tomlPath, content);
       results.push({ target: tomlPath, backup, keys: ["model_provider", "model", "model_reasoning_effort"] });
+      if (catalog.models.length) {
+        const catalogBackup = await this.#writeText(catalogPath, `${JSON.stringify(catalog, null, 2)}\n`);
+        results.push({ target: catalogPath, backup: catalogBackup, keys: ["models"] });
+      } else if (isManagedCodexCatalogPointer(catalogPointer)) {
+        const catalogBackup = await this.#backup(catalogPath);
+        await this.#removeFile(catalogPath);
+        results.push({ target: catalogPath, backup: catalogBackup, removed: true, keys: [] });
+      }
       return results;
     });
   }
@@ -2585,12 +3048,15 @@ export class ProviderStore {
       `base_url = ${JSON.stringify(provider.baseUrl)}`,
       `name = ${JSON.stringify(provider.name)}`,
       `api_key = ${JSON.stringify(provider.apiKey)}`,
-      `api_backend = ${JSON.stringify(config.apiBackend || "responses")}`,
+      `api_backend = ${JSON.stringify(config.apiBackend || DEFAULT_GROK_API_BACKEND)}`,
       `context_window = ${clampInt(config.contextWindow, 1, 10_000_000, 500_000, "Grok context window")}`,
       ...((this.commonConfig.grokbuild || "").trim() ? ["", ...this.commonConfig.grokbuild.trim().split(/\r?\n/)] : []),
     ];
     if (!official && (!provider.baseUrl || !provider.apiKey)) fail("Grok Build provider requires both baseUrl and apiKey", "VALIDATION_FAILED");
-    const backup = await this.#writeText(target, spliceManagedBlock(original, "grokbuild", provider.id, lines));
+    // 先摘旧管理块 → 再清掉块外的 [models]/[model."*"]（外部工具或手改留下的同命名空间表，
+    // 不清就是重复表定义 / 旧表遮盖）→ 最后写入新块。LO 自有的其它表全程不动。
+    const base = stripGrokModelTables(spliceManagedBlock(original, "grokbuild", provider.id, []));
+    const backup = await this.#writeText(target, spliceManagedBlock(base, "grokbuild", provider.id, lines));
     return { target, backup, keys: official ? [] : ["models.default", `model.${profile}`] };
   }
 
@@ -2753,9 +3219,48 @@ export class ProviderStore {
     return { target, backup, keys: [`custom_providers.${providerKey}`, "model"] };
   }
 
+  /** 切到应用内置官方登录：Grok 写回空 config.toml，current 指针清空。 */
+  switchToOfficial(app) {
+    if (app !== "grokbuild") fail("official login switch is only supported for Grok Build", "VALIDATION_FAILED");
+    return this.#serialize(async () => {
+      const candidate = this.#snapshotState();
+      candidate.current[app] = null;
+      const previousSignal = this.#publishSignal;
+      const previousDeadline = this.#publishDeadline;
+      const previousPlan = this.#publishPlan;
+      const previousBackupContext = this.#backupContext;
+      const publishPlan = { entries: new Map(), snapshots: new Map(), backups: new Map(), rollbackTemps: new Map() };
+      this.#publishSignal = null;
+      this.#publishDeadline = Infinity;
+      this.#publishPlan = publishPlan;
+      this.#backupContext = { app, providerId: OFFICIAL_PROVIDER_SWITCH_ID, providerName: "Grok Official", reason: "switch" };
+      try {
+        const applied = await this.#applyGrokBuild({
+          id: OFFICIAL_PROVIDER_SWITCH_ID,
+          name: "Grok Official",
+          baseUrl: "",
+          apiKey: "",
+          category: "official",
+          models: {},
+          meta: { appConfig: { grokbuild: { official: true } } },
+        });
+        await this.#stageSidecarWrites([{ target: this.path, content: this.#stateContent(candidate) }]);
+        this.#commitPublishPlanSync(publishPlan, () => this.#installState(candidate));
+        await this.eventStore?.emit("provider.switch", { app, providerId: OFFICIAL_PROVIDER_SWITCH_ID, name: "Grok Official" }).catch(() => {});
+        return { app, official: true, provider: { id: OFFICIAL_PROVIDER_SWITCH_ID, name: "Grok Official" }, applied: Array.isArray(applied) ? applied : [applied] };
+      } finally {
+        this.#publishSignal = previousSignal;
+        this.#publishDeadline = previousDeadline;
+        this.#publishPlan = previousPlan;
+        this.#backupContext = previousBackupContext;
+      }
+    });
+  }
+
   /** 一键切换：投影 → 备份 → 原子写 → current 指针落盘 → 审计事件。 */
   switchTo(app, providerId) {
     if (!PROVIDER_APPS.includes(app)) fail(`unknown app: ${app}`, "VALIDATION_FAILED");
+    if (providerId === OFFICIAL_PROVIDER_SWITCH_ID) return this.switchToOfficial(app);
     return this.#serialize(async () => {
       const provider = this.get(providerId);
       if (!provider.apps[app]) fail(`provider "${provider.name}" is not enabled for ${APP_LABELS[app]}`, "VALIDATION_FAILED");
@@ -2991,19 +3496,24 @@ export class ProviderStore {
     } catch {
       live.claude = { baseUrl: null, model: null, matchedProviderId: null };
     }
-    // codex：标记块认亲优先，base_url 次之
+    // codex：标记块认亲优先，base_url 次之；认证只返回脱敏分类。
     try {
       const toml = await readFile(join(this.runtimeHome, ".codex", "config.toml"), "utf8");
       const marker = toml.match(/# >>> 514-forge-provider \(([^)]+)\) >>>/);
       const baseUrl = toml.match(/^\s*base_url\s*=\s*"([^"]+)"/m)?.[1] ?? null;
       const model = toml.match(/^\s*model\s*=\s*"([^"]+)"/m)?.[1] ?? null;
+      const activeProvider = toml.match(/^\s*model_provider\s*=\s*"([^"]+)"/m)?.[1] ?? null;
+      const auth = await codexAuthStatus(this.runtimeHome);
       live.codex = {
         baseUrl,
         model,
         matchedProviderId: marker?.[1] && this.providers.has(marker[1]) ? marker[1] : this.#matchByBaseUrl("codex", baseUrl, codexBaseUrl),
+        ...auth,
+        official: auth.officialCredentialAvailable && !marker && (!activeProvider || activeProvider === "openai"),
       };
     } catch {
-      live.codex = { baseUrl: null, model: null, matchedProviderId: null };
+      const auth = await codexAuthStatus(this.runtimeHome);
+      live.codex = { baseUrl: null, model: null, matchedProviderId: null, ...auth, official: auth.officialCredentialAvailable };
     }
     // gemini：.env 块
     try {
@@ -3035,19 +3545,30 @@ export class ProviderStore {
     } catch {
       live["claude-desktop"] = { baseUrl: null, model: null, mode: null, matchedProviderId: null };
     }
-    // Grok Build：514 管理块 marker 可精确认亲，字段回读用于检测外部改写。
+    // Grok Build：514 管理块 marker 可精确认亲；无自定义模型表 = 官方登录。
+    // 档位/模型/backend/上下文窗口全部按生效的 [model."<档位>"] 表回读，供界面热加载显示真实 live 值。
     try {
       const toml = await readFile(join(this.runtimeHome, ".grok", "config.toml"), "utf8");
+      const official = isGrokOfficialLiveConfig(toml);
       const marker = toml.match(/# >>> 514-forge-grokbuild-provider \(([^)]+)\) >>>/);
-      const baseUrl = toml.match(/^\s*base_url\s*=\s*"([^"]+)"/m)?.[1] ?? null;
-      const model = toml.match(/^\s*model\s*=\s*"([^"]+)"/m)?.[1] ?? null;
+      const detail = official ? null : parseGrokLiveConfig(toml);
       live.grokbuild = {
-        baseUrl,
-        model,
-        matchedProviderId: marker?.[1] && this.providers.has(marker[1]) ? marker[1] : this.#matchByBaseUrl("grokbuild", baseUrl),
+        baseUrl: detail?.baseUrl ?? null,
+        model: detail?.model ?? null,
+        profile: detail?.profile ?? null,
+        apiBackend: detail?.apiBackend ?? null,
+        contextWindow: detail?.contextWindow ?? null,
+        matchedProviderId: official
+          ? null
+          : marker?.[1] && this.providers.has(marker[1]) ? marker[1] : this.#matchByBaseUrl("grokbuild", detail?.baseUrl ?? null),
+        official,
+        authModeLabel: official ? "Grok 官方登录" : "自定义供应商",
       };
     } catch {
-      live.grokbuild = { baseUrl: null, model: null, matchedProviderId: null };
+      live.grokbuild = {
+        baseUrl: null, model: null, profile: null, apiBackend: null, contextWindow: null,
+        matchedProviderId: null, official: true, authModeLabel: "Grok 官方登录",
+      };
     }
     // Kimi Code：marker 认亲优先；base_url 只在 514 管理块内回读——块外用户自有的
     // providers/services 也写 base_url，全局匹配会认亲错人。514 块缺席时回读 CLI 托管的
@@ -3060,13 +3581,7 @@ export class ProviderStore {
       let baseUrl = blockText.match(/^\s*base_url\s*=\s*"([^"]+)"/m)?.[1] ?? null;
       const model = toml.match(/^\s*default_model\s*=\s*"([^"]+)"\s*$/m)?.[1] ?? null;
       // managed 表体切片：表头行之后到下一个表头（或文件尾）为止
-      let managedBody = null;
-      const managedHead = toml.match(/^\[providers\."managed:kimi-code"\][^\S\r\n]*$/m);
-      if (managedHead) {
-        const rest = toml.slice(managedHead.index + managedHead[0].length);
-        const end = rest.search(/^\[/m);
-        managedBody = end === -1 ? rest : rest.slice(0, end);
-      }
+      const managedBody = tomlTableBody(toml, 'providers."managed:kimi-code"');
       const managedBaseUrl = managedBody?.match(/^\s*base_url\s*=\s*"([^"]+)"/m)?.[1] ?? null;
       const official = !baseUrl
         && managedBody !== null
@@ -3134,6 +3649,14 @@ export class ProviderStore {
       };
     } catch {
       live.hermes = { baseUrl: null, model: null, providerKey: null, matchedProviderId: null };
+    }
+    // live ↔ 档案 漂移：认亲到档案后逐字段比对，界面据此显示真实 live 值而不是过期档案值。
+    // 只挂在认亲成功的条目上——没认亲时"漂移"无从谈起（那是未关联，另一码事）。
+    for (const app of PROVIDER_APPS) {
+      const entry = live[app];
+      if (!isPlainRecord(entry)) continue;
+      const matched = entry.matchedProviderId ? this.providers.get(entry.matchedProviderId) : null;
+      entry.drift = matched ? providerLiveDrift(app, matched, entry) : [];
     }
     return live;
   }

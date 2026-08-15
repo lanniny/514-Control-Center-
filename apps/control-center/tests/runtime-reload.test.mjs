@@ -3,10 +3,31 @@ import assert from "node:assert/strict";
 import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createControlCenter } from "../src/app.mjs";
+import { createControlCenter, validateRuntimeGraph } from "../src/app.mjs";
 
 const appRoot = fileURLToPath(new URL("..", import.meta.url));
 const sourceRepo = resolve(appRoot, "../..");
+
+test("runtime graph rejects unauditable or unknown routing references", async () => {
+  const [models, routing, permissions] = await Promise.all([
+    readFile(resolve(sourceRepo, "config/control-center/models.json"), "utf8").then(JSON.parse),
+    readFile(resolve(sourceRepo, "config/control-center/routing.json"), "utf8").then(JSON.parse),
+    readFile(resolve(sourceRepo, "config/control-center/permissions.json"), "utf8").then(JSON.parse),
+  ]);
+  const assertInvalid = (mutate) => {
+    const candidate = structuredClone(routing);
+    mutate(candidate);
+    assert.throws(() => validateRuntimeGraph({ models, routing: candidate, permissions }), { code: "RUNTIME_GRAPH_INVALID" });
+  };
+  assertInvalid((candidate) => { candidate.rules[0].prefer = ["missing-profile"]; });
+  assertInvalid((candidate) => {
+    candidate.rules[0].constraints = { allowedProviders: ["missing-profile"] };
+  });
+  assertInvalid((candidate) => {
+    candidate.rules[0].reason = "   ";
+    candidate.rules[0].constraints = { allowedProviders: [models.profiles[0].id] };
+  });
+});
 
 test("committing core routing atomically activates a new runtime generation", async (t) => {
   const root = await mkdtemp(resolve(appRoot, ".test-runtime-reload-"));
@@ -37,7 +58,7 @@ test("committing core routing atomically activates a new runtime generation", as
   const current = await state.configManager.read("control.routing");
   const candidateObject = JSON.parse(current.content);
   candidateObject.weights.speed = 0.15;
-  candidateObject.weights.capability = 0.45;
+  candidateObject.weights.quality = 0.55;
   const candidate = `${JSON.stringify(candidateObject, null, 2)}\n`;
   const plan = await state.configManager.plan("control.routing", candidate, current.sha256);
   const result = await state.configManager.apply("control.routing", {

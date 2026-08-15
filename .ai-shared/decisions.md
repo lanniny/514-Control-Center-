@@ -2924,3 +2924,102 @@ critical 源无确认 403 fail-closed、无 Bearer 401、坏 JSON/2MB/并发写�
   exposeContent:false` 的既有安全设计）——本波只对齐「回退」，不假装全对齐。
 - 本波触及安全语义（备份恢复的路径围栏、凭据载体分类、13 处确认文案）且为主驾自写，
   建议烛独立复核：围栏是否覆盖全部 live 目标、确认文案与实际影响面是否一致。
+
+---
+
+### D-2026-08-15-001 · 协作会话拆账：对话无总轮数上限，单次 interaction 限自主步骤
+
+- **date**: 2026-08-15
+- **decider**: LO（明确要求在有效上下文中可任意中断、继续、插话，不受六轮总上限限制）
+- **verdict**: 已落地；推翻 D-2026-08-08-006/007 的“整场会话 `maxRounds` 封顶”现行语义
+- **adopted**: true
+- **source_handoff**: `.ai-shared/handoff/codex-to-claude__conversation-interaction-budget-and-grok-images__20260815-0108.md`
+- **tags**: control-center, orchestrator, interaction-ledger, conversation, multimodal, grok-build, interrupt, recovery
+
+#### 决定
+
+1. `round` 只保留为整场会话的单调审计序号，不再作为继续/插话/回答的终止条件。每条用户消息分配独立
+   `interactionId/interactionSeq`，并把自主调用限制记为 `interactionStep/maxStepsPerInteraction`；默认仍为
+   `6` 步，防止单次交互自行跑飞。旧 `maxRounds` 字段作为持久化与 API 兼容别名保留，不再代表会话寿命。
+2. 旧 run 恢复时，当前遗留 interaction 按历史 `round` 收紧；下一条用户消息必定新建 interaction 并获得
+   新的步骤预算。失败轮退还改退 `interactionStep`，`round` 不回退，保留完整审计链。
+3. 图片来源属于 interaction，不属于整场会话。新消息只绑定本次 `sources`；历史来源仅留在全局台账用于
+   审计与剪贴板生命周期保护。正常 UI 提交统一使用原子 `/messages { sources }`，禁止先 `/sources` 再发消息。
+4. 输入框停止键只中断当前 provider turn；会话头取消才终止整场任务。`cancel` 对状态单调性拥有最终优先级，
+   清空不可再执行的 steer/source 队列，迟到 interrupt settlement 不得复活 cancelled run。
+5. Grok Build 保持官方 `responses` 后端。控制面按本机已实证范围只为 PNG/JPEG 注册 `image-analysis`；
+   GIF/WebP/视频继续保守拒绝。未执行真实付费 Grok 图片请求。
+
+#### 覆盖旧决策
+
+- D-2026-08-08-006 的“`maxRounds: 6` 是整场会话硬上限”不再是当前实现；其历史故障证据继续保留。
+- D-2026-08-08-007 的“只退 `round`、不动 `maxRounds`，成本硬顶 = 单轮预算 × 总轮数”不再成立。
+  当前第一道失控闸是单 interaction 步数，成本上限仍依赖 adapter 是否返回 `costUsd`，不得包装成普适美元硬顶。
+
+#### 验证
+
+- 编排定向组：取消/中断 `5/5`；interaction/附件/并发/social/pipeline/HTTP `15/15`；
+  Grok adapter/router/clipboard/UI `58/58`；UI/静态契约 `27/27`，断言均通过。
+- 浏览器隔离验收：连续提交 8 条消息，首条 1 张 PNG，后 7 条 `sources` 均为空，且没有旧 `/sources` 请求；
+  页面显示 `总轮次 8 · 交互 9 · 本次步骤 1/6`。1440px 与 390px 页面宽度均无溢出，截图已人工复核。
+- `npm run validate` 全部通过；未执行真实 provider 推理。
+
+#### 边界
+
+- Windows/Node test worker 在 TAP summary 后仍有既有句柄不退出；断言为绿，但相关定向命令被外层 timeout 回收。
+- 浏览器业务断言两次完整通过；隔离 server 的 `state.close()` 仍会拖过 QA 外层超时，新增进程随后自行退出，
+  未终止或重启用户现有 Control Center。该关闭链问题不影响本次消息/图片/轮次语义，但不能称为干净 exit 0。
+- 服务端改动需重启现有 Control Center 后生效；本轮未擅自重启。
+
+### D-2026-08-15-002 · 路由能力包络移除与图片运行态激活
+
+- **date**: 2026-08-15
+- **decider**: LO（明确要求删除能力包络；再次提供 `no healthy provider can satisfy multimodal` 现场）
+- **verdict**: 已落地并激活当前桌面运行态
+- **adopted**: true
+- **source_handoff**: `.ai-shared/handoff/codex-to-claude__conversation-interaction-budget-and-grok-images__20260815-0108.md`
+- **tags**: control-center, router, multimodal, capability-envelope, runtime-activation, grok-build
+
+#### 决定
+
+1. 默认模型 profile、运行席位与逻辑成员统一归一化为 `capabilities: ["*"]`；能力标签不再参与路由准入或评分，
+   防止陈旧/孤儿声明把本来可执行的任务制造成 `NO_ROUTE`。
+2. 普通路由只使用质量、速度、健康、成本和 `prefer` 软偏好。只有 `routing.json` 中同时带人类可读
+   `reason` 与 `constraints.allowedProviders` 的特殊通道规则可以硬限制候选。
+3. `multimodal`、`document-analysis`、`long-context` 只软偏好已验证通道。显式目标、团队成员边界和真实健康
+   状态继续 fail-closed；格式/传输失败由实际 adapter 报告，不由静态能力包络提前猜测。
+4. 仓库源、运行内核和桌面进程分开验收。源码改动只有在当前桌面内核重新启动并回读监听后，才算进入用户可复测面。
+5. `constraints.allowedProviders` 的硬限制同时约束主执行与独立复核候选，不能让复核席绕出特殊传输通道；
+   只有团队成员白名单、用户显式选席和真实健康状态继续作为能力体系之外的合法边界。
+6. 旧成员 `capabilities` 数组只保留协议兼容形状，内容无条件迁移为 `["*"]`。旧标签的数量、取值和类型
+   不得再阻断成员加载、保存或资格判断；非数组输入仍按协议错误拒绝。
+7. 旧 run 的固化 `teamRoster` 同样属于迁移边界：启动恢复时将任意历史能力声明归一为 `["*"]`，复用既有
+   restart restatement 保存链回写磁盘；续聊身份提示不得再暴露 `coding/review` 等历史子集。
+
+#### 验证
+
+- 聚焦 Node 组 `28/28 pass`，覆盖路由、剪贴板保存和 PNG 直发 Grok dry-run；TAP 在约 2.36 秒完成，
+  但既有句柄使外层 60 秒超时回收，不能称为干净 exit 0。
+- 路由/成员迁移/治理组 `45/45 pass`，TAP 约 9.91 秒完成；同样因既有句柄被外层 60 秒回收。
+- `npm run validate` 13 项全部 valid，使用 python-jsonschema/python-yaml-jsonschema 与 repository-truth 检查。
+- LO 提供的 51,112 字节真实 PNG：上传与 claim 成功；preview 返回 `multimodal -> grok-build`；dry-run
+  返回 `succeeded/route-preview`，没有启动 provider。
+- Playwright 业务断言输出 `ok:true`：首条 1 个 source，后七条 0 个重放，1440px 与 390px 无横向溢出；
+  配置页同时显示“默认全能力”，没有能力复选框或候选“能力匹配”列；脚本随后仍被既有关闭链拖到
+  120 秒外层超时。
+- 最新边界补验：`router.test.mjs` `19/19 pass`，`team-members.test.mjs` `11/11 pass`；新增覆盖特殊路由
+  约束独立复核候选，以及任意旧能力数组无条件归一为 `["*"]`。两组仍在 TAP 汇总后被外层 30 秒回收。
+- 独立 reviewer 首轮发现旧 run roster 仍向 provider prompt 注入历史能力子集，修复后完整编排组
+  `80/80 pass`，中性提示/旧 roster 定向组 `2/2 pass`；特殊路由图非法引用/空原因契约组 `1/1 pass`
+  且干净退出；复核结论转为 `APPROVED`，未发现第二条绕过。
+- 桌面壳 PID 25104 启动当前源码内核 PID 27676；根页 HTTP `200`，未授权 API 正确返回 `401`；相关 JS
+  `node --check` 与聚焦 `git diff --check` 无错误。
+
+#### 边界
+
+- 未执行真实付费 Grok 图片推理；LO 仍需在当前已打开的桌面实例里提交一次真实消息，确认 provider 回答体感。
+- Node/隔离 server 关闭链的句柄泄漏仍是独立工程债，不影响本次路由业务断言，但不得继续忽略。
+- 当前 PID 27676 在最后的旧 run roster/独立复核约束补强前启动；本轮未按未经授权的方式重启，最后两项将在
+  下次正常启动后进入运行态。
+
+__DELTA__: 烛(Codex) | 1 | 证据：独立 reviewer 发现旧 run roster 能力子集仍进入 provider prompt；当前由 `apps/control-center/src/orchestrator.mjs:119`、`:147` 补齐内存迁移、磁盘回写与续聊回归并获 APPROVED。

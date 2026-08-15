@@ -52,6 +52,10 @@ test("configuration topology fuses providers, capabilities and sources into one 
   ]) {
     assert.match(html, new RegExp(`id="${id}"`), `${id} must remain in the fused configuration topology`);
   }
+  assert.match(html, /默认能力与路由权重/);
+  assert.doesNotMatch(html, /能力包络|Routing Envelope/);
+  assert.match(seatManagerSource, /capabilities:\s*\["\*"\]/);
+  assert.doesNotMatch(seatManagerSource, /capabilityEnvelope|runtime-seat-capabilities-wall"\)\.querySelectorAll/);
   assert.match(html, /data-runtime-workspace-mode="seats"/);
   assert.match(html, /data-runtime-workspace-mode="sources"/);
 

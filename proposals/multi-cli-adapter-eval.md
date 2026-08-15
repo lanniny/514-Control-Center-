@@ -45,7 +45,7 @@
 新增任一 CLI 的执行 Adapter 固定四步（对齐 kimi-cli.mjs / gemini-cli.mjs 的 argv-headless 形态）：
 
 1. `src/adapters/<cli>.mjs`：spawn 契约（argv 构造、stream 解析、事件归一化到 eventStore、权限模式映射、进程超时与哨兵）。
-2. `src/adapters/manifest.mjs`：模板条目（factoryKey、capabilityEnvelope、permissionModes、commandHelp、controlNotes 如实标注验证状态）。
+2. `src/adapters/manifest.mjs`：模板条目（factoryKey、permissionModes、routingDefaults、commandHelp、controlNotes 如实标注验证状态）；能力包络已取消，特殊通道约束只写入带原因的路由规则。
 3. `src/adapters/index.mjs`：factoryEntries 注册（受 unusedFactories / unknown factory 双向守卫）。
 4. **本机验证**：CLI 安装 → `--version` 冒烟 → 单轮 headless 实测 → 席位创建 → 团队编排真跑一轮。未完成前 controlNotes 必须写"未经本机验证"，席位 teamMemberEligible 置 false。
 

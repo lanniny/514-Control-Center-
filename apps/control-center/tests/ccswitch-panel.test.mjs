@@ -72,6 +72,21 @@ test("CLI 环境失败信息保留服务端 outputTail 中的可行动诊断", (
   assert.match(detail, /Actual os: win32/);
 });
 
+test("provider workbench omits Claude Desktop while retaining storage compatibility", async () => {
+  const previousWindow = globalThis.window;
+  globalThis.window = {};
+  try {
+    const root = createRoot();
+    mountCcSwitchPanel({ root, request: (path) => Promise.resolve(responseFor(path)) });
+    await settle();
+
+    assert.match(root.body.innerHTML, /data-ccs-takeover="codex"/);
+    assert.doesNotMatch(root.body.innerHTML, /Claude Desktop|data-ccs-takeover="claude-desktop"/);
+  } finally {
+    globalThis.window = previousWindow;
+  }
+});
+
 test("openDeeplink stays pending through parsing so a slow A and fast B drain in FIFO order", async () => {
   const previousWindow = globalThis.window;
   globalThis.window = {};

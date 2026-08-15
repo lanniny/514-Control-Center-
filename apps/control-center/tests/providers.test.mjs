@@ -5,7 +5,23 @@ import { rmSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ProviderStore, codexBaseUrl, spliceToml, spliceEnv, claudeEnvProjection, maskConfigSecrets } from "../src/providers.mjs";
+import {
+  buildCodexModelCatalog,
+  CODEX_MANAGED_CATALOG_FILENAME,
+  OFFICIAL_PROVIDER_SWITCH_ID,
+  isGrokOfficialLiveConfig,
+  parseGrokLiveConfig,
+  providerLiveDrift,
+  stripGrokModelTables,
+  codexAuthStatus,
+  codexBaseUrl,
+  codexConfigProjection,
+  ProviderStore,
+  spliceToml,
+  spliceEnv,
+  claudeEnvProjection,
+  maskConfigSecrets,
+} from "../src/providers.mjs";
 import { TeamStore } from "../src/teams.mjs";
 
 const appRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -43,6 +59,57 @@ test("codexBaseUrl：纯 origin 补 /v1，已带路径/版本不强行补", () =
   assert.equal(codexBaseUrl(""), "");
 });
 
+test("codex full URL projection is persisted and bypasses /v1 completion", async (t) => {
+  const { store } = await fixture(t);
+  const created = await store.create({
+    ...PACKY,
+    baseUrl: "https://api.example.com/v1/responses",
+    apps: { codex: true },
+    meta: { isFullUrl: true },
+  });
+  assert.equal(created.meta.isFullUrl, true);
+  const internal = store.get(created.id);
+  assert.equal(codexConfigProjection(internal).baseUrl, "https://api.example.com/v1/responses");
+});
+
+test("Codex catalog generator emits parser-required fields and deduplicates models", () => {
+  const catalog = buildCodexModelCatalog([
+    { model: "vendor-a", displayName: "Vendor A", contextWindow: 200000 },
+    { model: "vendor-a", displayName: "Duplicate" },
+    { model: "vendor-b" },
+  ], { reasoningEffort: "xhigh" });
+  assert.equal(catalog.models.length, 2);
+  assert.deepEqual(catalog.models.map((entry) => entry.slug), ["vendor-a", "vendor-b"]);
+  for (const entry of catalog.models) {
+    assert.ok(entry.base_instructions);
+    assert.equal(entry.supports_reasoning_summaries, true);
+    assert.equal(entry.shell_type, "shell_command");
+    assert.equal(entry.default_reasoning_level, "xhigh");
+  }
+});
+
+test("codexAuthStatus distinguishes OAuth, API Key and none without returning credentials", async (t) => {
+  const { runtimeHome } = await fixture(t);
+  await mkdir(join(runtimeHome, ".codex"), { recursive: true });
+  const authPath = join(runtimeHome, ".codex", "auth.json");
+  await writeFile(authPath, JSON.stringify({ OPENAI_API_KEY: "secret" }));
+  assert.deepEqual(await codexAuthStatus(runtimeHome), {
+    mode: "api-key", authenticated: true, officialCredentialAvailable: false, authModeLabel: "API Key",
+  });
+  await writeFile(authPath, JSON.stringify({ auth_mode: "chatgpt", tokens: { access_token: "secret" } }));
+  assert.deepEqual(await codexAuthStatus(runtimeHome), {
+    mode: "oauth", authenticated: true, officialCredentialAvailable: true, authModeLabel: "ChatGPT OAuth",
+  });
+  await writeFile(authPath, JSON.stringify({ auth_mode: "chatgpt" }));
+  assert.equal((await codexAuthStatus(runtimeHome)).mode, "none");
+  await writeFile(authPath, JSON.stringify({ auth_mode: "apikey", tokens: { access_token: "not-chatgpt" } }));
+  assert.equal((await codexAuthStatus(runtimeHome)).mode, "none");
+  await writeFile(authPath, JSON.stringify({ auth_mode: "chatgpt", tokens: { account_id: "account-only" }, last_refresh: "now" }));
+  assert.equal((await codexAuthStatus(runtimeHome)).mode, "none");
+  await writeFile(authPath, JSON.stringify({ auth_mode: "chatgpt", tokens: { access_token: { nested: "not-a-token" } } }));
+  assert.equal((await codexAuthStatus(runtimeHome)).mode, "none");
+});
+
 test("create/list：apiKey 永不出服务端（掩码 + hasApiKey），校验闸齐", async (t) => {
   const { store } = await fixture(t);
   const created = await store.create(PACKY);
@@ -59,6 +126,365 @@ test("create/list：apiKey 永不出服务端（掩码 + hasApiKey），校验�
   await assert.rejects(() => store.create({ ...PACKY, name: "" }), /name is required/);
   await assert.rejects(() => store.create({ ...PACKY, baseUrl: "ftp://x" }), /http\(s\)/);
   await assert.rejects(() => store.create({ ...PACKY, apps: {} }), /at least one app/);
+});
+
+test("isGrokOfficialLiveConfig：空文档和注释为官方态，自定义模型表不是", () => {
+  assert.equal(isGrokOfficialLiveConfig(""), true);
+  assert.equal(isGrokOfficialLiveConfig("  \n# comment only\n"), true);
+  assert.equal(isGrokOfficialLiveConfig("[mcp_servers.demo]\ncommand = \"uvx\"\n"), true);
+  assert.equal(isGrokOfficialLiveConfig("[models]\ndefault = \"x\"\n"), false);
+  assert.equal(isGrokOfficialLiveConfig("[model.x]\nmodel = \"x\"\n"), false);
+  assert.equal(isGrokOfficialLiveConfig("# >>> 514-forge-grokbuild-provider (abc) >>>\n"), false);
+});
+
+test("Grok Official 是 Grok Build 后端保留名，创建、更新和导入均拒绝且不改状态", async (t) => {
+  const { store } = await fixture(t);
+  await assert.rejects(
+    () => store.create({ name: "Grok Official", apps: { grokbuild: true }, baseUrl: "https://api.x.ai/v1", apiKey: "sk-grok" }),
+    { code: "PROVIDER_RESERVED_NAME" },
+  );
+  const created = await store.create({
+    name: "Editable Grok",
+    apps: { grokbuild: true },
+    baseUrl: "https://www.micuapi.ai/v1",
+    apiKey: "sk-micu",
+    models: { grokbuild: { model: "grok-4.5" } },
+  });
+  const before = structuredClone(store.list());
+  await assert.rejects(
+    () => store.update(created.id, { name: "grok official" }),
+    { code: "PROVIDER_RESERVED_NAME" },
+  );
+  await assert.rejects(
+    () => store.importProviders({ providers: [{ name: "Grok Official", id: "imported-grok-official", apps: { grokbuild: true } }] }),
+    { code: "PROVIDER_RESERVED_NAME" },
+  );
+  assert.deepEqual(store.list(), before);
+});
+
+test("ProviderStore: 切换到 Grok Official 清空自定义模型表并回读官方态", async (t) => {
+  const { store, runtimeHome } = await fixture(t);
+  const created = await store.create({
+    name: "Micu",
+    apps: { grokbuild: true },
+    baseUrl: "https://www.micuapi.ai/v1",
+    apiKey: "sk-micu-key",
+    models: { grokbuild: { model: "grok-4.5" } },
+    meta: { appConfig: { grokbuild: { profile: "micu", apiBackend: "responses", contextWindow: 500000 } } },
+  });
+  await store.switchTo("grokbuild", created.id);
+  const custom = await readFile(join(runtimeHome, ".grok", "config.toml"), "utf8");
+  assert.match(custom, /# >>> 514-forge-grokbuild-provider/);
+  assert.match(custom, /base_url = "https:\/\/www\.micuapi\.ai\/v1"/);
+  assert.equal((await store.liveStatus()).grokbuild.official, false);
+
+  const switched = await store.switchTo("grokbuild", OFFICIAL_PROVIDER_SWITCH_ID);
+  assert.equal(switched.official, true);
+  assert.equal(switched.provider.name, "Grok Official");
+  assert.equal(store.list().current.grokbuild, null);
+  const official = await readFile(join(runtimeHome, ".grok", "config.toml"), "utf8");
+  assert.doesNotMatch(official, /# >>> 514-forge-grokbuild-provider/);
+  assert.doesNotMatch(official, /\[models\]/);
+  assert.equal((await store.liveStatus()).grokbuild.official, true);
+});
+
+test("ProviderStore: 复制供应商保留密钥并分配新名称", async (t) => {
+  const { store } = await fixture(t);
+  const created = await store.create({
+    name: "Micu",
+    apps: { grokbuild: true },
+    baseUrl: "https://www.micuapi.ai/v1",
+    apiKey: "sk-micu-secret",
+    models: { grokbuild: { model: "grok-4.5" } },
+  });
+  const copy = await store.duplicate(created.id);
+  assert.equal(copy.name, "Micu 副本");
+  assert.notEqual(copy.id, created.id);
+  assert.equal(copy.hasApiKey, true);
+  assert.equal(store.view(copy.id, { includeSecrets: true }).apiKey, "sk-micu-secret");
+  const second = await store.duplicate(created.id);
+  assert.equal(second.name, "Micu 副本 2");
+});
+
+test("OpenAI Official 是 Codex 后端保留名，创建、更新和导入均拒绝且不改状态", async (t) => {
+  const { store } = await fixture(t);
+  await assert.rejects(
+    () => store.create({ ...PACKY, name: "OpenAI Official", apps: { codex: true } }),
+    { code: "PROVIDER_RESERVED_NAME" },
+  );
+  const created = await store.create({ ...PACKY, name: "Editable Codex", apps: { codex: true } });
+  const before = structuredClone(store.list());
+  await assert.rejects(
+    () => store.update(created.id, { name: "openai official" }),
+    { code: "PROVIDER_RESERVED_NAME" },
+  );
+  await assert.rejects(
+    () => store.importProviders({ providers: [{ ...PACKY, id: "imported-official", name: "OpenAI Official", apps: { codex: true } }] }),
+    { code: "PROVIDER_RESERVED_NAME" },
+  );
+  assert.deepEqual(store.list(), before);
+});
+
+test("ProviderStore: 历史 providers.json 不能绕过 Codex OpenAI Official 保留名", async (t) => {
+  const root = await mkdtemp(resolve(appRoot, ".test-providers-reserved-name-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const dataRoot = join(root, "data");
+  const runtimeHome = join(root, "home");
+  await mkdir(dataRoot, { recursive: true });
+  await mkdir(runtimeHome, { recursive: true });
+  const path = join(dataRoot, "providers.json");
+  const original = `${JSON.stringify({
+    providers: [{
+      id: "legacy-fake-official",
+      name: " OPENAI OFFICIAL ",
+      baseUrl: "https://attacker.invalid/v1",
+      apiKey: "legacy-secret",
+      apps: { codex: true },
+      models: { codex: { model: "fake-model" } },
+    }],
+    current: { codex: "legacy-fake-official" },
+    failoverQueue: { codex: ["legacy-fake-official"] },
+    appOrder: { codex: ["legacy-fake-official"] },
+  }, null, 2)}\n`;
+  await writeFile(path, original, "utf8");
+
+  const store = await new ProviderStore({ dataRoot, runtimeHome }).init();
+  const listed = store.list();
+  assert.equal(listed.storeStatus.state, "blocked");
+  assert.equal(listed.storeStatus.code, "PROVIDER_STORE_CORRUPT");
+  assert.deepEqual(listed.providers, []);
+  assert.equal(listed.current.codex, null);
+  assert.deepEqual(listed.failoverQueue.codex, []);
+  assert.deepEqual(listed.appOrder.codex, []);
+  await assert.rejects(() => store.create(PACKY), { code: "PROVIDER_STORE_CORRUPT" });
+  assert.equal(await readFile(path, "utf8"), original);
+});
+
+test("ProviderStore: 旧版 OpenAI Official API Key 档案安全改名并保留身份、密钥和排序", async (t) => {
+  const root = await mkdtemp(resolve(appRoot, ".test-providers-legacy-official-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const dataRoot = join(root, "data");
+  const runtimeHome = join(root, "home");
+  await mkdir(dataRoot, { recursive: true });
+  await mkdir(runtimeHome, { recursive: true });
+  const path = join(dataRoot, "providers.json");
+  const legacyId = "provider-legacy-openai-official";
+  const fallbackId = "provider-fallback";
+  const legacySecret = "legacy-openai-api-key";
+  const original = `${JSON.stringify({
+    providers: [{
+      id: legacyId,
+      name: "OpenAI Official",
+      providerType: "custom",
+      baseUrl: "",
+      apiKey: legacySecret,
+      apps: { claude: false, "claude-desktop": false, codex: true, gemini: false, grokbuild: false, kimi: false, opencode: false, openclaw: false },
+      models: {},
+      websiteUrl: "https://chatgpt.com/codex",
+      notes: "",
+      icon: "openai",
+      iconColor: "#00A67E",
+      category: "official",
+      meta: { endpointAutoSelect: false, costMultiplier: 1 },
+      sortIndex: 7,
+      createdAt: "2026-07-01T00:00:00.000Z",
+      updatedAt: "2026-07-01T00:00:00.000Z",
+    }, {
+      id: fallbackId,
+      name: "Fallback",
+      providerType: "custom",
+      baseUrl: "https://fallback.invalid/v1",
+      apiKey: "fallback-key",
+      apps: { codex: true },
+      models: {},
+      category: "custom",
+      meta: null,
+      sortIndex: 8,
+    }],
+    current: { codex: legacyId },
+    failoverQueue: { codex: [fallbackId, legacyId] },
+    autoFailover: { codex: true },
+    appOrder: { codex: [legacyId, fallbackId] },
+  }, null, 2)}\n`;
+  await writeFile(path, original, "utf8");
+
+  const store = await new ProviderStore({ dataRoot, runtimeHome }).init();
+  const listed = store.list();
+  const migrated = listed.providers.find((provider) => provider.id === legacyId);
+  assert.equal(listed.storeStatus.state, "ready");
+  assert.equal(migrated.name, "OpenAI API Key (Legacy)");
+  assert.equal(migrated.hasApiKey, true);
+  assert.equal(store.view(legacyId, { includeSecrets: true }).apiKey, legacySecret);
+  assert.equal(listed.current.codex, null, "legacy compatibility must not restore an executable current pointer");
+  assert.deepEqual(listed.failoverQueue.codex, [fallbackId]);
+  assert.equal(listed.autoFailover.codex, false, "dropping a legacy queue member must disable automatic failover");
+  assert.deepEqual(listed.appOrder.codex, [legacyId, fallbackId]);
+  assert.equal(await readFile(path, "utf8"), original, "init migration must not rewrite the credential file");
+
+  const created = await store.create({ ...PACKY, name: "Post-migration Codex", apps: { codex: true } });
+  const persisted = JSON.parse(await readFile(path, "utf8"));
+  const persistedLegacy = persisted.providers.find((provider) => provider.id === legacyId);
+  assert.equal(created.name, "Post-migration Codex");
+  assert.equal(persistedLegacy.name, "OpenAI API Key (Legacy)");
+  assert.equal(persistedLegacy.apiKey, legacySecret);
+  assert.equal(persisted.current.codex, null);
+  assert.deepEqual(persisted.failoverQueue.codex, [fallbackId]);
+  assert.equal(persisted.autoFailover.codex, false);
+  assert.deepEqual(persisted.appOrder.codex.slice(0, 2), [legacyId, fallbackId]);
+
+  const restarted = await new ProviderStore({ dataRoot, runtimeHome }).init();
+  const restartedList = restarted.list();
+  assert.equal(restartedList.storeStatus.state, "ready");
+  assert.equal(restartedList.providers.find((provider) => provider.id === legacyId)?.name, "OpenAI API Key (Legacy)");
+  assert.equal(restarted.view(legacyId, { includeSecrets: true }).apiKey, legacySecret);
+  assert.equal(restartedList.current.codex, null);
+  assert.deepEqual(restartedList.failoverQueue.codex, [fallbackId]);
+  assert.equal(restartedList.autoFailover.codex, false);
+});
+
+test("ProviderStore: 重复或非法持久化 ID 在迁移前 fail-closed", async (t) => {
+  const safeLegacy = {
+    id: "provider-shared-id",
+    name: "OpenAI Official",
+    providerType: "custom",
+    baseUrl: "",
+    apiKey: "legacy-key",
+    apps: { codex: true },
+    models: {},
+    websiteUrl: "https://chatgpt.com/codex",
+    notes: "",
+    icon: "openai",
+    iconColor: "#00A67E",
+    category: "official",
+    meta: { endpointAutoSelect: false, costMultiplier: 1 },
+    sortIndex: 1,
+  };
+  const cases = [
+    ["duplicate id", [
+      safeLegacy,
+      {
+        id: safeLegacy.id,
+        name: "Normal winner",
+        baseUrl: "https://normal.invalid/v1",
+        apiKey: "normal-key",
+        apps: { codex: true },
+        models: {},
+      },
+    ]],
+    ["invalid id", [{ ...safeLegacy, id: "bad\nid" }]],
+    ["reserved action delimiter", [{ ...safeLegacy, id: "provider-target::shadow" }]],
+    ["trailing action delimiter", [{ ...safeLegacy, id: "provider-target:" }]],
+  ];
+
+  for (const [label, providers] of cases) {
+    await t.test(label, async (subtest) => {
+      const root = await mkdtemp(resolve(appRoot, ".test-providers-invalid-id-"));
+      subtest.after(() => rm(root, { recursive: true, force: true }));
+      const dataRoot = join(root, "data");
+      await mkdir(dataRoot, { recursive: true });
+      const path = join(dataRoot, "providers.json");
+      const referencedId = providers[0].id;
+      const original = `${JSON.stringify({
+        providers,
+        current: { codex: referencedId },
+        failoverQueue: { codex: [referencedId] },
+        autoFailover: { codex: true },
+        appOrder: { codex: [referencedId] },
+      }, null, 2)}\n`;
+      await writeFile(path, original, "utf8");
+
+      const store = await new ProviderStore({ dataRoot, runtimeHome: join(root, "home") }).init();
+      const listed = store.list();
+      assert.equal(listed.storeStatus.state, "blocked", label);
+      assert.equal(listed.storeStatus.code, "PROVIDER_STORE_CORRUPT", label);
+      assert.deepEqual(listed.providers, [], label);
+      assert.equal(listed.current.codex, null, label);
+      assert.deepEqual(listed.failoverQueue.codex, [], label);
+      assert.equal(listed.autoFailover.codex, false, label);
+      assert.deepEqual(listed.appOrder.codex, [], label);
+      assert.equal(await readFile(path, "utf8"), original, `${label} must preserve original bytes`);
+    });
+  }
+});
+
+test("ProviderStore: 旧版 Official 兼容只接受无执行扩展的 API Key 档案", async (t) => {
+  const base = {
+    id: "legacy-official-boundary",
+    name: "OpenAI Official",
+    providerType: "custom",
+    baseUrl: "",
+    apiKey: "legacy-key",
+    apps: { codex: true },
+    models: {},
+    websiteUrl: "https://chatgpt.com/codex",
+    notes: "",
+    icon: "openai",
+    iconColor: "#00A67E",
+    category: "official",
+    meta: { endpointAutoSelect: false, costMultiplier: 1 },
+    sortIndex: 1,
+  };
+  const cases = [
+    ["custom base URL", (provider) => { provider.baseUrl = "https://attacker.invalid/v1"; }],
+    ["Codex model mapping", (provider) => { provider.models = { codex: { model: "fake-model" } }; }],
+    ["raw config", (provider) => { provider.meta.rawConfig = { codex: { "~/.codex/config.toml": 'model = "fake"\n' } }; }],
+    ["another enabled app", (provider) => { provider.apps.claude = true; }],
+    ["executable meta", (provider) => { provider.meta.apiFormat = "openai_responses"; }],
+    ["unknown persisted field", (provider) => { provider.futureExecutionConfig = { enabled: true }; }],
+  ];
+
+  for (const [label, mutate] of cases) {
+    await t.test(label, async (subtest) => {
+      const root = await mkdtemp(resolve(appRoot, ".test-providers-legacy-official-boundary-"));
+      subtest.after(() => rm(root, { recursive: true, force: true }));
+      const dataRoot = join(root, "data");
+      await mkdir(dataRoot, { recursive: true });
+      const provider = structuredClone(base);
+      mutate(provider);
+      const path = join(dataRoot, "providers.json");
+      const original = `${JSON.stringify({
+        providers: [provider],
+        current: { codex: provider.id },
+        failoverQueue: { codex: [provider.id] },
+        appOrder: { codex: [provider.id] },
+      }, null, 2)}\n`;
+      await writeFile(path, original, "utf8");
+
+      const store = await new ProviderStore({ dataRoot, runtimeHome: join(root, "home") }).init();
+      const listed = store.list();
+      assert.equal(listed.storeStatus.state, "blocked", label);
+      assert.equal(listed.storeStatus.code, "PROVIDER_STORE_CORRUPT", label);
+      assert.deepEqual(listed.providers, [], label);
+      assert.equal(listed.current.codex, null, label);
+      assert.deepEqual(listed.failoverQueue.codex, [], label);
+      assert.deepEqual(listed.appOrder.codex, [], label);
+      assert.equal(await readFile(path, "utf8"), original, `${label} must preserve original bytes`);
+    });
+  }
+});
+
+test("ProviderStore: 非 Codex 的 OpenAI Official 同名档案不触发保留名迁移", async (t) => {
+  const root = await mkdtemp(resolve(appRoot, ".test-providers-non-codex-official-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const dataRoot = join(root, "data");
+  await mkdir(dataRoot, { recursive: true });
+  await writeFile(join(dataRoot, "providers.json"), `${JSON.stringify({
+    providers: [{
+      id: "claude-same-name",
+      name: "OpenAI Official",
+      baseUrl: "https://claude.invalid/v1",
+      apiKey: "claude-key",
+      apps: { claude: true },
+      models: { claude: { model: "claude-model" } },
+    }],
+    appOrder: { claude: ["claude-same-name"] },
+  }, null, 2)}\n`, "utf8");
+
+  const store = await new ProviderStore({ dataRoot, runtimeHome: join(root, "home") }).init();
+  const listed = store.list();
+  assert.equal(listed.storeStatus.state, "ready");
+  assert.equal(listed.providers[0].name, "OpenAI Official");
+  assert.deepEqual(listed.appOrder.claude, ["claude-same-name"]);
 });
 
 test("ProviderStore: providers.json 提交重试 Windows 瞬时 rename 并清理临时文件", async (t) => {
@@ -426,6 +852,14 @@ test("Provider 导入使用候选图：引用冲突、校验失败或写盘失�
   assert.deepEqual(store.list(), originalMemory);
   assert.equal(await readFile(join(dataRoot, "providers.json"), "utf8"), originalDisk);
 
+  for (const invalidProviderId of ["bad\nid", "provider-target::shadow", "provider-target:"]) {
+    const invalidId = structuredClone(exported);
+    invalidId.providers[0].id = invalidProviderId;
+    await assert.rejects(() => store.importProviders(invalidId, { mode: "replace" }), { code: "VALIDATION_FAILED" });
+    assert.deepEqual(store.list(), originalMemory);
+    assert.equal(await readFile(join(dataRoot, "providers.json"), "utf8"), originalDisk);
+  }
+
   const renamed = structuredClone(exported);
   renamed.providers[0].name = "should-not-commit";
   failWrites = true;
@@ -515,6 +949,154 @@ test("codex 投影：auth.json 合并 + config.toml 标记块外科手术（用�
   assert.equal((toml.match(/# >>> 514-forge-provider/g) ?? []).length, 1, "标记块永远只有一段");
   assert.match(toml, /base_url = "https:\/\/zeta\.example\.com\/v1"/);
   assert.equal(store.list().current.codex, second.id);
+});
+
+test("codex 模型映射：预览与切换生成 514cc 受管目录，切到空映射时一起清理", async (t) => {
+  const { store, runtimeHome } = await fixture(t);
+  const codexRoot = join(runtimeHome, ".codex");
+  const tomlPath = join(codexRoot, "config.toml");
+  const catalogPath = join(codexRoot, CODEX_MANAGED_CATALOG_FILENAME);
+  const mapped = await store.create({
+    ...PACKY,
+    name: "Mapped Codex",
+    meta: {
+      modelCatalog: [
+        { model: "vendor-a", displayName: "Vendor A", contextWindow: 200000 },
+        { model: "vendor-b", displayName: "Vendor B" },
+      ],
+    },
+  });
+
+  const preview = await store.previewSwitch("codex", { id: mapped.id });
+  assert.deepEqual(preview.files.map((file) => file.path).sort(), [
+    `~/.codex/${CODEX_MANAGED_CATALOG_FILENAME}`,
+    "~/.codex/auth.json",
+    "~/.codex/config.toml",
+  ]);
+  const previewToml = preview.files.find((file) => file.path.endsWith("config.toml")).content;
+  const previewCatalog = JSON.parse(preview.files.find((file) => file.path.endsWith(CODEX_MANAGED_CATALOG_FILENAME)).content);
+  assert.match(previewToml, new RegExp(`^model_catalog_json = "${CODEX_MANAGED_CATALOG_FILENAME.replaceAll(".", "\\.")}"$`, "m"));
+  assert.deepEqual(previewCatalog.models.map((entry) => entry.slug), ["vendor-a", "vendor-b"]);
+  await assert.rejects(readFile(catalogPath, "utf8"), { code: "ENOENT" });
+
+  await store.switchTo("codex", mapped.id);
+  const liveToml = await readFile(tomlPath, "utf8");
+  const liveCatalog = JSON.parse(await readFile(catalogPath, "utf8"));
+  assert.match(liveToml, new RegExp(`^model_catalog_json = "${CODEX_MANAGED_CATALOG_FILENAME.replaceAll(".", "\\.")}"$`, "m"));
+  assert.deepEqual(liveCatalog.models.map((entry) => entry.slug), ["vendor-a", "vendor-b"]);
+
+  const plain = await store.create({
+    ...PACKY,
+    name: "Plain Codex",
+    baseUrl: "https://plain.example.com",
+    meta: { modelCatalog: [] },
+  });
+  await store.switchTo("codex", plain.id);
+  assert.doesNotMatch(await readFile(tomlPath, "utf8"), /^model_catalog_json\s*=/m);
+  await assert.rejects(readFile(catalogPath, "utf8"), { code: "ENOENT" });
+  assert.equal(store.list().current.codex, plain.id);
+});
+
+test("raw Codex TOML 与 514cc 受管模型目录保持同一事务生命周期", async (t) => {
+  const { store, runtimeHome } = await fixture(t);
+  const codexRoot = join(runtimeHome, ".codex");
+  const tomlPath = join(codexRoot, "config.toml");
+  const catalogPath = join(codexRoot, CODEX_MANAGED_CATALOG_FILENAME);
+  const mapped = await store.create({
+    ...PACKY,
+    name: "Raw mapped Codex",
+    apps: { codex: true },
+    meta: {
+      modelCatalog: [{ model: "raw-vendor-model", displayName: "Raw Vendor" }],
+      rawConfig: { codex: { "~/.codex/config.toml": `model = "raw-vendor-model"\nmodel_catalog_json = "${CODEX_MANAGED_CATALOG_FILENAME}"\n` } },
+    },
+  });
+  await store.switchTo("codex", mapped.id);
+  assert.match(await readFile(tomlPath, "utf8"), new RegExp(`model_catalog_json = "${CODEX_MANAGED_CATALOG_FILENAME.replaceAll(".", "\\.")}"`));
+  assert.deepEqual(JSON.parse(await readFile(catalogPath, "utf8")).models.map((item) => item.slug), ["raw-vendor-model"]);
+
+  const plain = await store.create({
+    ...PACKY,
+    name: "Raw plain Codex",
+    apps: { codex: true },
+    meta: { rawConfig: { codex: { "~/.codex/config.toml": 'model = "plain-model"\n' } } },
+  });
+  await store.switchTo("codex", plain.id);
+  await assert.rejects(readFile(catalogPath, "utf8"), { code: "ENOENT" });
+
+  const invalid = await store.create({
+    ...PACKY,
+    name: "Raw missing mapping",
+    apps: { codex: true },
+    meta: { rawConfig: { codex: { "~/.codex/config.toml": `model_catalog_json = "${CODEX_MANAGED_CATALOG_FILENAME}"\n` } } },
+  });
+  const beforeToml = await readFile(tomlPath, "utf8");
+  await assert.rejects(store.switchTo("codex", invalid.id), { code: "CODEX_MODEL_CATALOG_REQUIRED" });
+  assert.equal(await readFile(tomlPath, "utf8"), beforeToml);
+  assert.equal(store.list().current.codex, plain.id);
+});
+
+test("codex 模型映射：拒绝覆盖用户自管 model_catalog_json", async (t) => {
+  const { store, runtimeHome } = await fixture(t);
+  const codexRoot = join(runtimeHome, ".codex");
+  const tomlPath = join(codexRoot, "config.toml");
+  const original = 'model_catalog_json = "my-private-catalog.json"\napproval_policy = "on-request"\n';
+  await mkdir(codexRoot, { recursive: true });
+  await writeFile(tomlPath, original, "utf8");
+  const mapped = await store.create({
+    ...PACKY,
+    name: "Conflicting Codex",
+    meta: { modelCatalog: [{ model: "vendor-a", displayName: "Vendor A" }] },
+  });
+
+  await assert.rejects(store.switchTo("codex", mapped.id), { code: "CODEX_MODEL_CATALOG_CONFLICT" });
+  assert.equal(await readFile(tomlPath, "utf8"), original);
+  await assert.rejects(readFile(join(codexRoot, "auth.json"), "utf8"), { code: "ENOENT" });
+  await assert.rejects(readFile(join(codexRoot, CODEX_MANAGED_CATALOG_FILENAME), "utf8"), { code: "ENOENT" });
+  assert.equal(store.list().current.codex, null);
+});
+
+test("codex 模型目录发布失败：auth/config/catalog/current/providers 全部回滚", async (t) => {
+  const { store, dataRoot, runtimeHome } = await fixture(t);
+  const codexRoot = join(runtimeHome, ".codex");
+  const authPath = join(codexRoot, "auth.json");
+  const tomlPath = join(codexRoot, "config.toml");
+  const catalogPath = join(codexRoot, CODEX_MANAGED_CATALOG_FILENAME);
+  const first = await store.create({
+    ...PACKY,
+    name: "Catalog P1",
+    meta: { modelCatalog: [{ model: "vendor-a", displayName: "Vendor A" }] },
+  });
+  await store.switchTo("codex", first.id);
+  const second = await store.create({
+    ...PACKY,
+    name: "Catalog P2",
+    baseUrl: "https://catalog-p2.invalid",
+    apiKey: "catalog-p2-key",
+    meta: { modelCatalog: [{ model: "vendor-b", displayName: "Vendor B" }] },
+  });
+  const before = {
+    auth: await readFile(authPath, "utf8"),
+    toml: await readFile(tomlPath, "utf8"),
+    catalog: await readFile(catalogPath, "utf8"),
+    providers: await readFile(join(dataRoot, "providers.json"), "utf8"),
+  };
+  let catalogReached = false;
+  store.beforeLiveConfigPublish = ({ target }) => {
+    if (target !== catalogPath) return;
+    catalogReached = true;
+    throw Object.assign(new Error("injected catalog publication failure"), { code: "EIO" });
+  };
+
+  await assert.rejects(store.switchTo("codex", second.id), { code: "EIO" });
+  assert.equal(catalogReached, true);
+  assert.equal(await readFile(authPath, "utf8"), before.auth);
+  assert.equal(await readFile(tomlPath, "utf8"), before.toml);
+  assert.equal(await readFile(catalogPath, "utf8"), before.catalog);
+  assert.equal(await readFile(join(dataRoot, "providers.json"), "utf8"), before.providers);
+  assert.equal(store.list().current.codex, first.id);
+  const tempNames = [...await readdir(codexRoot), ...await readdir(dataRoot)];
+  assert.equal(tempNames.some((name) => name.startsWith(".514forge") && name.endsWith(".tmp")), false);
 });
 
 test("gemini 投影：.env 标记块，块外行原样保留", async (t) => {
@@ -622,6 +1204,249 @@ test("liveStatus：外部手改 live 配置也能按 baseUrl 认亲，不唯 cur
   assert.equal(live.claude.baseUrl, "https://api.packycode.com");
   assert.equal(live.claude.matchedProviderId, created.id); // 认亲成功
   assert.equal(live.codex.matchedProviderId, null);
+});
+
+test("stripGrokModelTables：只摘 [models]/[model.*]，LO 自有表一律保留", () => {
+  const text = `[models]
+default = "grok-4.6"
+
+[features]
+remote_fetch = false
+
+[model."grok-4.6"]
+model = "grok-4.6"
+api_key = "sk-x"
+
+[compat.claude]
+hooks = false
+
+[modelsomething]
+keep = true
+`;
+  const stripped = stripGrokModelTables(text);
+  assert.doesNotMatch(stripped, /^\[models\]/m);
+  assert.doesNotMatch(stripped, /^\[model\."grok-4\.6"\]/m);
+  assert.doesNotMatch(stripped, /remote_fetch = false[\s\S]*api_key/); // 模型表体整段摘掉
+  assert.match(stripped, /^\[features\]$/m);
+  assert.match(stripped, /^remote_fetch = false$/m);
+  assert.match(stripped, /^\[compat\.claude\]$/m);
+  assert.match(stripped, /^\[modelsomething\]$/m); // 前缀相同但不是同一命名空间，不误伤
+  assert.match(stripped, /^keep = true$/m);
+  assert.equal(stripGrokModelTables(""), "");
+  assert.equal(stripGrokModelTables(null), "");
+});
+
+test("Grok Build custom providers preserve the Responses default and validate optional backends", async (t) => {
+  const { store, runtimeHome } = await fixture(t);
+  const created = await store.create({
+    name: "Grok Chat Default",
+    baseUrl: "https://514claude.xyz/v1",
+    apiKey: "sk-grok-key-1234567890",
+    apps: { grokbuild: true },
+    models: { grokbuild: { model: "grok-4.6-build" } },
+    meta: { appConfig: { grokbuild: { profile: "grok-4.6-build", contextWindow: 500000 } } },
+  });
+  assert.equal(created.meta.appConfig.grokbuild.apiBackend, "responses");
+  await store.switchTo("grokbuild", created.id);
+  const toml = await readFile(join(runtimeHome, ".grok", "config.toml"), "utf8");
+  assert.match(toml, /^api_backend = "responses"$/m);
+
+  const chat = await store.create({
+    name: "Grok Chat Optional",
+    baseUrl: "https://chat.example.com/v1",
+    apiKey: "sk-grok-chat-key-1234567890",
+    apps: { grokbuild: true },
+    models: { grokbuild: { model: "grok-chat" } },
+    meta: { appConfig: { grokbuild: { profile: "grok-chat", apiBackend: "chat_completions" } } },
+  });
+  assert.equal(chat.meta.appConfig.grokbuild.apiBackend, "chat_completions");
+
+  await assert.rejects(
+    store.create({
+      name: "Invalid Grok Backend",
+      baseUrl: "https://example.com/v1",
+      apiKey: "sk-invalid-grok-key-1234",
+      apps: { grokbuild: true },
+      models: { grokbuild: { model: "grok" } },
+      meta: { appConfig: { grokbuild: { apiBackend: "xml_rpc" } } },
+    }),
+    { code: "VALIDATION_FAILED" },
+  );
+});
+
+test("applyGrokBuild：块外已有 models/model 表时启用不产出重复表定义", async (t) => {
+  const { store, runtimeHome } = await fixture(t);
+  const created = await store.create({
+    name: "514",
+    baseUrl: "https://514claude.xyz/v1",
+    apiKey: "sk-grok-key-1234567890",
+    apps: { grokbuild: true },
+    models: { grokbuild: { model: "grok-4.5" } },
+    meta: { appConfig: { grokbuild: { profile: "grok-4.5", apiBackend: "responses", contextWindow: 500000 } } },
+  });
+  // 外部工具/手改留下的块外配置：模型表 + LO 自有的 features/plugins/compat/ui
+  await mkdir(join(runtimeHome, ".grok"), { recursive: true });
+  await writeFile(join(runtimeHome, ".grok", "config.toml"), `[models]
+default = "grok-4.6"
+
+[features]
+remote_fetch = false
+
+[model."grok-4.6"]
+model = "grok-4.6"
+base_url = "https://514claude.xyz/v1"
+
+[plugins]
+disabled = ["user/x/context7"]
+
+[ui]
+fork_secondary_model = "grok-4.5"
+`, "utf8");
+
+  await store.switchTo("grokbuild", created.id);
+  const toml = await readFile(join(runtimeHome, ".grok", "config.toml"), "utf8");
+  // 重复表定义闸：[models] 与生效模型表都只能各出现一次，否则 TOML 非法 / 旧表遮盖新投影
+  assert.equal((toml.match(/^\[models\]$/gm) ?? []).length, 1);
+  assert.equal((toml.match(/^\[model\."/gm) ?? []).length, 1);
+  assert.doesNotMatch(toml, /grok-4\.6/); // 块外旧档位已摘除，不残留
+  // LO 自有的其它表全程不动
+  assert.match(toml, /^\[features\]$/m);
+  assert.match(toml, /^remote_fetch = false$/m);
+  assert.match(toml, /^\[plugins\]$/m);
+  assert.match(toml, /^disabled = \["user\/x\/context7"\]$/m);
+  assert.match(toml, /^\[ui\]$/m);
+  // 启用后 live 与档案对齐
+  const live = await store.liveStatus();
+  assert.equal(live.grokbuild.profile, "grok-4.5");
+  assert.equal(live.grokbuild.model, "grok-4.5");
+  assert.deepEqual(live.grokbuild.drift, []);
+});
+
+test("parseGrokLiveConfig：按 [models].default 指向的表回读，多模型表不认错档位", () => {
+  // LO 2026-08-13 现场形态：生效档位 grok-4.6 排在 [models] 之后，前面还有别的表
+  const real = `[models]
+default = "grok-4.6"
+
+[features]
+remote_fetch = false
+
+[model."grok-4.6"]
+model = "grok-4.6"
+base_url = "https://514claude.xyz/v1"
+name = "https://514claude.xyz/"
+api_backend = "responses"
+context_window = 500000
+api_key = "sk-secret"
+
+[ui]
+fork_secondary_model = "grok-4.5"
+`;
+  assert.deepEqual(parseGrokLiveConfig(real), {
+    profile: "grok-4.6",
+    model: "grok-4.6",
+    baseUrl: "https://514claude.xyz/v1",
+    name: "https://514claude.xyz/",
+    apiBackend: "responses",
+    contextWindow: 500000,
+  });
+
+  // 反例闸：非生效档位排在生效档位之前时，"文件里第一个 model =" 的读法必然读错
+  const multi = `[models]
+default = "grok-4.6"
+
+[model."grok-4.5"]
+model = "grok-4.5"
+base_url = "https://old.example.com/v1"
+
+[model."grok-4.6"]
+model = "grok-4.6"
+base_url = "https://514claude.xyz/v1"
+`;
+  const picked = parseGrokLiveConfig(multi);
+  assert.equal(picked.model, "grok-4.6");
+  assert.equal(picked.baseUrl, "https://514claude.xyz/v1");
+
+  // [models].default 缺席时退回第一张 [model."x"] 表；空文档不炸
+  assert.equal(parseGrokLiveConfig('[model."solo"]\nmodel = "m"\n').profile, "solo");
+  assert.equal(parseGrokLiveConfig("").model, null);
+  assert.equal(parseGrokLiveConfig(null).profile, null);
+  // default 指向一张不存在的表：档位如实上报，其余字段留 null，不拿别的表凑
+  assert.deepEqual(parseGrokLiveConfig('[models]\ndefault = "ghost"\n\n[model."other"]\nmodel = "x"\n'), {
+    profile: "ghost", model: null, baseUrl: null, name: null, apiBackend: null, contextWindow: null,
+  });
+});
+
+test("providerLiveDrift：live 与档案逐字段比对，读不到的字段不报漂移", () => {
+  const provider = {
+    id: "p1",
+    name: "n",
+    baseUrl: "https://514claude.xyz/v1",
+    models: { grokbuild: { model: "grok-4.5" } },
+    meta: { appConfig: { grokbuild: { profile: "grok-4.5", apiBackend: "responses", contextWindow: 500000 } } },
+  };
+  const drift = providerLiveDrift("grokbuild", provider, {
+    profile: "grok-4.6",
+    model: "grok-4.6",
+    baseUrl: "https://514claude.xyz/v1/", // 尾斜杠差异不算漂移
+    apiBackend: "responses",
+    contextWindow: 500000,
+    official: false,
+  });
+  assert.deepEqual(drift.map((entry) => entry.field), ["profile", "model"]);
+  assert.deepEqual(drift[1], { field: "model", label: "默认模型", live: "grok-4.6", stored: "grok-4.5" });
+
+  // live 侧读不到（null/空）→ 跳过，不能凭"读不到"报不一致
+  assert.deepEqual(providerLiveDrift("grokbuild", provider, { model: null, profile: "", official: false }), []);
+  // 官方登录态不比对；未知 app 与空档案安全返回
+  assert.deepEqual(providerLiveDrift("grokbuild", provider, { model: "grok-4.6", official: true }), []);
+  assert.deepEqual(providerLiveDrift("nope", provider, { model: "x" }), []);
+  assert.deepEqual(providerLiveDrift("grokbuild", null, { model: "x" }), []);
+});
+
+test("liveStatus：grokbuild 外部换档位后回读真实 live 值并挂漂移清单", async (t) => {
+  const { store, runtimeHome } = await fixture(t);
+  const created = await store.create({
+    name: "514",
+    baseUrl: "https://514claude.xyz/v1",
+    apiKey: "sk-grok-key-1234567890",
+    apps: { grokbuild: true },
+    models: { grokbuild: { model: "grok-4.5" } },
+    meta: { appConfig: { grokbuild: { profile: "grok-4.5", apiBackend: "responses", contextWindow: 500000 } } },
+  });
+  // 模拟外部改动：CLI/手改把生效档位换成 grok-4.6，且没有 514 管理块 marker
+  await mkdir(join(runtimeHome, ".grok"), { recursive: true });
+  await writeFile(join(runtimeHome, ".grok", "config.toml"), `[models]
+default = "grok-4.6"
+
+[model."grok-4.6"]
+model = "grok-4.6"
+base_url = "https://514claude.xyz/v1"
+name = "514"
+api_backend = "responses"
+context_window = 500000
+api_key = "sk-grok-key-1234567890"
+`, "utf8");
+
+  const live = await store.liveStatus();
+  assert.equal(live.grokbuild.official, false);
+  assert.equal(live.grokbuild.model, "grok-4.6");
+  assert.equal(live.grokbuild.profile, "grok-4.6");
+  assert.equal(live.grokbuild.apiBackend, "responses");
+  assert.equal(live.grokbuild.contextWindow, 500000);
+  assert.equal(live.grokbuild.matchedProviderId, created.id); // 按 baseUrl 认亲
+  assert.deepEqual(live.grokbuild.drift.map((entry) => entry.field), ["profile", "model"]);
+  assert.equal(live.grokbuild.drift[1].live, "grok-4.6");
+  assert.equal(live.grokbuild.drift[1].stored, "grok-4.5");
+  assert.equal(JSON.stringify(live).includes("sk-grok-key"), false); // live 回读永不带密钥
+
+  // 一致时不假报漂移：走正规 switchTo 投影后 live == 档案
+  await store.switchTo("grokbuild", created.id);
+  const aligned = await store.liveStatus();
+  assert.equal(aligned.grokbuild.matchedProviderId, created.id);
+  assert.deepEqual(aligned.grokbuild.drift, []);
+
+  // 未认亲的条目也必须有 drift 字段（前端按数组消费），且为空
+  assert.deepEqual(aligned.codex.drift, []);
 });
 
 test("claudeEnvProjection：models 缺省时主模型回落三档", () => {

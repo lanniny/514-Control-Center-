@@ -247,13 +247,8 @@ export function createRuntimeSeatManager({
     }
   }
 
-  function capabilityMarkup(template, selected) {
-    const envelope = Array.isArray(template?.capabilityEnvelope) ? template.capabilityEnvelope : [];
-    const checked = new Set(selected || []);
-    return envelope.length ? envelope.map((capability) => `<label class="chip" title="${escapeHtml(capability)}">
-      <input type="checkbox" value="${escapeHtml(capability)}"${checked.has(capability) ? " checked" : ""} />
-      <span>${escapeHtml(capability)}</span>
-    </label>`).join("") : '<span class="subtle">此 Adapter 未声明能力包络</span>';
+  function capabilityMarkup() {
+    return '<span class="chip is-on" title="能力不参与准入或路由评分">默认全能力</span><span class="subtle">特殊通道只由带原因的显式路由规则限制</span>';
   }
 
   function modelOptionsFor(template, seat = {}) {
@@ -406,12 +401,7 @@ export function createRuntimeSeatManager({
       }
     }
     syncMetricOutputs();
-    const currentCapabilities = preserveCapabilities
-      ? [...byId("runtime-seat-capabilities-wall").querySelectorAll('input[type="checkbox"]:checked')].map((input) => input.value)
-      : [];
-    const envelope = new Set(template.capabilityEnvelope || []);
-    const selected = currentCapabilities.filter((capability) => envelope.has(capability));
-    byId("runtime-seat-capabilities-wall").innerHTML = capabilityMarkup(template, selected.length ? selected : template.capabilityEnvelope);
+    byId("runtime-seat-capabilities-wall").innerHTML = capabilityMarkup();
     if (!preserveProvider || !template.providerApp) byId("runtime-seat-provider-select").value = "";
     if (!preserveCapabilities) {
       draft.model = null;
@@ -473,7 +463,7 @@ export function createRuntimeSeatManager({
     byId("runtime-seat-speed-input").value = String(seat.speed ?? template?.routingDefaults?.speed ?? 0.8);
     byId("runtime-seat-cost-input").value = String(seat.costTier ?? template?.routingDefaults?.costTier ?? 3);
     syncMetricOutputs();
-    byId("runtime-seat-capabilities-wall").innerHTML = capabilityMarkup(template, seat.capabilities);
+    byId("runtime-seat-capabilities-wall").innerHTML = capabilityMarkup();
     providerOptions(template, seat.providerId || "");
     void refreshProviderBalance();
     renderTemplateDetails(template, live ? { ...seat, ...live } : seat);
@@ -504,8 +494,6 @@ export function createRuntimeSeatManager({
 
   function blankSeat(copy = null) {
     const template = templateById(copy?.adapter) || selectableTemplates()[0] || {};
-    const capabilities = (copy?.capabilities || template.capabilityEnvelope || [])
-      .filter((capability) => (template.capabilityEnvelope || []).includes(capability));
     return {
       id: "",
       builtin: false,
@@ -520,7 +508,7 @@ export function createRuntimeSeatManager({
       model: copy?.model ?? null,
       defaultEffort: copy?.defaultEffort ?? null,
       defaultPermissionMode: copy?.defaultPermissionMode || template.defaultPermissionMode || "read-only",
-      capabilities: capabilities.length ? capabilities : [...(template.capabilityEnvelope || [])],
+      capabilities: ["*"],
       coordinatorEligible: copy?.coordinatorEligible !== false && template.coordinatorCapable === true,
       quality: copy?.quality ?? template.routingDefaults?.quality ?? 0.8,
       speed: copy?.speed ?? template.routingDefaults?.speed ?? 0.8,
@@ -545,8 +533,6 @@ export function createRuntimeSeatManager({
 
   function collect() {
     const template = templateById(byId("runtime-seat-adapter-select").value);
-    const capabilities = [...byId("runtime-seat-capabilities-wall").querySelectorAll('input[type="checkbox"]:checked')]
-      .map((input) => input.value);
     const base = source || draft || {};
     const payload = {
       id: cleanId(byId("runtime-seat-id-input").value),
@@ -562,7 +548,7 @@ export function createRuntimeSeatManager({
       model: byId("runtime-seat-model-input").value.trim() || null,
       defaultEffort: byId("runtime-seat-effort-input").value.trim() || null,
       defaultPermissionMode: byId("runtime-seat-permission-select").value,
-      capabilities,
+      capabilities: ["*"],
       coordinatorEligible: template?.coordinatorCapable === true && byId("runtime-seat-coordinator-input").checked,
       quality: Number(byId("runtime-seat-quality-input").value),
       speed: Number(byId("runtime-seat-speed-input").value),
@@ -601,7 +587,6 @@ export function createRuntimeSeatManager({
     if (!payload.label) return "席位名称不能为空";
     if (!payload.role) return "席位职责不能为空";
     if (!payload.adapter) return "请选择 Adapter";
-    if (!payload.capabilities.length) return "至少选择一项能力";
     const template = templateById(payload.adapter);
     if (template?.requiresCommand && !payload.command) return "该 Adapter 需要执行命令";
     if (payload.command && template?.commandMode === "executable-only"

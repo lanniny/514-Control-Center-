@@ -272,7 +272,7 @@ export function registerCcSwitchRoutes(router, ctx) {
       return;
     }
     if (path === "/api/ccswitch/domain/sync-live") {
-      ctx.json(response, 200, { ok: true, warnings: await domain.syncAllLive() });
+      ctx.json(response, 200, { ok: true, warnings: await domain.syncAllLive(input) });
       return;
     }
     const syncAction = path.match(/^\/api\/ccswitch\/domain\/sync\/(webdav|s3)\/(test|upload|download)$/);

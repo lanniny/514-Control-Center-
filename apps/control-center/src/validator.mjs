@@ -439,9 +439,6 @@ async function validateModelWiring(repoRoot) {
         errors.push(`adapter template ${template.id || index} has invalid ${field}`);
       }
     }
-    if (!Array.isArray(template.capabilityEnvelope) || !template.capabilityEnvelope.length) {
-      errors.push(`adapter template ${template.id || index} must declare a non-empty capabilityEnvelope`);
-    }
   }
   for (const [index, binding] of bindings.entries()) {
     if (!binding || typeof binding !== "object" || Array.isArray(binding)) {
@@ -496,12 +493,6 @@ async function validateModelWiring(repoRoot) {
     if (!template || template.selectable === false) {
       errors.push(`custom runtime seat ${profileId} references unsupported adapter template ${configuredAdapter || "missing"}`);
       continue;
-    }
-    const unsupportedCapabilities = Array.isArray(profile?.capabilities)
-      ? profile.capabilities.filter((capability) => !template.capabilityEnvelope.includes(capability))
-      : [];
-    if (unsupportedCapabilities.length) {
-      errors.push(`custom runtime seat ${profileId} exceeds ${template.id} capability envelope: ${unsupportedCapabilities.join(", ")}`);
     }
   }
 

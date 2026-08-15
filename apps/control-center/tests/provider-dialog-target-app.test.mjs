@@ -5,11 +5,14 @@ import { fileURLToPath } from "node:url";
 import { ProviderStore, PROVIDER_SCHEME_APPS } from "../src/providers.mjs";
 
 const appRoot = fileURLToPath(new URL("..", import.meta.url));
-const [appSource, html, css, stateSource] = await Promise.all([
+const [appSource, html, css, stateSource, panelSource, routesSource, providerSource] = await Promise.all([
   readFile(`${appRoot}/public/app.js`, "utf8"),
   readFile(`${appRoot}/public/index.html`, "utf8"),
   readFile(`${appRoot}/public/styles.css`, "utf8"),
   readFile(`${appRoot}/public/state.js`, "utf8"),
+  readFile(`${appRoot}/public/modules/ccswitch-panel.js`, "utf8"),
+  readFile(`${appRoot}/src/ccswitch/routes.mjs`, "utf8"),
+  readFile(`${appRoot}/src/providers.mjs`, "utf8"),
 ]);
 
 function sourceSection(startMarker, endMarker) {
@@ -85,6 +88,104 @@ test("Claude Desktop is absent from provider-scheme UI but retained as a storage
   assert.match(appSource, /const existing = teamById\(state\.editingTeamId\)\?\.providers \?\? \{\}/);
   assert.match(appSource, /const value = select \? select\.value : existing\[app\] \?\? ""/);
   assert.match(appSource, /body: \{ teamId, apps: bindings\.map\(\(\[app\]\) => app\) \}/);
+  assert.match(panelSource, /domain\/sync-live[^\n]+body: \{ apps: PROVIDER_SCHEME_APPS \}/);
+  assert.match(panelSource, /backups\/\$\{encodeURIComponent\(button\.dataset\.ccsBackupRestore\)\}\/restore[^\n]+apps: PROVIDER_SCHEME_APPS/);
+  assert.match(panelSource, /sync\/\$\{kind\}\/\$\{verb\}[^\n]+syncLive: true, apps: PROVIDER_SCHEME_APPS/);
+  assert.match(routesSource, /domain\.syncAllLive\(input\)/);
+});
+
+test("Codex provider dialog keeps only custom, OpenAI Official, Azure OpenAI and Micu", () => {
+  const section = sourceSection("function codexPresetAllowed", "/** 网格过滤");
+  assert.match(section, /name === "OpenAI Official"/);
+  assert.match(section, /name === "Azure OpenAI"/);
+  assert.match(section, /name\.toLowerCase\(\) === "micu"/);
+  assert.doesNotMatch(section, /category === "official"|isOfficial === true|cn_official/);
+  assert.match(appSource, /syntheticCustom: true/);
+
+  const rank = new Function(`${section}\nreturn codexPresetRank;`)();
+  assert.deepEqual([
+    { name: "Micu" },
+    { name: "Azure OpenAI", isOfficial: true },
+    { name: "OpenAI Official" },
+    { name: "自定义配置", syntheticCustom: true },
+  ].sort((a, b) => rank(a) - rank(b)).map((preset) => preset.name), [
+    "自定义配置",
+    "OpenAI Official",
+    "Azure OpenAI",
+    "Micu",
+  ]);
+});
+
+test("Codex advanced options stay in the basic panel as a details disclosure", () => {
+  assert.match(html, /<div id="provider-codex-advanced-slot"><\/div>/);
+  assert.match(html, /<details class="provider-advanced-section" id="provider-advanced-details"/);
+  assert.match(appSource, /compactSlot\.append\(advancedDetails\)/);
+  assert.match(appSource, /elements\["provider-tabs"\]\.hidden = compactMode/);
+  assert.match(css, /\.provider-dialog\.is-codex/);
+});
+
+test("Grok Build dialog keeps only custom, Grok Official and Micu, with compact advanced options", () => {
+  const section = sourceSection("function grokbuildPresetAllowed", "function compactPresetRank");
+  assert.match(section, /name === "Grok Official"/);
+  assert.match(section, /name\.toLowerCase\(\) === "micu"/);
+  assert.doesNotMatch(section, /PackyCode|ZetaAPI/);
+  assert.match(html, /id="provider-grokbuild-profile"/);
+  assert.match(html, /id="provider-grokbuild-backend"/);
+  assert.match(html, /id="provider-grokbuild-context"/);
+  assert.match(appSource, /classList\.toggle\("is-grokbuild", grokMode\)/);
+  assert.match(css, /\.provider-grok-field-grid/);
+
+  const rankSection = sourceSection("function compactPresetRank", "/** 网格过滤");
+  const rank = new Function(`${rankSection}\nreturn grokbuildPresetRank;`)();
+  assert.deepEqual([
+    { name: "Micu" },
+    { name: "Grok Official" },
+    { name: "自定义配置", syntheticCustom: true },
+  ].sort((a, b) => rank(a) - rank(b)).map((preset) => preset.name), [
+    "自定义配置",
+    "Grok Official",
+    "Micu",
+  ]);
+});
+
+test("OpenAI Official is a fixed virtual row and cannot be saved as a duplicate", () => {
+  const row = sourceSection("function officialLiveRowMarkup", "/** 单个供应商行");
+  assert.match(row, /OpenAI Official/);
+  assert.match(row, /provider-row-actions" aria-label="内置供应商，无可用操作"><\/div>/);
+  assert.doesNotMatch(row, /data-provider-edit|data-provider-delete|data-provider-duplicate/);
+  assert.match(appSource, /provider-save-button"\]\.disabled = immutableOfficial/);
+  assert.match(appSource, /card\.dataset\.presetKey === "codex:OpenAI Official" \|\| card\.dataset\.presetKey === "grokbuild:Grok Official"\) return/);
+});
+
+test("Grok Official is a fixed virtual row with enable action and cannot be saved as a duplicate", () => {
+  const row = sourceSection("function officialLiveRowMarkup", "/** 单个供应商行");
+  assert.match(row, /Grok Official/);
+  assert.match(row, /data-provider-switch="grokbuild::__official__"/);
+  assert.match(row, /https:\/\/x\.ai\/grok/);
+  assert.doesNotMatch(row, /data-provider-edit|data-provider-delete|data-provider-duplicate/);
+  assert.match(appSource, /preset\.name === "Grok Official"/);
+  assert.match(appSource, /data-provider-duplicate=/);
+  assert.match(appSource, /data-provider-usage-config=/);
+  assert.match(appSource, /#lucide-pencil/);
+});
+
+test("provider ids cannot collide with the frontend :: action protocol", () => {
+  const patternLiteral = providerSource.match(/const PROVIDER_ID_PATTERN = (\/[^\n]+\/);/)?.[1];
+  assert.ok(patternLiteral, "missing backend provider ID contract");
+  const pattern = new Function(`return ${patternLiteral};`)();
+
+  assert.equal(pattern.test("provider-target:shadow"), true, "a single colon remains a valid provider ID character");
+  assert.equal(pattern.test("provider-target::shadow"), false, "the frontend action delimiter must be reserved");
+  assert.equal(pattern.test("provider-target:"), false, "a trailing colon would collide with the move action suffix");
+  assert.match(appSource, /data-provider-switch="\$\{escapeHtml\(app\)\}::\$\{escapeHtml\(item\.id\)\}/);
+  assert.match(appSource, /dataset\.providerSwitch\)\.split\("::"\)/);
+
+  const [app, providerId, direction] = "codex::provider-target:shadow::-1".split("::");
+  assert.deepEqual({ app, providerId, direction: Number(direction) }, {
+    app: "codex",
+    providerId: "provider-target:shadow",
+    direction: -1,
+  });
 });
 
 test("team form preserves a hidden legacy Claude Desktop binding", () => {

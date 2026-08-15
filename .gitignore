@@ -28,3 +28,10 @@ apps/desktop/src-tauri/.cargo-test-diagnostic.*
 .ai-shared/tmp/
 __pycache__/
 apps/control-center/.scratch/
+
+# 临时 QA 数据与调试产物（不纳入版本库）
+.tmp/
+apps/control-center/.tmp/
+.scratch/grok-image-route-qa-data/
+.scratch/multimodal-live-qa/
+.scratch/grok-image-route-qa-input.png

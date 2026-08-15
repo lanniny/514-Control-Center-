@@ -27,7 +27,6 @@ const NATIVE_PERMISSION_LABELS = Object.freeze({
 const template = (definition) => Object.freeze({
   ...definition,
   selectable: definition.selectable !== false,
-  capabilityEnvelope: Object.freeze([...definition.capabilityEnvelope]),
   permissionModes: Object.freeze([...definition.permissionModes]),
   effortLevels: Object.freeze([...(definition.effortLevels || [])]),
   controlNotes: Object.freeze([...(definition.controlNotes || [])]),
@@ -37,8 +36,6 @@ const template = (definition) => Object.freeze({
 });
 
 export const ADAPTER_TEMPLATES = Object.freeze([
-  // planning 能力面向所有具备原生 plan 权限模式的模板开放（2026-08-03 LO：自定义席位应能
-  // 自接 planning 任务，不被 claude 模板垄断）；orchestration/delegation 仍属编排面专属。
   template({
     id: "claude-stream-json", label: "Claude Code", factoryKey: "claude-cli",
     description: "Claude Code CLI 的 stream-json 执行通道，支持原生会话恢复。",
@@ -58,7 +55,6 @@ export const ADAPTER_TEMPLATES = Object.freeze([
       diagnostic({ id: "mcp-list", label: "列出 Claude MCP", detail: "读取 Claude Code 当前可见的 MCP 服务器与连接状态。", args: ["mcp", "list"], timeoutMs: 45_000, risk: "network-probe" }),
       diagnostic({ id: "plugin-list", label: "列出 Claude 插件", detail: "读取 Claude Code 已安装插件目录，不执行安装或更新。", args: ["plugin", "list"] }),
     ],
-    capabilityEnvelope: ["planning", "orchestration", "requirements", "synthesis", "delegation"],
   }),
   template({
     id: "codex-app-server", label: "Codex", factoryKey: "codex-app-server",
@@ -80,7 +76,6 @@ export const ADAPTER_TEMPLATES = Object.freeze([
       diagnostic({ id: "mcp-list", label: "列出 Codex MCP", detail: "读取 Codex 当前注册的 MCP 服务器，不修改配置。", args: ["mcp", "list"], risk: "network-probe" }),
       diagnostic({ id: "plugin-list", label: "列出 Codex 插件", detail: "读取 Codex 已安装插件，不执行安装或更新。", args: ["plugin", "list"] }),
     ],
-    capabilityEnvelope: ["planning", "coding", "debugging", "review", "architecture", "testing", "execution"],
   }),
   template({
     id: "codex-exec-json", label: "Codex（exec 回退）", factoryKey: "codex-cli",
@@ -92,7 +87,6 @@ export const ADAPTER_TEMPLATES = Object.freeze([
     permissionModes: ["read-only"], defaultPermissionMode: "read-only",
     effortLevels: ["low", "medium", "high", "xhigh", "max", "ultra"], cwdMode: "per-turn",
     commandHelp: "由 Codex app-server 自动托管的只读回退，不可单独创建席位。",
-    capabilityEnvelope: ["coding", "debugging", "review", "architecture", "testing", "execution"],
   }),
   template({
     id: "gemini-stream-json", label: "Gemini CLI", factoryKey: "gemini-cli",
@@ -112,7 +106,6 @@ export const ADAPTER_TEMPLATES = Object.freeze([
       diagnostic({ id: "extension-list", label: "列出 Gemini 扩展", detail: "读取已安装扩展，不执行安装或更新。", args: ["extensions", "list"] }),
       diagnostic({ id: "skill-list", label: "列出 Gemini Skills", detail: "读取所有已发现的 Gemini Skills。", args: ["skills", "list", "--all"] }),
     ],
-    capabilityEnvelope: ["long-context", "multimodal", "document-analysis", "research", "web-search", "synthesis", "planning"],
   }),
   template({
     id: "grok-mcp-via-codex-app-server", label: "Grok Search MCP", factoryKey: "grok-mcp",
@@ -125,7 +118,6 @@ export const ADAPTER_TEMPLATES = Object.freeze([
     effortLevels: [], cwdMode: "process-fixed",
     commandHelp: "由隔离的 Codex MCP 主机管理，不接受席位级执行命令。",
     controlNotes: ["MCP 工具通道而非 CLI 执行后端——仅供内置 grok-search 席位固定绑定，新建席位不可选。"],
-    capabilityEnvelope: ["current-research", "web-search", "fast-synthesis"],
   }),
   template({
     id: "grok-build-headless", label: "Grok Build", factoryKey: "grok-build",
@@ -147,7 +139,6 @@ export const ADAPTER_TEMPLATES = Object.freeze([
       diagnostic({ id: "plugin-list", label: "列出 Grok 插件", detail: "读取 Grok Build 当前插件目录。", args: ["plugin", "list"] }),
       diagnostic({ id: "session-list", label: "列出 Grok 会话", detail: "读取 Grok Build 本地会话目录。", args: ["sessions", "list"] }),
     ],
-    capabilityEnvelope: ["planning", "coding", "execution", "fast-synthesis"],
   }),
   template({
     id: "kimi-headless-resume", label: "Kimi Code", factoryKey: "kimi-cli",
@@ -171,7 +162,6 @@ export const ADAPTER_TEMPLATES = Object.freeze([
       diagnostic({ id: "doctor-tui", label: "校验 Kimi TUI", detail: "调用 Kimi Doctor 校验 tui.toml。", args: ["doctor", "tui"] }),
       diagnostic({ id: "provider-list", label: "列出 Kimi Providers", detail: "读取 Kimi CLI 已配置 Provider 与模型数量；输出统一脱敏。", args: ["provider", "list"] }),
     ],
-    capabilityEnvelope: ["planning", "frontend", "ui", "coding", "execution"],
   }),
   template({
     id: "opencode-run-json", label: "OpenCode", factoryKey: "opencode-cli",
@@ -197,7 +187,6 @@ export const ADAPTER_TEMPLATES = Object.freeze([
       diagnostic({ id: "models", label: "列出 OpenCode 模型", detail: "读取 OpenCode 当前模型目录。", args: ["models"], risk: "network-probe" }),
       diagnostic({ id: "session-list", label: "列出 OpenCode 会话", detail: "读取 OpenCode 本地会话目录。", args: ["session", "list"] }),
     ],
-    capabilityEnvelope: ["planning", "coding", "execution", "debugging", "review", "testing", "synthesis"],
   }),
   template({
     id: "pi-rpc", label: "Pi", factoryKey: "pi-rpc",
@@ -216,7 +205,6 @@ export const ADAPTER_TEMPLATES = Object.freeze([
       diagnostic({ id: "extensions", label: "列出 Pi 扩展", detail: "读取 Pi settings 中已安装的扩展资源，不修改配置。", args: ["list"] }),
       diagnostic({ id: "models", label: "列出 Pi 模型", detail: "离线读取 Pi 当前可用模型目录，不注入 Provider 凭据。", args: ["--offline", "--list-models"], timeoutMs: 45_000 }),
     ],
-    capabilityEnvelope: ["resident-session", "custom-tools", "extensions", "lightweight-execution", "provider-routing"],
   }),
 ]);
 
@@ -245,7 +233,6 @@ export function adapterTemplateCatalog() {
     const { factoryKey: _factoryKey, fallbackFactoryKey: _fallbackFactoryKey, ...view } = item;
     return {
       ...view,
-      capabilityEnvelope: [...item.capabilityEnvelope],
       permissionModes: [...item.permissionModes],
       effortLevels: [...item.effortLevels],
       controlNotes: [...item.controlNotes],
@@ -517,12 +504,6 @@ export function createTeamCatalog(profiles = [], { providerStore = null, onProvi
     const id = String(profile?.id ?? "").trim();
     if (!id) throw manifestError("runtime profile id is required");
     const { adapterTemplate, fixedBinding } = resolveAdapterTemplate(profile);
-    const unsupportedCapabilities = (profile.capabilities || []).filter((capability) => !adapterTemplate.capabilityEnvelope.includes(capability));
-    if (unsupportedCapabilities.length) {
-      throw manifestError(`${id} capabilities exceed adapter template ${adapterTemplate.id}: ${unsupportedCapabilities.join(", ")}`, {
-        runtimeProfileId: id, unsupportedCapabilities,
-      });
-    }
     const { providerId, provider, degraded } = resolveProviderBinding(profile, adapterTemplate, providerStore);
     if (degraded) onProviderDegraded?.({ runtimeProfileId: id, adapterId: adapterTemplate.id, ...degraded });
     const commandConfigured = !adapterTemplate.requiresCommand || Boolean(String(profile.command ?? "").trim());
@@ -536,7 +517,7 @@ export function createTeamCatalog(profiles = [], { providerStore = null, onProvi
       providerApp: adapterTemplate.providerApp, providerBindingMode: adapterTemplate.providerBindingMode,
       providerDegraded: degraded ? Object.freeze({ ...degraded }) : null,
       adapter: adapterTemplate.id, adapterLabel: adapterTemplate.label, templateId: adapterTemplate.id,
-      transport: adapterTemplate.transport, builtin: Boolean(fixedBinding), enabled, teamMemberEligible,
+      transport: adapterTemplate.transport, capabilities: Object.freeze(["*"]), builtin: Boolean(fixedBinding), enabled, teamMemberEligible,
       coordinatorCapable: adapterTemplate.coordinatorCapable, coordinatorAllowed,
       coordinatorEligible: teamMemberEligible && adapterTemplate.coordinatorCapable && coordinatorAllowed,
       eligibilityReason: teamMemberEligible ? null : !enabled ? "profile-disabled" : !commandConfigured ? "command-not-configured" : "adapter-not-team-eligible",

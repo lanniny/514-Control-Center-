@@ -347,8 +347,13 @@ function modelOf(provider, app, requestBody) {
     || null;
 }
 
-function targetUrl(provider, protocol, model) {
-  const base = String(provider.baseUrl ?? "").replace(/\/+$/, "");
+function targetUrl(provider, app, protocol, model) {
+  const configured = String(provider.baseUrl ?? "").trim();
+  if (app === "codex" && provider.meta?.isFullUrl) {
+    if (!configured) fail(`provider ${provider.name} has no baseUrl`, "PROVIDER_BASE_URL_MISSING", 422);
+    return configured;
+  }
+  const base = configured.replace(/\/+$/, "");
   if (!base) fail(`provider ${provider.name} has no baseUrl`, "PROVIDER_BASE_URL_MISSING", 422);
   if (protocol === "anthropic") return base.endsWith("/v1") ? `${base}/messages` : `${base}/v1/messages`;
   if (protocol === "openai-chat") return `${codexBaseUrl(base)}/chat/completions`;
@@ -1296,7 +1301,7 @@ export class CcSwitchProxyService {
         // 档案级 Body 覆盖（meta.proxyOverrides.body）：浅合并标量到协议转换后的请求体
         const bodyOverrides = provider.meta?.proxyOverrides?.body;
         const finalBody = bodyOverrides ? { ...upstreamBody, ...bodyOverrides } : upstreamBody;
-        const upstreamUrl = targetUrl(provider, upstreamProtocol, model || upstreamBody.model);
+        const upstreamUrl = targetUrl(provider, app, upstreamProtocol, model || upstreamBody.model);
         try {
           const upstream = await this.fetchImpl(upstreamUrl, {
             method: "POST",

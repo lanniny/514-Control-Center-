@@ -60,17 +60,9 @@ test("runtime adapter factories realize enabled manifest bindings exactly", asyn
   await Promise.all([...adapters.values()].map((adapter) => adapter.close?.()));
 });
 
-test("planning capability tracks the native plan permission mode across adapter templates", () => {
-  // 2026-08-03 LO：planning 向所有具备原生 plan 权限模式的模板开放（自定义席位可自接 planning，
-  // 不被 claude 模板垄断）；无 plan 模式的模板不得虚报 planning 能力。
+test("adapter templates do not expose capability envelopes", () => {
   for (const template of ADAPTER_TEMPLATES) {
-    const hasPlanMode = template.permissionModes.includes("plan");
-    const claimsPlanning = template.capabilityEnvelope.includes("planning");
-    assert.equal(
-      claimsPlanning,
-      hasPlanMode,
-      `${template.id}: planning capability must ${hasPlanMode ? "be offered" : "not be claimed"} (permissionModes=${template.permissionModes.join(",")})`,
-    );
+    assert.equal(Object.hasOwn(template, "capabilityEnvelope"), false, `${template.id} still exposes a capability envelope`);
   }
 });
 
@@ -275,7 +267,6 @@ function fixtureAdapterManifest(bindings = FIXTURE_ADAPTER_BINDINGS) {
     teamMemberEligible: binding.teamMemberEligible,
     coordinatorCapable: binding.coordinatorEligible,
     selectable: true,
-    capabilityEnvelope: ["fixture-capability"],
   }])).values()];
   return [
     `export const ADAPTER_BINDINGS = ${JSON.stringify(bindings, null, 2)};`,

@@ -180,7 +180,7 @@ test("Provider -> runtime seat -> member -> non-Claude coordinator is editable w
   assert.equal(supportedKimiEffort.response.status, 201);
   assert.equal(supportedKimiEffort.payload.seat.defaultEffort, "high");
 
-  // 未显式填写路由权重时按 Adapter 模板校准缺省回填（opencode: 0.8/0.85/2，含 testing 能力封套）
+  // 未显式填写路由权重时按 Adapter 模板校准缺省回填；能力始终归一为默认全能力。
   const templateDefaults = await jsonRequest(origin, "/api/runtime-seats", token, {
     method: "POST",
     body: { id: "seat-opencode-defaults", adapter: "opencode-run-json", command: "opencode" },
@@ -189,7 +189,7 @@ test("Provider -> runtime seat -> member -> non-Claude coordinator is editable w
   assert.equal(templateDefaults.payload.seat.quality, 0.8);
   assert.equal(templateDefaults.payload.seat.speed, 0.85);
   assert.equal(templateDefaults.payload.seat.costTier, 2);
-  assert.ok(templateDefaults.payload.seat.capabilities.includes("testing"));
+  assert.deepEqual(templateDefaults.payload.seat.capabilities, ["*"]);
 
   const seat = await jsonRequest(origin, "/api/runtime-seats", token, {
     method: "POST",
@@ -216,6 +216,7 @@ test("Provider -> runtime seat -> member -> non-Claude coordinator is editable w
   assert.equal(seat.response.status, 201, JSON.stringify(seat.payload));
   assert.equal(seat.payload.seat.builtin, false);
   assert.equal(seat.payload.seat.command, "C:\\Program Files\\Codex\\codex.exe");
+  assert.deepEqual(seat.payload.seat.capabilities, ["*"], "客户端旧能力子集不得收窄席位");
   assert.equal(seat.payload.seat.live.coordinatorEligible, true);
   assert.equal(seat.payload.seat.activation, "live");
   assert.equal(seat.payload.transaction.activation.status, "reloaded");
@@ -255,6 +256,7 @@ test("Provider -> runtime seat -> member -> non-Claude coordinator is editable w
     },
   });
   assert.equal(switchedSeat.response.status, 200);
+  assert.deepEqual(switchedSeat.payload.seat.capabilities, ["*"]);
   assert.equal(switchedSeat.payload.transaction.activation.status, "reloaded");
   assert.equal(Object.hasOwn(switchedSeat.payload.seat, "modelOptions"), false);
   assert.equal(Object.hasOwn(switchedSeat.payload.seat, "effortLevels"), false);
@@ -272,6 +274,7 @@ test("Provider -> runtime seat -> member -> non-Claude coordinator is editable w
     },
   });
   assert.equal(switchedMember.response.status, 201);
+  assert.deepEqual(switchedMember.payload.capabilities, ["*"]);
   const switchedFallback = await jsonRequest(origin, `/api/agents/models?agent=${encodeURIComponent(switchedMember.payload.id)}`, token);
   assert.equal(switchedFallback.response.status, 200);
   assert.equal(switchedFallback.payload.source, "fallback");
@@ -306,6 +309,7 @@ test("Provider -> runtime seat -> member -> non-Claude coordinator is editable w
   });
   assert.equal(member.response.status, 201);
   assert.equal(member.payload.coordinatorEligible, true);
+  assert.deepEqual(member.payload.capabilities, ["*"]);
 
   const kimiMember = await jsonRequest(origin, "/api/team-members", token, {
     method: "POST",
@@ -321,6 +325,7 @@ test("Provider -> runtime seat -> member -> non-Claude coordinator is editable w
     },
   });
   assert.equal(kimiMember.response.status, 201);
+  assert.deepEqual(kimiMember.payload.capabilities, ["*"]);
 
   const kimiCatalog = await jsonRequest(origin, `/api/agents/models?agent=${encodeURIComponent(kimiMember.payload.id)}`, token);
   assert.equal(kimiCatalog.response.status, 200);

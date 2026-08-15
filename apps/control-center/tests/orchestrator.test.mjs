@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Orchestrator, renameWithRetry } from "../src/orchestrator.mjs";
+import { normalizeRunSources, Orchestrator, renameWithRetry } from "../src/orchestrator.mjs";
 
 const appRoot = fileURLToPath(new URL("..", import.meta.url));
 
@@ -29,12 +29,13 @@ function policy() {
   };
 }
 
-function route() {
+function route(selectedId = "codex-technical") {
+  const independentId = selectedId === "claude-fable" ? "codex-technical" : "claude-fable";
   return {
     taskType: "coding",
     risk: "high",
-    selected: { id: "codex-technical", label: "Codex" },
-    independent: { id: "claude-fable", label: "Fable" },
+    selected: { id: selectedId, label: selectedId },
+    independent: { id: independentId, label: independentId },
     independentRequired: true,
     reason: "test route",
   };
@@ -67,7 +68,13 @@ test("renameWithRetry retries only transient Windows replacement failures", asyn
   assert.equal(permanentAttempts, 1);
 });
 
-async function fixture({ approvalRequest, capabilities = { agentDisabledSkills: async () => new Set() }, policy: policyOverride = null, models = null } = {}) {
+async function fixture({
+  approvalRequest,
+  capabilities = { agentDisabledSkills: async () => new Set() },
+  policy: policyOverride = null,
+  models = null,
+  interruptTimeoutMs = 30_000,
+} = {}) {
   const root = await mkdtemp(resolve(appRoot, ".test-orchestrator-"));
   const calls = [];
   const adapter = (id) => ({
@@ -92,7 +99,7 @@ async function fixture({ approvalRequest, capabilities = { agentDisabledSkills: 
   };
   const events = [];
   const orchestrator = await new Orchestrator({
-    router: { preview: async () => route() },
+    router: { preview: async ({ requestedProvider } = {}) => route(requestedProvider || "codex-technical") },
     adapters,
     eventStore: { emit: async (type, data) => { events.push({ type, data }); } },
     dataRoot: root,
@@ -100,6 +107,7 @@ async function fixture({ approvalRequest, capabilities = { agentDisabledSkills: 
     approvalBroker,
     capabilities,
     models,
+    interruptTimeoutMs,
   }).init();
   return { root, calls, orchestrator, approvalBroker, events };
 }
@@ -168,6 +176,216 @@ test("historical runs cannot continue through a provider removed from the live a
     () => fx.orchestrator.continue(created.id, { prompt: "must stay disabled", agentId: "codex-technical" }),
     { code: "ADAPTER_UNAVAILABLE" },
   );
+});
+
+test("settled Grok upstream failure preserves its preassigned native session for the next continuation", async (t) => {
+  const fx = await fixture();
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const created = await fx.orchestrator.create({ prompt: "preview", execute: false, permissionMode: "plan" });
+  const target = fx.orchestrator.adapters.get("codex-technical");
+  const nativeSessionId = "01a0034a-771d-7b62-b97d-bf7089aaa07b";
+  const receivedSessionIds = [];
+  let callCount = 0;
+  target.send = async (input) => {
+    callCount += 1;
+    receivedSessionIds.push(input.sessionId);
+    if (callCount === 1) {
+      await input.onTurnSubmitting?.({
+        sessionId: null,
+        tentativeSessionId: nativeSessionId,
+        sessionResumable: false,
+        protocol: "grok-headless-resume",
+        clientUserMessageId: "grok-preassigned-message",
+      });
+      throw Object.assign(new Error("Grok Responses upstream returned HTTP 400"), {
+        code: "GROK_BUILD_FAILED",
+        sessionId: nativeSessionId,
+        tentativeSessionId: nativeSessionId,
+        sessionResumable: true,
+        protocol: "grok-headless-resume",
+        nativeTurnSettled: true,
+        interruptConfirmed: true,
+      });
+    }
+    await input.onSessionStarted?.({ sessionId: input.sessionId, protocol: "grok-headless-resume" });
+    await input.onTurnSubmitting?.({
+      sessionId: input.sessionId,
+      protocol: "grok-headless-resume",
+      clientUserMessageId: "grok-resumed-message",
+    });
+    return {
+      sessionId: input.sessionId,
+      text: "resumed",
+      protocol: "grok-headless-resume",
+      tokens: 10,
+    };
+  };
+
+  await assert.rejects(
+    () => fx.orchestrator.continue(created.id, { prompt: "first attempt", agentId: "codex-technical" }),
+    { code: "GROK_BUILD_FAILED" },
+  );
+  const failed = fx.orchestrator.get(created.id);
+  assert.equal(failed.status, "failed");
+  assert.equal(failed.sessions["codex-technical"], nativeSessionId);
+  assert.equal(failed.turnAttempts.at(-1).phase, "failed");
+  assert.equal(failed.turnAttempts.at(-1).sessionId, nativeSessionId);
+  assert.equal(failed.turnAttempts.at(-1).tentativeSessionId, nativeSessionId);
+  assert.equal(failed.turnAttempts.at(-1).sessionResumable, true);
+
+  await fx.orchestrator.continue(created.id, { prompt: "继续", agentId: "codex-technical" });
+  const resumed = fx.orchestrator.get(created.id);
+  assert.equal(resumed.status, "succeeded");
+  assert.deepEqual(receivedSessionIds, [null, nativeSessionId]);
+  assert.equal(resumed.turns.at(-1).sessionId, nativeSessionId);
+});
+
+test("unconfirmed Grok sessions never enter run.sessions and failed attempts settle", async (t) => {
+  const fx = await fixture();
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const target = fx.orchestrator.adapters.get("codex-technical");
+  const cases = [
+    {
+      label: "spawn rejected",
+      code: "ENOENT",
+      expectedPhase: "rejected",
+      submissionRejected: true,
+    },
+    {
+      label: "first Responses call failed",
+      code: "GROK_BUILD_FAILED",
+      expectedPhase: "failed",
+      submissionRejected: false,
+    },
+  ];
+
+  for (const [index, item] of cases.entries()) {
+    const created = await fx.orchestrator.create({ prompt: `preview ${index}`, execute: false, permissionMode: "plan" });
+    const tentativeSessionId = `01a0034a-771d-7b62-b97d-bf7089aaa08${index}`;
+    target.send = async (input) => {
+      await input.onTurnSubmitting?.({
+        sessionId: null,
+        tentativeSessionId,
+        sessionResumable: false,
+        protocol: "grok-headless-resume",
+        clientUserMessageId: `grok-unconfirmed-${index}`,
+      });
+      throw Object.assign(new Error(item.label), {
+        code: item.code,
+        submissionRejected: item.submissionRejected,
+        nativeTurnSettled: true,
+        interruptConfirmed: true,
+        sessionId: null,
+        tentativeSessionId,
+        sessionResumable: false,
+        protocol: "grok-headless-resume",
+      });
+    };
+
+    await assert.rejects(
+      () => fx.orchestrator.continue(created.id, { prompt: item.label, agentId: "codex-technical" }),
+      { code: item.code },
+    );
+    const failed = fx.orchestrator.get(created.id);
+    const attempt = failed.turnAttempts.at(-1);
+    assert.equal(failed.sessions["codex-technical"], undefined);
+    assert.equal(attempt.phase, item.expectedPhase);
+    assert.equal(attempt.sessionId, null);
+    assert.equal(attempt.tentativeSessionId, tentativeSessionId);
+    assert.equal(attempt.sessionResumable, false);
+    assert.equal(failed.inflightTurns["codex-technical"], undefined);
+  }
+});
+
+test("non-Grok lifecycle checkpoints remain resumable without the Grok marker", async (t) => {
+  const fx = await fixture();
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const created = await fx.orchestrator.create({ prompt: "preview", execute: false, permissionMode: "plan" });
+  const target = fx.orchestrator.adapters.get("codex-technical");
+  const nativeSessionId = "claude-native-session";
+  target.send = async (input) => {
+    await input.onSessionStarted?.({ sessionId: nativeSessionId, protocol: "stream-json-resume" });
+    await input.onTurnSubmitting?.({
+      sessionId: nativeSessionId,
+      protocol: "stream-json-resume",
+      clientUserMessageId: "legacy-adapter-message",
+    });
+    throw Object.assign(new Error("provider failed after session creation"), {
+      code: "PROVIDER_FAILED",
+      sessionId: nativeSessionId,
+      protocol: "stream-json-resume",
+      nativeTurnSettled: true,
+      interruptConfirmed: true,
+    });
+  };
+
+  await assert.rejects(
+    () => fx.orchestrator.continue(created.id, { prompt: "start", agentId: "codex-technical" }),
+    { code: "PROVIDER_FAILED" },
+  );
+  const failed = fx.orchestrator.get(created.id);
+  const attempt = failed.turnAttempts.at(-1);
+  assert.equal(failed.sessions["codex-technical"], nativeSessionId);
+  assert.notEqual(attempt.sessionResumable, false);
+  assert.equal(attempt.phase, "failed");
+});
+
+test("successful Grok session confirmation stays submitting and cannot be refunded before adapter return", async (t) => {
+  const fx = await fixture();
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const created = await fx.orchestrator.create({ prompt: "preview", execute: false, permissionMode: "plan" });
+  const target = fx.orchestrator.adapters.get("codex-technical");
+  const nativeSessionId = "01a0034a-771d-7b62-b97d-bf7089aaa099";
+  target.send = async (input) => {
+    await input.onTurnSubmitting?.({
+      sessionId: null,
+      tentativeSessionId: nativeSessionId,
+      sessionResumable: false,
+      protocol: "grok-headless-resume",
+      clientUserMessageId: "grok-success-window",
+    });
+    await input.onTurnSubmitting?.({
+      sessionId: nativeSessionId,
+      tentativeSessionId: nativeSessionId,
+      sessionResumable: true,
+      protocol: "grok-headless-resume",
+      clientUserMessageId: "grok-success-window",
+    });
+    throw Object.assign(new Error("simulated crash after end before adapter return"), { code: "ADAPTER_RETURN_WINDOW" });
+  };
+
+  await assert.rejects(
+    () => fx.orchestrator.continue(created.id, { prompt: "start", agentId: "codex-technical" }),
+    { code: "ADAPTER_RETURN_WINDOW" },
+  );
+  const interrupted = fx.orchestrator.get(created.id);
+  const attempt = interrupted.turnAttempts.at(-1);
+  assert.equal(interrupted.sessions["codex-technical"], nativeSessionId);
+  assert.equal(attempt.phase, "submitting");
+  assert.equal(attempt.sessionResumable, true);
+  assert.equal(fx.orchestrator.canRefundAbandonedRound(interrupted), false);
+});
+
+test("default full capability marker stays neutral for an identity-only legacy roster", async (t) => {
+  const fx = await fixture();
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const created = await fx.orchestrator.create({ prompt: "preview", execute: false, permissionMode: "plan" });
+  const run = fx.orchestrator.get(created.id);
+  run.teamRoster = [{
+    id: "codex-technical",
+    runtimeProfileId: "codex-technical",
+    label: "codex-technical",
+    role: "",
+    description: "",
+    systemPrompt: "",
+    capabilities: ["*"],
+    defaultModel: null,
+    defaultEffort: null,
+    teamMemberEligible: true,
+    coordinatorEligible: true,
+  }];
+  run.teamRosterVersion = 0;
+  assert.equal(fx.orchestrator.memberPromptForRun(run, "codex-technical"), "");
 });
 
 test("round budget cannot bypass mandatory independent verification", async (t) => {
@@ -655,7 +873,7 @@ test("review permission mode is accepted without approval and stays non-writing"
   assert.ok(fx.calls.every((call) => call.permissionMode === "read-only"), "Review must reach every Adapter as native read-only");
 });
 
-test("an explicit active member owns build even when the router selected another member", async (t) => {
+test("an explicit active member is both the capability-validated route and build owner", async (t) => {
   const fx = await fixture();
   t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
   const created = await fx.orchestrator.create({
@@ -667,7 +885,7 @@ test("an explicit active member owns build even when the router selected another
     startAgentId: "claude-fable",
   });
   const completed = await waitTerminal(fx.orchestrator, created.id);
-  assert.equal(completed.route.selected.id, "codex-technical");
+  assert.equal(completed.route.selected.id, "claude-fable");
   assert.equal(completed.startAgentId, "claude-fable");
   assert.equal(completed.executionOwnerId, "claude-fable");
   assert.equal(fx.calls[0].id, "claude-fable");
@@ -675,7 +893,265 @@ test("an explicit active member owns build even when the router selected another
   assert.equal(fx.calls.some((call) => call.id === "codex-technical" && call.permissionMode === "workspace-write"), false);
   const approval = fx.orchestrator.buildApprovalMessage(completed).params;
   assert.equal(approval.executionOwnerId, "claude-fable");
-  assert.equal(approval.routeSelectedAgent, "codex-technical");
+  assert.equal(approval.routeSelectedAgent, "claude-fable");
+});
+
+test("an explicit active member fails closed when the router returns a different runtime", async (t) => {
+  const fx = await fixture();
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  fx.orchestrator.router.preview = async () => route("codex-technical");
+
+  await assert.rejects(() => fx.orchestrator.create({
+    prompt: "router must not split validation from execution",
+    execute: true,
+    orchestrationMode: "pipeline",
+    maxRounds: 3,
+    permissionMode: "build",
+    startAgentId: "claude-fable",
+  }), {
+    code: "TRANSACTION_INCONSISTENT",
+    expectedRuntimeProfileId: "claude-fable",
+    actualRuntimeProfileId: "codex-technical",
+  });
+  assert.equal(fx.calls.length, 0);
+});
+
+test("source continuation counts unique paths at the 16-item boundary", async (t) => {
+  const fx = await fixture({
+    models: { profiles: [{ id: "codex-technical", capabilities: ["image-analysis"] }] },
+  });
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const created = await fx.orchestrator.create({
+    prompt: "legacy source boundary",
+    execute: false,
+    startAgentId: "codex-technical",
+  });
+  const legacyImage = resolve(fx.root, "legacy.png");
+  const existingPaths = [
+    legacyImage,
+    ...Array.from({ length: 14 }, (_, index) => resolve(fx.root, `existing-${index}.md`)),
+  ];
+  const live = fx.orchestrator.get(created.id);
+  live.sources = normalizeRunSources(existingPaths);
+  await fx.orchestrator.save(live);
+
+  const newSource = resolve(fx.root, "new-source.md");
+  const merged = await fx.orchestrator.addSources(created.id, [legacyImage, newSource], { targetAgentId: "codex-technical" });
+  assert.equal(merged.sources.length, 16);
+  assert.equal(merged.sources.at(-1).path, newSource);
+
+  const duplicateOnly = await fx.orchestrator.addSources(created.id, [legacyImage], { targetAgentId: "codex-technical" });
+  assert.equal(duplicateOnly.sources.length, 16, "an existing visual source must remain a no-op at the cap");
+  await assert.rejects(
+    () => fx.orchestrator.addSources(created.id, [resolve(fx.root, "seventeenth.md")], { targetAgentId: "codex-technical" }),
+    { code: "VALIDATION_FAILED" },
+  );
+  assert.equal(fx.orchestrator.get(created.id).sources.length, 16);
+});
+
+test("attachments are scoped to the user interaction instead of being replayed on every later turn", async (t) => {
+  const fx = await fixture({
+    models: { profiles: [{ id: "codex-technical", capabilities: ["image-analysis"] }] },
+  });
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const created = await fx.orchestrator.create({ prompt: "route only", execute: false, startAgentId: "codex-technical" });
+  const firstImage = resolve(fx.root, "first.png");
+  const secondImage = resolve(fx.root, "second.png");
+
+  await fx.orchestrator.continue(created.id, { prompt: "看第一张", agentId: "codex-technical", sources: [firstImage] });
+  assert.match(fx.calls.at(-1).prompt, new RegExp(firstImage.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
+  await fx.orchestrator.continue(created.id, { prompt: "看第二张", agentId: "codex-technical", sources: [secondImage] });
+  assert.match(fx.calls.at(-1).prompt, new RegExp(secondImage.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.doesNotMatch(fx.calls.at(-1).prompt, new RegExp(firstImage.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
+  await fx.orchestrator.continue(created.id, { prompt: "纯文字继续", agentId: "codex-technical" });
+  assert.doesNotMatch(fx.calls.at(-1).prompt, /first\.png|second\.png/);
+  const done = fx.orchestrator.get(created.id);
+  assert.deepEqual(done.sources.map((source) => source.path), [firstImage, secondImage], "全局附件台账仍须保留供历史与生命周期保护");
+  assert.deepEqual(done.activeInteractionSources, []);
+  assert.deepEqual(done.pendingInteractionSources, []);
+
+  // 同一路径已在全局台账中时，重新附加仍必须绑定到下一条消息。
+  await fx.orchestrator.continue(created.id, { prompt: "重新看第一张", agentId: "codex-technical", sources: [firstImage] });
+  assert.match(fx.calls.at(-1).prompt, /first\.png/);
+  assert.equal(done.sources.length, 2, "重新引用不得复制全局台账条目");
+});
+
+test("visual attachments follow the requested member without capability subset checks", async (t) => {
+  const fx = await fixture({
+    models: {
+      profiles: [
+        { id: "codex-technical", capabilities: [] },
+        { id: "claude-fable", capabilities: [] },
+      ],
+    },
+  });
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const created = await fx.orchestrator.create({ prompt: "route only", execute: false });
+  const image = resolve(fx.root, "default-full-capability.png");
+
+  await fx.orchestrator.continue(created.id, {
+    prompt: "交给当前成员处理图片",
+    agentId: "claude-fable",
+    sources: [image],
+  });
+  assert.equal(fx.calls.at(-1).id, "claude-fable");
+  assert.match(fx.calls.at(-1).prompt, /default-full-capability\.png/);
+});
+
+test("source staging needs no target and non-PNG formats stay scoped to one interaction", async (t) => {
+  const fx = await fixture({
+    models: { profiles: [{ id: "codex-technical", capabilities: [] }] },
+  });
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const created = await fx.orchestrator.create({ prompt: "route only", execute: false, startAgentId: "codex-technical" });
+  const webp = resolve(fx.root, "format-not-prejudged.webp");
+
+  await fx.orchestrator.addSources(created.id, [webp]);
+  assert.deepEqual(fx.orchestrator.get(created.id).pendingInteractionSources.map((source) => source.path), [webp]);
+  await fx.orchestrator.continue(created.id, { prompt: "处理预存附件", agentId: "codex-technical" });
+  assert.match(fx.calls.at(-1).prompt, /format-not-prejudged\.webp/);
+
+  await fx.orchestrator.continue(created.id, { prompt: "纯文字继续", agentId: "codex-technical" });
+  assert.doesNotMatch(fx.calls.at(-1).prompt, /format-not-prejudged\.webp/);
+});
+
+test("attachment registration rolls back both the global ledger and next-interaction queue when persistence fails", async (t) => {
+  const fx = await fixture({
+    models: { profiles: [{ id: "codex-technical", capabilities: ["image-analysis"] }] },
+  });
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const created = await fx.orchestrator.create({ prompt: "route only", execute: false, startAgentId: "codex-technical" });
+  const imagePath = resolve(fx.root, "rollback.png");
+  const originalSave = fx.orchestrator.save.bind(fx.orchestrator);
+  fx.orchestrator.save = async () => {
+    throw Object.assign(new Error("disk unavailable"), { code: "EIO" });
+  };
+
+  await assert.rejects(
+    () => fx.orchestrator.addSources(created.id, [imagePath], { targetAgentId: "codex-technical" }),
+    { code: "EIO" },
+  );
+  const rolledBack = fx.orchestrator.get(created.id);
+  assert.deepEqual(rolledBack.sources, []);
+  assert.deepEqual(rolledBack.pendingInteractionSources, []);
+
+  fx.orchestrator.save = originalSave;
+  await fx.orchestrator.addSources(created.id, [imagePath], { targetAgentId: "codex-technical" });
+  assert.deepEqual(rolledBack.sources.map((source) => source.path), [imagePath]);
+  assert.deepEqual(rolledBack.pendingInteractionSources.map((source) => source.path), [imagePath]);
+});
+
+test("attachments added during an active turn stay bound to their own queued steers", async (t) => {
+  const fx = await fixture({
+    models: { profiles: [{ id: "codex-technical", capabilities: ["image-analysis"] }] },
+  });
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const created = await fx.orchestrator.create({ prompt: "route only", execute: false, startAgentId: "codex-technical" });
+  const paths = [1, 2, 3].map((index) => resolve(fx.root, `queued-${index}.png`));
+  const target = fx.orchestrator.adapters.get("codex-technical");
+  const originalSend = target.send.bind(target);
+  const entered = deferred();
+  const release = deferred();
+  let first = true;
+  target.send = async (input) => {
+    if (first) {
+      first = false;
+      entered.resolve();
+      await release.promise;
+    }
+    return originalSend(input);
+  };
+
+  const active = fx.orchestrator.continue(created.id, { prompt: "第一条", agentId: "codex-technical", sources: [paths[0]] });
+  await entered.promise;
+  await fx.orchestrator.continue(created.id, { prompt: "第二条", agentId: "codex-technical", sources: [paths[1]] });
+  await fx.orchestrator.continue(created.id, { prompt: "第三条", agentId: "codex-technical", sources: [paths[2]] });
+  release.resolve();
+  await active;
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline && (fx.orchestrator.controllers.has(created.id) || fx.orchestrator.executions.size)) {
+    await new Promise((resolveTimer) => setTimeout(resolveTimer, 10));
+  }
+
+  assert.equal(fx.calls.length, 3);
+  for (let index = 0; index < 3; index += 1) {
+    assert.match(fx.calls[index].prompt, new RegExp(`queued-${index + 1}\\.png`));
+    for (let other = 0; other < 3; other += 1) {
+      if (other !== index) assert.doesNotMatch(fx.calls[index].prompt, new RegExp(`queued-${other + 1}\\.png`));
+    }
+  }
+});
+
+test("a pipeline steer image never contaminates the original topology interaction", async (t) => {
+  const fx = await fixture({
+    models: { profiles: [{ id: "codex-technical", capabilities: ["image-analysis"] }] },
+  });
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const initialImage = resolve(fx.root, "pipeline-initial.png");
+  const steerImage = resolve(fx.root, "pipeline-steer.png");
+  const claude = fx.orchestrator.adapters.get("claude-fable");
+  const originalClaudeSend = claude.send.bind(claude);
+  const entered = deferred();
+  const release = deferred();
+  let first = true;
+  claude.send = async (input) => {
+    if (first) {
+      first = false;
+      entered.resolve();
+      await release.promise;
+    }
+    return originalClaudeSend(input);
+  };
+
+  const created = await fx.orchestrator.create({
+    prompt: "pipeline 主任务",
+    execute: true,
+    orchestrationMode: "pipeline",
+    collaborationMode: "standard",
+    maxRounds: 6,
+    permissionMode: "plan",
+    startAgentId: "codex-technical",
+    sources: [initialImage],
+  });
+  await entered.promise;
+  await fx.orchestrator.continue(created.id, {
+    prompt: "只处理这条图片插话",
+    agentId: "codex-technical",
+    sources: [steerImage],
+  });
+  release.resolve();
+  const completed = await waitTerminal(fx.orchestrator, created.id);
+  assert.equal(completed.status, "succeeded", completed.error);
+
+  const steerCalls = fx.calls.filter((call) => call.prompt.includes(steerImage));
+  assert.equal(steerCalls.length, 1, "插话图片只能进入插话自己的 provider turn");
+  assert.match(steerCalls[0].prompt, /只处理这条图片插话/);
+  assert.doesNotMatch(steerCalls[0].prompt, /pipeline-initial\.png/);
+  const topologyCalls = fx.calls.filter((call) => call !== steerCalls[0]);
+  assert.ok(topologyCalls.length >= 3, `原拓扑调用不足：${topologyCalls.length}`);
+  for (const call of topologyCalls) assert.doesNotMatch(call.prompt, /pipeline-steer\.png/);
+  assert.ok(topologyCalls.some((call) => call.prompt.includes(initialImage)), "原拓扑没有恢复初始附件");
+  assert.deepEqual(completed.activeInteractionSources.map((source) => source.path), [initialImage]);
+  assert.ok(completed.interactionStep >= 3, "原拓扑的 step 账本被插话 interaction 覆盖");
+  const steerState = Object.values(completed.interactionStates || {}).find((state) =>
+    state.sources?.some((source) => source.path === steerImage));
+  assert.equal(steerState?.interactionStep, 1);
+});
+
+test("an explicit start member cannot route-check a different provider", async (t) => {
+  const fx = await fixture();
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  await assert.rejects(() => fx.orchestrator.create({
+    prompt: "must not validate Codex and execute Claude",
+    execute: false,
+    permissionMode: "plan",
+    startAgentId: "claude-fable",
+    requestedProvider: "codex-technical",
+  }), { code: "VALIDATION_FAILED" });
+  assert.equal(fx.calls.length, 0);
+  assert.equal(fx.orchestrator.list().length, 0);
 });
 
 test("unknown permission modes fail closed while omission still defaults to plan", async (t) => {
@@ -690,7 +1166,14 @@ test("unknown permission modes fail closed while omission still defaults to plan
   assert.equal(created.permissionMode, "plan");
 });
 
-test("an approved build grant is not reused by a later manual continuation", async (t) => {
+// LO 2026-08-14 决策（协作台对话逻辑报障）：续聊的写权限**沿用建 run 时批过的授权**，
+// 由 capability lease 界定有效范围——lease 本来就是「时间窗 + 动作哈希 + 可吊销」的持续
+// 授权凭据，UI 也一直在展示「执行租约有效 / 到期时间」。
+// 本用例原先断言的是相反语义（"an approved build grant is not reused by a later manual
+// continuation"，终止后续聊恒为只读）。那条语义的实际后果是：LO 说「请你继续执行」，执行
+// 所有者只拿到只读，只能反复回「请确认是否要我立即执行」，指令与权限两端一起锁死（run
+// d63b839d 第 3–6 轮）。改后仍然守住授权窗口的两面——窗口开着能写，窗口一关立刻回落只读。
+test("终止后的手动续聊受租约界定：租约有效沿用写权限，吊销后立刻回落只读", async (t) => {
   const fx = await fixture();
   t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
   const created = await fx.orchestrator.create({ prompt: "implement", execute: true, orchestrationMode: "pipeline", maxRounds: 3, permissionMode: "build" });
@@ -702,7 +1185,17 @@ test("an approved build grant is not reused by a later manual continuation", asy
   }
   const continued = await fx.orchestrator.continue(created.id, { prompt: "inspect the result", agentId: "codex-technical" });
   assert.equal(continued.status, "succeeded");
-  assert.equal(fx.calls.at(-1).permissionMode, "read-only");
+  assert.equal(fx.calls.at(-1).permissionMode, "workspace-write", "租约仍有效的续聊被降级为只读");
+  // 授权窗口关上 = 立刻失去写权限（这是本用例真正要守的安全边界）
+  const live = fx.orchestrator.get(created.id);
+  fx.orchestrator.revokeCapabilityLease(live, "test-revocation");
+  await fx.orchestrator.save(live);
+  while (fx.orchestrator.controllers.has(created.id)) {
+    await new Promise((resolveTick) => setTimeout(resolveTick, 5));
+  }
+  await fx.orchestrator.continue(created.id, { prompt: "inspect again", agentId: "codex-technical" });
+  assert.equal(fx.calls.at(-1).permissionMode, "read-only", "租约吊销后仍在写盘");
+  assert.ok(fx.events.some((event) => event.type === "run.write_degraded" && event.data.reason === "CAPABILITY_LEASE_INACTIVE"));
 });
 
 test("an ambiguous Codex transport failure never replays the prompt through fallback", async (t) => {
@@ -823,7 +1316,13 @@ test("autoRecoveryDecision gates on timeout family, confirmation, mode, session 
   const fx = await fixture();
   t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
   const orchestrator = fx.orchestrator;
-  const run = { sessions: { "codex-technical": "thread-1" }, autoRecoveries: 0 };
+  const run = {
+    sessions: { "codex-technical": "thread-1" },
+    maxRounds: 6,
+    maxStepsPerInteraction: 6,
+    interactionStep: 0,
+    interactionAutoRecoveries: 0,
+  };
   const confirmedTimeout = Object.assign(new Error("timeout"), { code: "TURN_TIMEOUT", interruptConfirmed: true, sessionId: "thread-1" });
   assert.equal(orchestrator.autoRecoveryDecision(run, "codex-technical", confirmedTimeout, "read-only").ok, true);
   assert.equal(orchestrator.autoRecoveryDecision(run, "codex-technical", confirmedTimeout, "plan").ok, true);
@@ -837,13 +1336,18 @@ test("autoRecoveryDecision gates on timeout family, confirmation, mode, session 
   );
   assert.equal(orchestrator.autoRecoveryDecision(run, "codex-technical", confirmedTimeout, "workspace-write").reason, "write-turn");
   assert.equal(
-    orchestrator.autoRecoveryDecision({ sessions: {}, autoRecoveries: 0 }, "codex-technical", Object.assign(new Error("timeout"), { code: "TURN_TIMEOUT", interruptConfirmed: true }), "read-only").reason,
+    orchestrator.autoRecoveryDecision({ ...run, sessions: {} }, "codex-technical", Object.assign(new Error("timeout"), { code: "TURN_TIMEOUT", interruptConfirmed: true }), "read-only").reason,
     "no-native-session",
   );
-  assert.equal(orchestrator.autoRecoveryDecision({ ...run, autoRecoveries: 2 }, "codex-technical", confirmedTimeout, "read-only").reason, "cap-exhausted");
+  assert.equal(orchestrator.autoRecoveryDecision({ ...run, interactionAutoRecoveries: 2 }, "codex-technical", confirmedTimeout, "read-only").reason, "cap-exhausted");
   assert.equal(
-    orchestrator.autoRecoveryDecision({ ...run, round: 3, maxRounds: 3 }, "codex-technical", confirmedTimeout, "read-only").reason,
-    "round-limit",
+    orchestrator.autoRecoveryDecision({ ...run, round: 99, interactionStep: 6 }, "codex-technical", confirmedTimeout, "read-only").reason,
+    "step-limit",
+  );
+  assert.equal(
+    orchestrator.autoRecoveryDecision({ ...run, round: 99, interactionStep: 0 }, "codex-technical", confirmedTimeout, "read-only").ok,
+    true,
+    "全会话 round 只做单调审计，不得封死新交互",
   );
 });
 
@@ -1053,11 +1557,95 @@ test("continue on an inactive run is unchanged: immediate turn, no queue, no ste
   assert.equal(fx.events.filter((event) => event.type === "user.message").length, 1, "既有路径照旧先发 user.message");
 });
 
-test("steers that cannot fit the policy round cap are dropped with an audit event, not a failed run", async (t) => {
+test("two direct continuations cannot overwrite the run controller or execution owner", async (t) => {
   const fx = await fixture();
   t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
   const created = await fx.orchestrator.create({ prompt: "route only", execute: false, permissionMode: "plan" });
-  // 门闩阻塞续聊轮：policy 上限 6 轮，续聊占第 1 轮，排队 7 条 → 5 条注入、第 6 条封顶丢弃、第 7 条留队
+  const codex = fx.orchestrator.adapters.get("codex-technical");
+  const originalCodexSend = codex.send.bind(codex);
+  const entered = deferred();
+  const release = deferred();
+  codex.send = async (input) => {
+    entered.resolve();
+    await release.promise;
+    return originalCodexSend(input);
+  };
+
+  const first = fx.orchestrator.continue(created.id, { prompt: "第一条慢续聊", agentId: "codex-technical" });
+  const firstController = fx.orchestrator.controllers.get(created.id);
+  const firstExecution = fx.orchestrator.executions.get(`continue:${created.id}`);
+  assert.ok(firstController);
+  assert.ok(firstExecution);
+  await entered.promise;
+
+  const second = await fx.orchestrator.continue(created.id, { prompt: "第二条并发续聊", agentId: "claude-fable" });
+  assert.equal(fx.orchestrator.controllers.get(created.id), firstController, "第二条续聊覆盖了第一条 controller");
+  assert.equal(fx.orchestrator.executions.get(`continue:${created.id}`), firstExecution, "第二条续聊覆盖了第一条 execution owner");
+  assert.deepEqual(second.pendingSteer.map((item) => item.prompt), ["第二条并发续聊"]);
+
+  release.resolve();
+  await first;
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline && (fx.orchestrator.controllers.has(created.id) || fx.orchestrator.executions.size)) {
+    await new Promise((resolveTimer) => setTimeout(resolveTimer, 10));
+  }
+  const done = fx.orchestrator.get(created.id);
+  assert.equal(done.status, "succeeded", done.error);
+  assert.deepEqual(done.pendingSteer, []);
+  assert.deepEqual(fx.calls.map((call) => [call.id, call.prompt]), [
+    ["codex-technical", "第一条慢续聊"],
+    ["claude-fable", "第二条并发续聊"],
+  ]);
+  assert.equal(fx.orchestrator.controllers.has(created.id), false);
+  assert.equal(fx.orchestrator.executions.has(`continue:${created.id}`), false);
+});
+
+test("a legacy 6/6 run migrates on the next message instead of permanently blocking the conversation", async (t) => {
+  const fx = await fixture();
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const created = await fx.orchestrator.create({ prompt: "legacy route only", execute: false, permissionMode: "plan" });
+  const run = fx.orchestrator.get(created.id);
+  run.status = "succeeded";
+  run.round = 6;
+  run.maxRounds = 6;
+  for (const field of [
+    "maxStepsPerInteraction", "interactionSeq", "activeInteractionId", "activeInteractionSeq",
+    "interactionStep", "interactionCostUsd", "interactionStepsRefunded", "interactionAutoRecoveries",
+    "interactionStartedAt", "refundedAttemptIds",
+  ]) delete run[field];
+  await fx.orchestrator.save(run);
+
+  const continued = await fx.orchestrator.continue(created.id, { prompt: "第七条消息", agentId: "codex-technical" });
+  assert.equal(continued.status, "succeeded");
+  assert.equal(continued.round, 7);
+  assert.equal(continued.maxStepsPerInteraction, 6);
+  assert.equal(continued.interactionSeq, 2);
+  assert.equal(continued.interactionStep, 1, "新消息不继承旧会话已经消耗的六轮");
+});
+
+test("more than six sequential user messages remain valid while every message resets the autonomous step budget", async (t) => {
+  const fx = await fixture();
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const created = await fx.orchestrator.create({ prompt: "route only", execute: false, permissionMode: "plan" });
+  const interactionIds = [];
+  for (let index = 1; index <= 8; index += 1) {
+    const continued = await fx.orchestrator.continue(created.id, { prompt: `消息${index}`, agentId: "codex-technical" });
+    interactionIds.push(continued.activeInteractionId);
+    assert.equal(continued.interactionStep, 1, `消息${index} 没有获得独立 step 预算`);
+  }
+  const done = fx.orchestrator.get(created.id);
+  assert.equal(done.round, 8);
+  assert.equal(done.interactionSeq, 9, "初始目标 + 8 条续聊应形成 9 次用户交互");
+  assert.equal(new Set(interactionIds).size, 8);
+  assert.ok(!fx.events.some((event) => event.type === "run.steer_dropped"));
+});
+
+test("queued steers are unbounded across the conversation and each receives an independent interaction budget", async (t) => {
+  const fx = await fixture();
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const created = await fx.orchestrator.create({ prompt: "route only", execute: false, permissionMode: "plan" });
+  // 门闩阻塞续聊轮，再排入 7 条插话。maxRounds=6 只限制每条消息内部的自主步骤，
+  // 不得把第 7/8 条用户消息当成超额工作丢弃。
   let releaseTurn;
   const gate = new Promise((resolveGate) => { releaseTurn = resolveGate; });
   let markEntered;
@@ -1085,13 +1673,180 @@ test("steers that cannot fit the policy round cap are dropped with an audit even
     await new Promise((resolveTimer) => setTimeout(resolveTimer, 10));
   }
   const done = fx.orchestrator.get(created.id);
-  assert.equal(done.status, "succeeded", "封顶丢弃不把 run 打 failed");
-  assert.equal(fx.calls.length, 6, "续聊 1 轮 + 排干 5 轮 = policy 上限 6 轮");
-  assert.deepEqual(done.pendingSteer.map((steer) => steer.prompt), ["插话7"], "丢弃即停排，剩余追问留队如实可见");
+  assert.equal(done.status, "succeeded");
+  assert.equal(done.round, 8, "全局轮次只记录 8 次真实 provider 派发");
+  assert.equal(fx.calls.length, 8, "续聊 1 条和排队 7 条必须全部消费");
+  assert.deepEqual(done.pendingSteer, []);
+  assert.deepEqual(fx.calls.map((call) => call.prompt), [
+    "第一轮追问", "插话1", "插话2", "插话3", "插话4", "插话5", "插话6", "插话7",
+  ]);
   const dropped = fx.events.filter((event) => event.type === "run.steer_dropped");
-  assert.equal(dropped.length, 1);
-  assert.equal(dropped[0].data.text, "插话6");
-  assert.equal(dropped[0].data.reason, "ROUND_LIMIT");
+  assert.equal(dropped.length, 0);
+  const interactions = fx.events
+    .filter((event) => event.type === "user.message")
+    .map((event) => event.data.interactionId);
+  assert.equal(new Set(interactions).size, 8, "每条用户消息必须拥有独立 interactionId");
+  assert.equal(done.interactionStep, 1, "最后一条消息使用自己的 step 预算，而不是继承累计轮数");
+});
+
+test("interrupt stops only the active provider turn and preserves the session, authorization and queued conversation", async (t) => {
+  const fx = await fixture();
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const created = await fx.orchestrator.create({ prompt: "route only", execute: false, permissionMode: "plan" });
+  const target = fx.orchestrator.adapters.get("codex-technical");
+  const successfulSend = target.send.bind(target);
+  const entered = deferred();
+  target.send = async (input) => {
+    fx.calls.push({ id: "codex-technical", ...input });
+    await input.onSessionStarted?.({ sessionId: "preserved-session", protocol: "mock" });
+    await input.onTurnSubmitting?.({ sessionId: "preserved-session", protocol: "mock", clientUserMessageId: "interrupt-message" });
+    await input.onTurnAccepted?.({ sessionId: "preserved-session", protocol: "mock", clientUserMessageId: "interrupt-message", turnId: "interrupt-turn" });
+    entered.resolve();
+    await new Promise((resolveTurn, rejectTurn) => {
+      const rejectAbort = () => rejectTurn(Object.assign(new Error("turn interrupted"), {
+        code: "ABORTED",
+        interruptConfirmed: true,
+        nativeTurnSettled: true,
+      }));
+      if (input.signal.aborted) rejectAbort();
+      else input.signal.addEventListener("abort", rejectAbort, { once: true });
+    });
+  };
+
+  const active = fx.orchestrator.continue(created.id, { prompt: "长任务", agentId: "codex-technical" });
+  await entered.promise;
+  const live = fx.orchestrator.get(created.id);
+  live.buildApproval = {
+    status: "approved",
+    approvalId: "approval-preserved",
+    lease: { id: "lease-preserved", status: "active", expiresAt: "2099-01-01T00:00:00.000Z" },
+  };
+  live.worktreePath = "I:\\sentinel-worktree";
+  await fx.orchestrator.continue(created.id, { prompt: "排队插话", agentId: "codex-technical" });
+
+  const interrupted = await fx.orchestrator.interrupt(created.id);
+  await active;
+  assert.equal(interrupted.status, "interrupted");
+  assert.equal(interrupted.sessions["codex-technical"], "preserved-session");
+  assert.equal(interrupted.buildApproval.status, "approved");
+  assert.equal(interrupted.buildApproval.lease.status, "active");
+  assert.equal(interrupted.worktreePath, "I:\\sentinel-worktree");
+  assert.deepEqual(interrupted.pendingSteer.map((item) => item.prompt), ["排队插话"]);
+  assert.equal(interrupted.turnAttempts.at(-1).phase, "interrupted");
+
+  target.send = successfulSend;
+  await fx.orchestrator.continue(created.id, { prompt: "中断后继续", agentId: "codex-technical" });
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline && (fx.orchestrator.controllers.has(created.id) || fx.orchestrator.executions.size)) {
+    await new Promise((resolveTimer) => setTimeout(resolveTimer, 10));
+  }
+  const resumed = fx.orchestrator.get(created.id);
+  assert.equal(resumed.status, "succeeded");
+  assert.deepEqual(resumed.pendingSteer, []);
+  assert.deepEqual(fx.calls.slice(-2).map((call) => call.prompt), ["中断后继续", "排队插话"]);
+});
+
+test("cancel terminates the whole task and rejects every later continuation", async (t) => {
+  const fx = await fixture();
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const created = await fx.orchestrator.create({ prompt: "route only", execute: false, permissionMode: "plan" });
+  const live = fx.orchestrator.get(created.id);
+  live.buildApproval = {
+    status: "approved",
+    approvalId: "approval-to-revoke",
+    lease: { id: "lease-to-revoke", status: "active", expiresAt: "2099-01-01T00:00:00.000Z" },
+  };
+
+  const cancelled = await fx.orchestrator.cancel(created.id);
+  assert.equal(cancelled.status, "cancelled");
+  assert.equal(cancelled.buildApproval.status, "revoked");
+  assert.equal(cancelled.buildApproval.lease.status, "revoked");
+  await assert.rejects(
+    fx.orchestrator.continue(created.id, { prompt: "不得复活", agentId: "codex-technical" }),
+    { code: "RUN_TERMINAL" },
+  );
+  assert.equal(fx.calls.length, 0);
+});
+
+test("interrupt timeout keeps the admission gate closed until the native execution actually settles", async (t) => {
+  const fx = await fixture({ interruptTimeoutMs: 20 });
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const created = await fx.orchestrator.create({ prompt: "route only", execute: false, permissionMode: "plan" });
+  const target = fx.orchestrator.adapters.get("codex-technical");
+  const entered = deferred();
+  const release = deferred();
+  target.send = async (input) => {
+    await input.onSessionStarted?.({ sessionId: "slow-stop-session", protocol: "mock" });
+    await input.onTurnSubmitting?.({ sessionId: "slow-stop-session", protocol: "mock", clientUserMessageId: "slow-message" });
+    await input.onTurnAccepted?.({ sessionId: "slow-stop-session", protocol: "mock", clientUserMessageId: "slow-message", turnId: "slow-turn" });
+    entered.resolve();
+    await release.promise; // 故意忽略 abort，模拟原生进程迟迟不确认退出
+    return { sessionId: "slow-stop-session", text: "late", protocol: "mock" };
+  };
+
+  const active = fx.orchestrator.continue(created.id, { prompt: "无法立即停下", agentId: "codex-technical" });
+  await entered.promise;
+  const timedOut = await fx.orchestrator.interrupt(created.id);
+  assert.equal(timedOut.status, "recovery_required");
+  assert.match(timedOut.error, /20 ms/);
+  await assert.rejects(
+    fx.orchestrator.continue(created.id, { prompt: "不得并发", agentId: "codex-technical", acknowledgeRecovery: true }),
+    { code: "RUN_INTERRUPTING" },
+  );
+  release.resolve();
+  await active;
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline && fx.orchestrator.interruptingRuns.has(created.id)) {
+    await new Promise((resolveTimer) => setTimeout(resolveTimer, 10));
+  }
+  assert.equal(fx.orchestrator.interruptingRuns.has(created.id), false);
+  assert.ok(fx.events.some((event) => event.type === "run.interrupt_timeout"));
+});
+
+test("cancel wins over a concurrent interrupt and late provider settlement cannot revive the run", async (t) => {
+  const fx = await fixture();
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const created = await fx.orchestrator.create({ prompt: "route only", execute: false, permissionMode: "plan" });
+  const entered = deferred();
+  const release = deferred();
+  fx.orchestrator.adapters.get("codex-technical").send = async (input) => {
+    await input.onSessionStarted?.({ sessionId: "cancel-wins-session", protocol: "mock" });
+    await input.onTurnSubmitting?.({ sessionId: "cancel-wins-session", protocol: "mock", clientUserMessageId: "cancel-wins-message" });
+    await input.onTurnAccepted?.({ sessionId: "cancel-wins-session", protocol: "mock", clientUserMessageId: "cancel-wins-message", turnId: "cancel-wins-turn" });
+    entered.resolve();
+    await release.promise; // 故意忽略 abort，制造 interrupt/cancel 后的迟到 settlement
+    return { sessionId: "cancel-wins-session", text: "late", protocol: "mock" };
+  };
+
+  const active = fx.orchestrator.continue(created.id, { prompt: "长任务", agentId: "codex-technical" });
+  await entered.promise;
+  await fx.orchestrator.continue(created.id, { prompt: "取消后不得消费的插话", agentId: "codex-technical" });
+  const live = fx.orchestrator.get(created.id);
+  live.pendingInteractionSources = normalizeRunSources([resolve(fx.root, "cancel-pending.png")]);
+  await fx.orchestrator.save(live);
+
+  const interrupting = fx.orchestrator.interrupt(created.id);
+  const cancelled = await fx.orchestrator.cancel(created.id);
+  assert.equal(cancelled.status, "cancelled");
+  assert.deepEqual(cancelled.pendingSteer, []);
+  assert.deepEqual(cancelled.pendingInteractionSources, []);
+
+  release.resolve();
+  await Promise.allSettled([active, interrupting]);
+  const done = fx.orchestrator.get(created.id);
+  assert.equal(done.status, "cancelled");
+  assert.equal(done.result?.interrupted, undefined);
+  assert.equal(fx.orchestrator.interruptingRuns.has(created.id), false);
+  assert.equal(fx.events.some((event) => event.type === "run.interrupted"), false);
+  assert.equal(fx.events.some((event) => event.type === "run.interrupt_timeout"), false);
+  const persisted = JSON.parse(await readFile(join(fx.root, "runs", `${created.id}.json`), "utf8"));
+  assert.equal(persisted.status, "cancelled");
+  assert.deepEqual(persisted.pendingSteer, []);
+  assert.deepEqual(persisted.pendingInteractionSources, []);
+  await assert.rejects(
+    fx.orchestrator.continue(created.id, { prompt: "不得复活", agentId: "codex-technical" }),
+    { code: "RUN_TERMINAL" },
+  );
 });
 
 test("agent.turn_completed events carry adapter tokens and cost for message-level badges", async (t) => {
@@ -1778,7 +2533,7 @@ test("cancelling a run with queued steers does not restart consumption afterward
   await new Promise((resolveTimer) => setTimeout(resolveTimer, 50)); // 让链尾 ensure 有机会（不该）触发
   const done = fx.orchestrator.get(created.id);
   assert.equal(done.status, "cancelled");
-  assert.deepEqual(done.pendingSteer.map((steer) => steer.prompt), ["排队插话"], "取消后留队如实可见，不被补启消费");
+  assert.deepEqual(done.pendingSteer, [], "取消整场任务必须丢弃尚未消费的插话");
   assert.equal(fx.orchestrator.executions.size, 0, "无补启的排干协程");
 });
 
@@ -1932,7 +2687,7 @@ test("logical team members sharing one runtime profile keep isolated sessions an
     },
     async close() {},
   };
-  const orchestrator = await new Orchestrator({
+  const orchestratorOptions = {
     router: {
       async preview(input) {
         routeInputs.push(input);
@@ -1969,7 +2724,8 @@ test("logical team members sharing one runtime profile keep isolated sessions an
       },
     },
     capabilities: { agentDisabledSkills: async () => new Set() },
-  }).init();
+  };
+  let orchestrator = await new Orchestrator(orchestratorOptions).init();
   t.after(async () => { await orchestrator.close(); await rm(root, { recursive: true, force: true }); });
 
   const originalSnapshot = teamMembers.snapshot;
@@ -2029,6 +2785,7 @@ test("logical team members sharing one runtime profile keep isolated sessions an
   assert.equal(completed.route.selected.runtimeProfileId, "codex-technical");
   assert.equal(completed.route.independent.id, "member-beta", "相同 runtime 的独立席位仍映射到另一个逻辑成员");
   assert.equal(completed.route.independent.runtimeProfileId, "codex-technical");
+  assert.ok(completed.teamRoster.every((member) => member.capabilities.length === 1 && member.capabilities[0] === "*"));
   const approvalMessage = orchestrator.buildApprovalMessage(completed);
   assert.equal(approvalMessage.params.selectedAgent, "member-alpha");
   assert.equal(approvalMessage.params.selectedRuntimeProfileId, "codex-technical");
@@ -2046,6 +2803,8 @@ test("logical team members sharing one runtime profile keep isolated sessions an
   assert.equal(alphaCall.model, "gpt-alpha-default");
   assert.equal(alphaCall.effort, "high");
   assert.match(alphaCall.prompt, /memberId: member-alpha/);
+  assert.match(alphaCall.prompt, /capabilities: \*/);
+  assert.doesNotMatch(alphaCall.prompt, /capabilities: coding、review/);
   assert.match(alphaCall.prompt, /ALPHA_PERSONA: preserve implementation evidence/);
   assert.equal(betaCall.model, "gpt-beta-default");
   assert.equal(betaCall.effort, "xhigh");
@@ -2056,6 +2815,7 @@ test("logical team members sharing one runtime profile keep isolated sessions an
   const persisted = JSON.parse(await readFile(join(root, "runs", `${completed.id}.json`), "utf8"));
   assert.equal(persisted.teamRosterVersion, 1);
   assert.ok(persisted.teamRoster.every((member) => member.teamMemberEligible === true));
+  assert.ok(persisted.teamRoster.every((member) => member.capabilities.length === 1 && member.capabilities[0] === "*"));
   assert.deepEqual(persisted.teamRoster.map(({ id, runtimeProfileId }) => ({ id, runtimeProfileId })), [
     { id: "member-alpha", runtimeProfileId: "codex-technical" },
     { id: "member-beta", runtimeProfileId: "codex-technical" },
@@ -2076,6 +2836,23 @@ test("logical team members sharing one runtime profile keep isolated sessions an
   const continuationCall = calls.at(-1);
   assert.equal(continuationCall.agentId, "member-beta");
   assert.equal(continuationCall.sessionId, "session-member-beta", "续聊沿逻辑成员取回隔离 session");
+
+  const legacyRun = JSON.parse(await readFile(join(root, "runs", `${completed.id}.json`), "utf8"));
+  legacyRun.teamRoster[0].capabilities = ["coding", "review"];
+  legacyRun.teamRoster[1].capabilities = { review: true };
+  await writeFile(join(root, "runs", `${completed.id}.json`), `${JSON.stringify(legacyRun, null, 2)}\n`, "utf8");
+  await orchestrator.close();
+  orchestrator = await new Orchestrator(orchestratorOptions).init();
+  const migratedRun = orchestrator.get(completed.id);
+  assert.ok(migratedRun.teamRoster.every((member) => member.capabilities.length === 1 && member.capabilities[0] === "*"));
+  const migratedDisk = JSON.parse(await readFile(join(root, "runs", `${completed.id}.json`), "utf8"));
+  assert.ok(migratedDisk.teamRoster.every((member) => member.capabilities.length === 1 && member.capabilities[0] === "*"), "旧 run roster 必须在重启恢复时回写默认全能力");
+  await orchestrator.continue(completed.id, {
+    agentId: "member-beta",
+    prompt: "continue after legacy roster migration",
+  });
+  assert.match(calls.at(-1).prompt, /capabilities: \*/);
+  assert.doesNotMatch(calls.at(-1).prompt, /capabilities: review/);
 
   orchestrator.adapters.delete("codex-technical");
   await assert.rejects(

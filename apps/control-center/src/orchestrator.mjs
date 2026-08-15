@@ -8,7 +8,9 @@ import { findSecretCandidates, sanitizeForPersistence } from "./redaction.mjs";
 import { ADAPTER_TEMPLATES } from "./adapters/manifest.mjs";
 import { createRemoteAdapter } from "./adapters/index.mjs";
 import { attestRunWorkspace } from "./run-workspace.mjs";
-import { normalizeRunSources, promptWithRunSources } from "./run-sources.mjs";
+import { normalizeRunSources, promptWithRunSources, visualSourceType } from "./run-sources.mjs";
+import { withManagedClipboardSourceRegistration } from "./clipboard-lifecycle.mjs";
+import { isAbnormalProviderTurnStop } from "./provider-turn-outcome.mjs";
 
 export { normalizeRunSources, promptWithRunSources } from "./run-sources.mjs";
 
@@ -18,9 +20,9 @@ const TERMINAL = new Set(["succeeded", "failed", "cancelled"]);
 const MAX_REQUESTED_AGENTS = 4;
 const CODEX_TRANSPORT_FAILURES = new Set(["APP_SERVER_EXIT", "APP_SERVER_TIMEOUT", "EPIPE", "ECONNRESET", "ENOENT", "UNSAFE_COMMAND_SHIM"]);
 // 自动续跑只针对"已提交但被打断"的超时轮：打断经 provider 确认 + 只读/plan 轮（无写盘残留）
-// 才有安全续跑语义。续跑必须进入新 round；run 级轮次闸因此也是 provider 派发硬闸。
+// 才有安全续跑语义。次数按当前用户交互计，不把一次超时变成整场会话的永久惩罚。
 const AUTO_RECOVERY_TIMEOUT_CODES = new Set(["TURN_TIMEOUT", "TURN_IDLE_TIMEOUT"]);
-const MAX_AUTO_RECOVERIES_PER_RUN = 2;
+const MAX_AUTO_RECOVERIES_PER_INTERACTION = 2;
 // Codex 官方权限档（LO 2026-08-09：与 Codex 桌面批准菜单一致，不再用 514cc 自造档位替代）：
 // composer mode → 原生组合 id（sandbox+approvalPolicy 由 codex adapter 解析，见 codex-app-server.mjs）。
 // 官方语义不走 514cc 的 build 审批/租约门——审批发生在 Codex 层（on-request/on-failure 升级到
@@ -80,7 +82,7 @@ function legacyTeamMember(memberId) {
     role: "",
     description: "",
     systemPrompt: "",
-    capabilities: [],
+    capabilities: ["*"],
     defaultModel: null,
     defaultEffort: null,
     teamMemberEligible: true,
@@ -107,11 +109,6 @@ function normalizeTeamMember(raw, expectedId = null) {
       code: "TEAM_MEMBER_SNAPSHOT_INVALID",
     });
   }
-  let capabilities = raw?.capabilities ?? [];
-  if (Array.isArray(capabilities)) capabilities = [...capabilities];
-  else if (capabilities && typeof capabilities === "object") capabilities = { ...capabilities };
-  else if (capabilities == null || capabilities === "") capabilities = [];
-  else capabilities = [String(capabilities)];
   return {
     id,
     runtimeProfileId,
@@ -119,7 +116,7 @@ function normalizeTeamMember(raw, expectedId = null) {
     role: String(raw?.role ?? "").trim(),
     description: String(raw?.description ?? "").trim(),
     systemPrompt: String(raw?.systemPrompt ?? raw?.personaPrompt ?? "").trim(),
-    capabilities,
+    capabilities: ["*"],
     defaultModel: String(raw?.defaultModel ?? "").trim() || null,
     defaultEffort: String(raw?.defaultEffort ?? "").trim().toLowerCase() || null,
     teamMemberEligible: raw.teamMemberEligible === true,
@@ -145,6 +142,21 @@ function rosterSnapshotEntries(snapshot) {
       .map(([id, member]) => member && typeof member === "object" ? { id, ...member } : member);
   }
   return [];
+}
+
+function migrateRunRosterCapabilities(run) {
+  if (!Object.hasOwn(run || {}, "teamRoster") || run.teamRoster == null) return false;
+  let changed = false;
+  const entries = rosterSnapshotEntries(run.teamRoster).map((member) => {
+    if (!member || typeof member !== "object" || Array.isArray(member)) return member;
+    if (Array.isArray(member.capabilities) && member.capabilities.length === 1 && member.capabilities[0] === "*") {
+      return member;
+    }
+    changed = true;
+    return { ...member, capabilities: ["*"] };
+  });
+  if (changed) run.teamRoster = entries;
+  return changed;
 }
 
 function rosterMember(roster, memberId) {
@@ -175,6 +187,11 @@ function mergeResumeQueues(...queues) {
         ...(raw.busMessageId ? { busMessageId: String(raw.busMessageId) } : {}),
         ...(raw.sourceAttemptId ? { sourceAttemptId: String(raw.sourceAttemptId) } : {}),
         ...(raw.kind ? { kind: String(raw.kind) } : {}),
+        ...(raw.interactionId ? { interactionId: String(raw.interactionId) } : {}),
+        ...(Number.isInteger(Number(raw.interactionSeq)) && Number(raw.interactionSeq) > 0
+          ? { interactionSeq: Math.trunc(Number(raw.interactionSeq)) }
+          : {}),
+        ...(Array.isArray(raw.sources) ? { sources: normalizeRunSources(raw.sources) } : {}),
       };
       if (seen.has(item.itemId)) continue;
       seen.add(item.itemId);
@@ -289,6 +306,7 @@ export class Orchestrator {
     storage = null,
     remoteRunner = null, // v41 波二：远程 run 桥（ssh/remote-run.mjs）；null=远程 run 如实不可用
     repoRoot = null, // 远程 adapter 工厂表的 assertWithin 锚点（claude settings/grok 脚本 containment）
+    interruptTimeoutMs = 30_000,
   }) {
     this.router = router;
     this.adapters = adapters;
@@ -300,6 +318,7 @@ export class Orchestrator {
     this.teamMembers = teamMembers;
     this.remoteRunner = remoteRunner;
     this.repoRoot = repoRoot;
+    this.interruptTimeoutMs = Math.max(1, Math.trunc(Number(interruptTimeoutMs) || 30_000));
     // 远程 run 专用 adapter 缓存：`${runId}:${runtimeProfileId}` → Promise<{adapter, fallback}>。
     // 与本机席位池隔离；常驻型（codex app-server）靠它跨轮复用同一只远端进程（会话连续性）。
     this.remoteAdapters = new Map();
@@ -320,11 +339,235 @@ export class Orchestrator {
     this.projectionChains = new Map(); // provider 结果投影；cancel 等当前投影收口后再清最终状态
     this.cancelEpochs = new Map(); // continue 入口捕获 epoch；并发 cancel 后旧准入必须失效
     this.cancellingRuns = new Set();
+    this.interruptingRuns = new Set(); // 只中断当前 provider turn；不撤销 run 授权与原生会话
     this.askClaims = new Map(); // runId -> askId；仅保护同进程内 answer 所有权，不进入持久化状态
+    // `${runId}::${agentId}` -> 在途直发续聊的原文：重复提交幂等门用（见 continue）。
+    // 只活在内存：重启后没有在途轮，语义上就该清空，落盘只会留下永不过期的假在途。
+    this.inflightContinuations = new Map();
     this.storage = { mkdir, readdir, readFile, ...(storage || {}) }; // init I/O seam；故障测试不依赖平台权限技巧
     // 已清除 run 的墓碑：终态尾巴协程（drain 收尾/emitEvent 降级路径）持有 run 引用的迟到 save
     // 会绕过 Map 复活文件——墓碑让 save 直接丢弃。uuid 每条约 40B、清除频率低，不回收。
     this.clearedRuns = new Set();
+  }
+
+  maxStepsForInteraction(run) {
+    const configured = Number(run?.maxStepsPerInteraction ?? run?.maxRounds ?? this.policy.limits.maxRounds);
+    const policyCap = Math.max(1, Math.trunc(Number(this.policy.limits.maxRounds) || 1));
+    return Math.max(1, Math.min(Math.trunc(Number.isFinite(configured) ? configured : policyCap), policyCap));
+  }
+
+  /**
+   * 旧 run 兼容迁移：maxRounds 保留为审批/配置兼容名，但语义改为单次用户交互的自主步骤上限。
+   * round 从此只做全会话单调 provider-turn 序号，不再承担封顶或配额回退。
+   */
+  ensureInteractionState(run) {
+    let changed = false;
+    const maxSteps = this.maxStepsForInteraction(run);
+    if (run.maxStepsPerInteraction !== maxSteps) {
+      run.maxStepsPerInteraction = maxSteps;
+      changed = true;
+    }
+    if (!Number.isFinite(Number(run.maxRounds)) || Number(run.maxRounds) <= 0) {
+      run.maxRounds = maxSteps;
+      changed = true;
+    }
+    const hasConversation = Number(run.round || 0) > 0
+      || Boolean((run.turnAttempts || []).length)
+      || Boolean((run.resumeQueue || []).length)
+      || run.execute === true;
+    const sequence = Math.max(0, Math.trunc(Number(run.interactionSeq) || 0));
+    if (sequence === 0 && hasConversation) {
+      run.interactionSeq = 1;
+      changed = true;
+    } else if (run.interactionSeq !== sequence) {
+      run.interactionSeq = sequence;
+      changed = true;
+    }
+    if (!run.activeInteractionId && run.interactionSeq > 0) {
+      run.activeInteractionId = `legacy:${run.id}:${run.interactionSeq}`;
+      changed = true;
+    }
+    const activeSequence = Math.max(0, Math.trunc(Number(run.activeInteractionSeq) || 0));
+    if (run.activeInteractionId && activeSequence === 0) {
+      run.activeInteractionSeq = Math.max(1, run.interactionSeq || 1);
+      changed = true;
+    }
+    if (!Number.isFinite(Number(run.interactionStep)) || Number(run.interactionStep) < 0) {
+      // 老 run 没有 interactionStep；按已发生总轮数收紧当前旧交互，但下一条用户消息会新开预算。
+      run.interactionStep = Math.min(Math.max(0, Math.trunc(Number(run.round) || 0)), maxSteps);
+      changed = true;
+    } else {
+      const step = Math.max(0, Math.trunc(Number(run.interactionStep) || 0));
+      if (run.interactionStep !== step) {
+        run.interactionStep = step;
+        changed = true;
+      }
+    }
+    for (const field of ["interactionCostUsd", "interactionStepsRefunded", "interactionAutoRecoveries"]) {
+      const value = Math.max(0, Number(run[field]) || 0);
+      if (run[field] !== value) {
+        run[field] = value;
+        changed = true;
+      }
+    }
+    if (!Array.isArray(run.refundedAttemptIds)) {
+      run.refundedAttemptIds = [];
+      changed = true;
+    }
+    const activeSources = normalizeRunSources(
+      Array.isArray(run.activeInteractionSources) ? run.activeInteractionSources : run.sources,
+    );
+    if (JSON.stringify(activeSources) !== JSON.stringify(run.activeInteractionSources || [])) {
+      // 旧 run 的当前交互继续看到历史附件；下一条消息激活新交互后只绑定本次新附件。
+      run.activeInteractionSources = activeSources;
+      changed = true;
+    }
+    const pendingSources = normalizeRunSources(run.pendingInteractionSources || []);
+    if (JSON.stringify(pendingSources) !== JSON.stringify(run.pendingInteractionSources || [])) {
+      run.pendingInteractionSources = pendingSources;
+      changed = true;
+    }
+    const rawStates = run.interactionStates && typeof run.interactionStates === "object" && !Array.isArray(run.interactionStates)
+      ? run.interactionStates
+      : {};
+    const interactionStates = {};
+    for (const [interactionId, rawState] of Object.entries(rawStates)) {
+      if (!interactionId || !rawState || typeof rawState !== "object" || Array.isArray(rawState)) continue;
+      interactionStates[interactionId] = {
+        interactionSeq: Math.max(1, Math.trunc(Number(rawState.interactionSeq) || 1)),
+        interactionStep: Math.max(0, Math.trunc(Number(rawState.interactionStep) || 0)),
+        interactionCostUsd: Math.max(0, Number(rawState.interactionCostUsd) || 0),
+        interactionStepsRefunded: Math.max(0, Math.trunc(Number(rawState.interactionStepsRefunded) || 0)),
+        interactionAutoRecoveries: Math.max(0, Math.trunc(Number(rawState.interactionAutoRecoveries) || 0)),
+        interactionStartedAt: rawState.interactionStartedAt || null,
+        sources: normalizeRunSources(rawState.sources || []),
+      };
+    }
+    if (run.activeInteractionId) {
+      // 活跃标量是当前进程的即时真相；每次进入交互闸时同步回私有 ledger，供插话后恢复。
+      interactionStates[run.activeInteractionId] = {
+        interactionSeq: Math.max(1, Math.trunc(Number(run.activeInteractionSeq) || 1)),
+        interactionStep: Math.max(0, Math.trunc(Number(run.interactionStep) || 0)),
+        interactionCostUsd: Math.max(0, Number(run.interactionCostUsd) || 0),
+        interactionStepsRefunded: Math.max(0, Math.trunc(Number(run.interactionStepsRefunded) || 0)),
+        interactionAutoRecoveries: Math.max(0, Math.trunc(Number(run.interactionAutoRecoveries) || 0)),
+        interactionStartedAt: run.interactionStartedAt || null,
+        sources: activeSources,
+      };
+    }
+    if (JSON.stringify(interactionStates) !== JSON.stringify(rawStates)) {
+      run.interactionStates = interactionStates;
+      changed = true;
+    }
+    return changed;
+  }
+
+  allocateInteraction(run, interactionId = randomUUID()) {
+    this.ensureInteractionState(run);
+    const interactionSeq = Math.max(0, Math.trunc(Number(run.interactionSeq) || 0)) + 1;
+    run.interactionSeq = interactionSeq;
+    return { interactionId, interactionSeq };
+  }
+
+  bindWorkToInteraction(run, descriptor) {
+    if (!descriptor?.interactionId) return;
+    const sources = normalizeRunSources(descriptor.sources || []);
+    const bind = (item) => item && typeof item === "object"
+      ? { ...item, interactionId: descriptor.interactionId, interactionSeq: descriptor.interactionSeq, sources }
+      : item;
+    run.resumeQueue = (run.resumeQueue || []).map(bind);
+    if (run.resumeClaim) run.resumeClaim = bind(run.resumeClaim);
+  }
+
+  activateInteraction(run, descriptor, { adoptDurableWork = true } = {}) {
+    if (!descriptor?.interactionId) throw Object.assign(new Error("interaction identity is required"), { code: "INTERACTION_INVALID" });
+    this.ensureInteractionState(run);
+    const interactionId = String(descriptor.interactionId);
+    const interactionSeq = Math.max(1, Math.trunc(Number(descriptor.interactionSeq) || 1));
+    if (run.activeInteractionId === descriptor.interactionId) return false;
+    const stored = run.interactionStates?.[interactionId] || null;
+    const sources = normalizeRunSources(stored?.sources ?? descriptor.sources ?? []);
+    run.activeInteractionId = interactionId;
+    run.activeInteractionSeq = stored?.interactionSeq || interactionSeq;
+    run.interactionStep = stored?.interactionStep || 0;
+    run.interactionCostUsd = stored?.interactionCostUsd || 0;
+    run.interactionStepsRefunded = stored?.interactionStepsRefunded || 0;
+    run.interactionAutoRecoveries = stored?.interactionAutoRecoveries || 0;
+    run.activeInteractionSources = sources;
+    run.interactionStartedAt = stored?.interactionStartedAt || new Date().toISOString();
+    run.interactionStates ||= {};
+    run.interactionStates[interactionId] = {
+      interactionSeq: run.activeInteractionSeq,
+      interactionStep: run.interactionStep,
+      interactionCostUsd: run.interactionCostUsd,
+      interactionStepsRefunded: run.interactionStepsRefunded,
+      interactionAutoRecoveries: run.interactionAutoRecoveries,
+      interactionStartedAt: run.interactionStartedAt,
+      sources,
+    };
+    if (adoptDurableWork) this.bindWorkToInteraction(run, descriptor);
+    return true;
+  }
+
+  currentInteraction(run) {
+    this.ensureInteractionState(run);
+    return {
+      interactionId: run.activeInteractionId,
+      interactionSeq: run.activeInteractionSeq,
+      sources: normalizeRunSources(run.activeInteractionSources || []),
+    };
+  }
+
+  consumePendingInteractionSources(run) {
+    this.ensureInteractionState(run);
+    const sources = normalizeRunSources(run.pendingInteractionSources || []);
+    run.pendingInteractionSources = [];
+    return sources;
+  }
+
+  prepareInteractionSources(run, value) {
+    const directSources = normalizeRunSources(value || []);
+    const previous = {
+      sources: normalizeRunSources(run.sources || []),
+      pendingInteractionSources: normalizeRunSources(run.pendingInteractionSources || []),
+    };
+    const sources = normalizeRunSources([...previous.pendingInteractionSources, ...directSources]);
+    run.sources = normalizeRunSources([...previous.sources, ...directSources]);
+    run.pendingInteractionSources = [];
+    return { sources, previous };
+  }
+
+  restorePreparedInteractionSources(run, previous) {
+    if (!previous) return;
+    run.sources = previous.sources;
+    run.pendingInteractionSources = previous.pendingInteractionSources;
+  }
+
+  interactionSnapshot(run) {
+    this.ensureInteractionState(run);
+    return {
+      interactionSeq: run.interactionSeq,
+      activeInteractionId: run.activeInteractionId,
+      activeInteractionSeq: run.activeInteractionSeq,
+      interactionStep: run.interactionStep,
+      interactionCostUsd: run.interactionCostUsd,
+      interactionStepsRefunded: run.interactionStepsRefunded,
+      interactionAutoRecoveries: run.interactionAutoRecoveries,
+      interactionStartedAt: run.interactionStartedAt,
+      activeInteractionSources: normalizeRunSources(run.activeInteractionSources || []),
+      pendingInteractionSources: normalizeRunSources(run.pendingInteractionSources || []),
+      interactionStates: structuredClone(run.interactionStates || {}),
+    };
+  }
+
+  restoreInteraction(run, snapshot) {
+    if (!snapshot) return;
+    Object.assign(run, snapshot);
+  }
+
+  interactionLimitReached(run, reserve = 0) {
+    this.ensureInteractionState(run);
+    return Number(run.interactionStep || 0) + Math.max(0, Number(reserve) || 0) >= this.maxStepsForInteraction(run);
   }
 
   async init() {
@@ -362,9 +605,49 @@ export class Orchestrator {
       this.runs.set(run.id, run); // 先建立控制面可见性；后续 bus/save 故障不能把有效 run 隐藏成 404。
       let restatedOnRestart = false;
       try {
-        const normalizedQueue = mergeResumeQueues(run.resumeQueue);
+        restatedOnRestart ||= this.ensureInteractionState(run);
+        const rosterCapabilitiesMigrated = migrateRunRosterCapabilities(run);
+        restatedOnRestart = rosterCapabilitiesMigrated || restatedOnRestart;
+        const currentInteraction = this.currentInteraction(run);
+        const normalizedQueue = mergeResumeQueues(run.resumeQueue).map((item) => item.interactionId
+          ? item
+          : { ...item, ...currentInteraction });
         if (JSON.stringify(normalizedQueue) !== JSON.stringify(run.resumeQueue || [])) {
           run.resumeQueue = normalizedQueue;
+          restatedOnRestart = true;
+        }
+        if (run.resumeClaim && !run.resumeClaim.interactionId) {
+          run.resumeClaim = { ...run.resumeClaim, ...currentInteraction };
+          restatedOnRestart = true;
+        }
+        if (run.resumeClaim && !Array.isArray(run.resumeClaim.sources)) {
+          const claimed = (run.resumeQueue || []).find((item) => item?.itemId === run.resumeClaim.itemId);
+          run.resumeClaim = {
+            ...run.resumeClaim,
+            sources: normalizeRunSources(claimed?.sources || currentInteraction.sources || []),
+          };
+          restatedOnRestart = true;
+        }
+        if (Array.isArray(run.pendingSteer)) {
+          run.pendingSteer = run.pendingSteer.map((item) => {
+            let normalized = item;
+            if (!item?.interactionId) {
+              normalized = { ...normalized, ...this.allocateInteraction(run) };
+              restatedOnRestart = true;
+            }
+            if (!Array.isArray(normalized?.sources)) {
+              normalized = { ...normalized, sources: [] };
+              restatedOnRestart = true;
+            }
+            return normalized;
+          });
+        }
+        if (run.activeSteer && !run.activeSteer.interactionId) {
+          const queued = (run.pendingSteer || []).find((item) => item?.id === run.activeSteer.steerId);
+          run.activeSteer = { ...run.activeSteer, ...(queued?.interactionId ? {
+            interactionId: queued.interactionId,
+            interactionSeq: queued.interactionSeq,
+          } : currentInteraction) };
           restatedOnRestart = true;
         }
         const requestedAgentIds = normalizeRequestedAgentIds(run.requestedAgentIds, run.teamMembers);
@@ -408,6 +691,7 @@ export class Orchestrator {
             to,
             busMessageId: operationMessageId("task", targets.length === 1 && to === startAgentId ? run.id : `${run.id}:${to}`),
             kind: "task",
+            ...this.currentInteraction(run),
           })));
           for (const item of run.resumeQueue) {
             if (item.to === startAgentId) continue;
@@ -648,7 +932,9 @@ export class Orchestrator {
       && !member.role
       && !member.description
       && !member.systemPrompt
-      && !(Array.isArray(member.capabilities) ? member.capabilities.length : Object.keys(member.capabilities || {}).length)
+      && (Array.isArray(member.capabilities)
+        ? member.capabilities.length === 0 || (member.capabilities.length === 1 && member.capabilities[0] === "*")
+        : !Object.keys(member.capabilities || {}).length)
       && !member.defaultModel
       && !member.defaultEffort);
     if (identityOnly) return "";
@@ -768,8 +1054,9 @@ export class Orchestrator {
   }
 
   requiresRecovery(run, error = null) {
-    return error?.code === "RECOVERY_REQUIRED"
-      || Boolean(run.resumeClaim)
+    if (error?.code === "RECOVERY_REQUIRED") return true;
+    if (error?.nativeTurnSettled === true) return false;
+    return Boolean(run.resumeClaim)
       || Boolean((run.resumeQueue || []).length)
       || Boolean(run.activeSteer)
       || this.hasAmbiguousRestartWork(run);
@@ -780,18 +1067,15 @@ export class Orchestrator {
    * ① 超时家族错误（TURN_TIMEOUT/TURN_IDLE_TIMEOUT）——其它 ambiguous（如 OUTPUT_LIMIT）续跑只会重演；
    * ② interruptConfirmed === true——provider 确认原生轮已死，续跑不与任何活跃工作并发；
    * ③ 只读/plan 轮——被打断的轮不可能留下写盘残留（workspace-write 轮必须人工检查半成品）；
-   * ④ 有原生会话可续且未超 run 级硬顶（防脚本化白烧，超限回落人工闸）。
+   * ④ 有原生会话可续且当前交互仍有 step/自动恢复预算（防脚本化白烧，超限回落人工闸）。
    */
   autoRecoveryDecision(run, agentId, error, effectivePermissionMode) {
     if (!AUTO_RECOVERY_TIMEOUT_CODES.has(error?.code)) return { ok: false, reason: "not-a-timeout" };
     if (error.interruptConfirmed !== true) return { ok: false, reason: "interrupt-unconfirmed" };
     if (!["read-only", "plan"].includes(effectivePermissionMode)) return { ok: false, reason: "write-turn" };
     if (!(error.sessionId || run.sessions?.[agentId])) return { ok: false, reason: "no-native-session" };
-    const roundCap = Number(run.maxRounds);
-    if (Number.isFinite(roundCap) && roundCap > 0 && (Number(run.round) || 0) >= roundCap) {
-      return { ok: false, reason: "round-limit" };
-    }
-    if ((run.autoRecoveries || 0) >= MAX_AUTO_RECOVERIES_PER_RUN) return { ok: false, reason: "cap-exhausted" };
+    if (this.interactionLimitReached(run)) return { ok: false, reason: "step-limit" };
+    if ((run.interactionAutoRecoveries || 0) >= MAX_AUTO_RECOVERIES_PER_INTERACTION) return { ok: false, reason: "cap-exhausted" };
     return { ok: true };
   }
 
@@ -835,6 +1119,9 @@ export class Orchestrator {
   assertContinuationAdmission(runId, expectedEpoch) {
     if (this.closing) {
       throw Object.assign(new Error("control plane is shutting down"), { code: "CONTROL_PLANE_CLOSING" });
+    }
+    if (this.interruptingRuns.has(runId)) {
+      throw Object.assign(new Error("the current provider turn is still being interrupted"), { code: "RUN_INTERRUPTING" });
     }
     if (this.cancellingRuns.has(runId) || this.cancelEpoch(runId) !== expectedEpoch) {
       throw Object.assign(new Error("run cancellation superseded this continuation"), { code: "RUN_CANCELLED" });
@@ -950,7 +1237,10 @@ export class Orchestrator {
         effort: this.effectiveEffortFor(run, executionOwnerId),
         permissionMode: run.permissionMode,
         collaborationMode: run.collaborationMode,
-        maxRounds: run.maxRounds,
+        // 兼容字段 maxRounds 的实际语义是「单次用户交互的自主步骤上限」。锚定批准时的值，
+        // 让后续每条消息复用同一授权边界；全会话 round 只做审计序号，不进入封顶语义。
+        // 工作区 / 执行者 / 权限档 / prompt / policy 仍全部入哈希，每个写盘 turn 继续校验 lease。
+        maxRounds: run.buildApproval?.approvedMaxRounds ?? run.maxRounds,
         policyVersion: this.policy.version,
         policySha256,
       },
@@ -1411,6 +1701,7 @@ export class Orchestrator {
       const existing = [...this.runs.values()].find((item) => item.idempotencyKey === idempotencyKey);
       if (existing) return existing;
     }
+    const runSources = normalizeRunSources(input.sources);
     // 团队 = 会话级能力配比：成员进路由白名单，提示词/能力声明注入主脑规划轮
     let team = null;
     if (this.teams) {
@@ -1446,17 +1737,39 @@ export class Orchestrator {
     }
     const requestedProvider = input.requestedProvider == null ? null : String(input.requestedProvider).trim();
     const requestedProviderMember = teamRoster ? rosterMember(teamRoster, requestedProvider) : null;
+    const requestedRuntimeProfileId = requestedProviderMember?.runtimeProfileId || requestedProvider || null;
+    if (explicitStartAgentId && requestedRuntimeProfileId && requestedRuntimeProfileId !== startRuntimeProfileId) {
+      throw Object.assign(new Error("requestedProvider must match the explicit startAgentId runtime profile"), {
+        code: "VALIDATION_FAILED",
+      });
+    }
+    // 直接收件人就是实际执行 owner；显式 start 未另传 provider 时，路由也必须验证同一 runtime。
+    // 自动化只持久化 startAgentId，依赖这条服务端不变量，不能退回 UI 软接线。
+    const routedProviderId = requestedRuntimeProfileId || (explicitStartAgentId ? startRuntimeProfileId : undefined);
+    const visualAttachmentType = visualSourceType(runSources);
     const runtimeRoute = await this.router.preview({
       prompt,
       taskType: input.taskType,
-      requestedProvider: requestedProviderMember?.runtimeProfileId || requestedProvider || undefined,
+      // multimodal 由真实附件决定（见 classifyTask）；与 1630 行的 run.sources 同一份归一化口径
+      hasVisualAttachment: visualAttachmentType !== null,
+      visualAttachmentType,
+      requestedProvider: routedProviderId,
       risk: input.risk,
       needsCurrentSource: input.needsCurrentSource === true,
       allowedProviders: teamRoster
         ? [...new Set(teamRoster.map((member) => member.runtimeProfileId))]
         : null,
     });
+    const selectedRuntimeProfileId = runtimeRouteId(runtimeRoute?.selected);
+    if (routedProviderId && selectedRuntimeProfileId !== routedProviderId) {
+      throw Object.assign(new Error("router did not honor the explicitly routed runtime provider"), {
+        code: "TRANSACTION_INCONSISTENT",
+        expectedRuntimeProfileId: routedProviderId,
+        actualRuntimeProfileId: selectedRuntimeProfileId || null,
+      });
+    }
     const route = this.mapRuntimeRoute(runtimeRoute, teamRoster, [
+      explicitStartAgentId ? startAgentId : requestedProviderMember?.id,
       requestedProviderMember?.id,
       startAgentId,
       ...requestedAgentIds,
@@ -1559,7 +1872,8 @@ export class Orchestrator {
     // v4.0 codeg 对标：委托深度限制（1-8，默认 4）——防止无限递归委派
     // codeg 的 DelegationBroker 含 depth_limit（1-8）、per-agent defaults、cancel 传播
     const delegationDepthLimit = Math.max(1, Math.min(8, Number(input.delegationDepthLimit) || 4));
-    const requestedMaxRounds = Number(input.maxRounds) || this.policy.limits.maxRounds;
+    // maxRounds 是公开 API/审批哈希的兼容名；实际语义是每条用户消息可触发的自主 provider 步数。
+    const requestedMaxRounds = Number(input.maxStepsPerInteraction ?? input.maxRounds) || this.policy.limits.maxRounds;
     const topologyMinimumRounds = executionOwnerId === coordinatorId ? (route.independentRequired ? 3 : 1) : 3;
     const socialMinimumRounds = orchestrationMode === "social" ? initialTargets.length + 1 : 0;
     const minimumRounds = Math.max(topologyMinimumRounds, socialMinimumRounds);
@@ -1574,13 +1888,16 @@ export class Orchestrator {
     }
     const now = new Date().toISOString();
     const runId = randomUUID();
+    const initialInteraction = { interactionId: randomUUID(), interactionSeq: 1 };
     const initialResumeQueue = input.execute === true && orchestrationMode === "social"
       ? mergeResumeQueues(initialTargets.map((to) => ({
           to,
           busMessageId: operationMessageId("task", initialTargets.length === 1 && to === startAgentId ? runId : `${runId}:${to}`),
           kind: "task",
+          ...initialInteraction,
         })))
       : [];
+    const maxStepsPerInteraction = Math.max(minimumRounds, Math.min(requestedMaxRounds, this.policy.limits.maxRounds));
     const run = {
       id: runId,
       status: "queued",
@@ -1588,9 +1905,32 @@ export class Orchestrator {
       taskType: route.taskType,
       createdAt: now,
       updatedAt: now,
-      maxRounds: Math.max(minimumRounds, Math.min(requestedMaxRounds, this.policy.limits.maxRounds)),
+      maxRounds: maxStepsPerInteraction,
+      maxStepsPerInteraction,
       round: 0,
-      roundsRefunded: 0, // 明确未被 provider 接受的轮次退还数（上界=maxRounds，见 refundAbandonedRound）
+      interactionSeq: initialInteraction.interactionSeq,
+      activeInteractionId: initialInteraction.interactionId,
+      activeInteractionSeq: initialInteraction.interactionSeq,
+      interactionStep: 0,
+      interactionCostUsd: 0,
+      interactionStepsRefunded: 0,
+      interactionAutoRecoveries: 0,
+      interactionStartedAt: now,
+      activeInteractionSources: runSources,
+      pendingInteractionSources: [],
+      interactionStates: {
+        [initialInteraction.interactionId]: {
+          interactionSeq: initialInteraction.interactionSeq,
+          interactionStep: 0,
+          interactionCostUsd: 0,
+          interactionStepsRefunded: 0,
+          interactionAutoRecoveries: 0,
+          interactionStartedAt: now,
+          sources: runSources,
+        },
+      },
+      roundsRefunded: 0, // 兼容审计累计值；round 不回退，真正退还的是当前 interactionStep
+      refundedAttemptIds: [],
       route,
       sessions: {},
       turns: [],
@@ -1616,7 +1956,7 @@ export class Orchestrator {
       idempotencyKey,
       cwd: sessionCwd, // null=控制面默认（repoRoot）；有值=会话项目地址，CLI 原生会话落该项目
       remote: sessionRemote, // v41：{hostId, path}=远端运行位置；null=本机。与 cwd 互斥（create 校验）
-      sources: normalizeRunSources(input.sources), // 结构化来源台账；prompt 仍保留 CLI 可读路径说明
+      sources: runSources, // 结构化来源台账；prompt 仍保留 CLI 可读路径说明
       collaborationMode: input.collaborationMode === "deep" ? "deep" : "standard",
       permissionMode: requestedPermissionMode,
       delegationDepthLimit, // v4.0：委托深度限制（codeg DelegationBroker 对标）
@@ -1654,7 +1994,11 @@ export class Orchestrator {
         state: "queued",
       });
     }
-    await this.save(run);
+    await withManagedClipboardSourceRegistration({
+      dataRoot: this.dataRoot,
+      sources: run.sources,
+      operation: () => this.save(run),
+    });
     await this.emitEvent(run, "run.created", { taskType: run.taskType, execute: run.execute, route: route.selected, collaborationMode: run.collaborationMode }, { runId: run.id });
     if (!run.execute) {
       run.status = "succeeded";
@@ -1675,6 +2019,9 @@ export class Orchestrator {
   async awaitBuildApproval(id) {
     const run = this.get(id);
     const policySha256 = this.policySha256();
+    // 先固化批准时的单交互自主步骤上限，再算哈希；后续消息开启新 interaction，
+    // 但不会扩大这次动作绑定审批允许的自主执行边界。
+    run.buildApproval.approvedMaxRounds = run.maxRounds;
     const message = this.buildApprovalMessage(run);
     run.buildApproval.actionSha256 = createHash("sha256").update(JSON.stringify({ method: message.method, params: message.params })).digest("hex");
     await this.save(run);
@@ -1716,17 +2063,23 @@ export class Orchestrator {
   async checkpointTurn(run, agentId, attemptId, phase, patch = {}) {
     const attempt = (run.turnAttempts || []).find((item) => item.attemptId === attemptId);
     if (!attempt) throw Object.assign(new Error("turn attempt checkpoint is missing"), { code: "CHECKPOINT_MISSING" });
-    const durableIdentifiers = ["sessionId", "protocol", "clientUserMessageId", "nativeTurnId"];
+    const durableIdentifiers = ["sessionId", "tentativeSessionId", "protocol", "clientUserMessageId", "nativeTurnId"];
     for (const field of durableIdentifiers) {
       if (patch[field] == null && attempt[field] != null) patch[field] = attempt[field];
     }
+    if (patch.sessionResumable == null && attempt.sessionResumable != null) {
+      patch.sessionResumable = attempt.sessionResumable;
+    }
     Object.assign(attempt, patch, { phase, updatedAt: new Date().toISOString() });
-    if (attempt.sessionId) run.sessions[agentId] = attempt.sessionId;
+    // tentativeSessionId 只能证明控制面为原生 CLI 预留了标识。Adapter 必须用
+    // sessionResumable=true 明确提升后，Grok 新会话才可进入 run.sessions。
+    // 未声明该字段的既有 Adapter 保持向后兼容。
+    if (attempt.sessionId && attempt.sessionResumable !== false) run.sessions[agentId] = attempt.sessionId;
     run.inflightTurns ||= {};
     // rejected/ambiguous 同属终结相位：该 attempt 不会再推进，留在 inflight 只会让 UI 永远显示"正在准备会话"。
     // "可能已占用原生轮"的语义由 run.status=recovery_required + recoveryNote + resumeClaim 承载，
     // 不需要 inflight 记账兼任，后者反而挡住了操作者确认恢复后的继续发送。
-    if (["completed", "failed", "rejected", "ambiguous"].includes(phase)) delete run.inflightTurns[agentId];
+    if (["completed", "failed", "rejected", "ambiguous", "interrupted"].includes(phase)) delete run.inflightTurns[agentId];
     else run.inflightTurns[agentId] = attemptId;
     await this.save(run);
     await this.emitEvent(
@@ -1735,6 +2088,10 @@ export class Orchestrator {
       {
         attemptId,
         round: attempt.round,
+        interactionId: attempt.interactionId || run.activeInteractionId || null,
+        interactionSeq: attempt.interactionSeq || run.activeInteractionSeq || null,
+        interactionStep: attempt.interactionStep || run.interactionStep || null,
+        maxStepsPerInteraction: this.maxStepsForInteraction(run),
         agentId,
         phase,
         protocol: attempt.protocol || null,
@@ -1756,7 +2113,7 @@ export class Orchestrator {
     const runtimeProfileId = member.runtimeProfileId;
     // Source paths stay in the private run ledger and are injected only at the adapter boundary.
     // Public run/event prompts keep the operator's original text and receive a filename-only projection.
-    prompt = promptWithRunSources(prompt, run.sources);
+    prompt = promptWithRunSources(prompt, run.activeInteractionSources ?? run.sources);
     const promptSha256 = createHash("sha256").update(prompt).digest("hex");
     const preparedAttempt = sourceWorkItemId
       ? [...(run.turnAttempts || [])].reverse().find((attempt) =>
@@ -1767,8 +2124,9 @@ export class Orchestrator {
     if (preparedAttempt && preparedAttempt.promptSha256 !== promptSha256) {
       throw Object.assign(new Error("prepared turn prompt changed before safe recovery"), { code: "RECOVERY_REQUIRED" });
     }
-    if (!preparedAttempt && run.round >= run.maxRounds) {
-      throw Object.assign(new Error("maximum collaboration rounds reached"), { code: "ROUND_LIMIT" });
+    this.ensureInteractionState(run);
+    if (!preparedAttempt && this.interactionLimitReached(run)) {
+      throw Object.assign(new Error("maximum autonomous steps reached for this interaction"), { code: "INTERACTION_STEP_LIMIT" });
     }
     const controller = this.controllers.get(run.id);
     if (!controller || controller.signal.aborted) throw Object.assign(new Error("run cancelled"), { code: "ABORTED" });
@@ -1855,8 +2213,8 @@ export class Orchestrator {
     }
     const attemptId = preparedAttempt?.attemptId || randomUUID();
     await this.withLifecycleEffect(run, controller, async () => {
-      if (!preparedAttempt && run.round >= run.maxRounds) {
-        throw Object.assign(new Error("maximum collaboration rounds reached"), { code: "ROUND_LIMIT" });
+      if (!preparedAttempt && this.interactionLimitReached(run)) {
+        throw Object.assign(new Error("maximum autonomous steps reached for this interaction"), { code: "INTERACTION_STEP_LIMIT" });
       }
       run.status = "waiting_agent";
       run.turnAttempts ||= [];
@@ -1865,13 +2223,21 @@ export class Orchestrator {
         preparedAttempt.updatedAt = new Date().toISOString();
       } else {
         run.round += 1;
+        run.interactionStep += 1;
         run.turnAttempts.push({
           attemptId,
           round: run.round,
+          interactionId: run.activeInteractionId,
+          interactionSeq: run.activeInteractionSeq,
+          interactionStep: run.interactionStep,
           agentId,
           phase: "prepared",
           promptSha256,
           sessionId: run.sessions[agentId] || null,
+          tentativeSessionId: null,
+          // null 表示既有 Adapter 未声明新契约，仍按 sessionId 直接提升；只有 Grok
+          // 预分配新会话时会在 submitting checkpoint 显式写 false。
+          sessionResumable: run.sessions[agentId] ? true : null,
           protocol: null,
           clientUserMessageId: null,
           nativeTurnId: null,
@@ -1885,6 +2251,10 @@ export class Orchestrator {
       await this.save(run);
       await this.emitEvent(run, "agent.turn_started", {
         round: preparedAttempt?.round || run.round,
+        interactionId: preparedAttempt?.interactionId || run.activeInteractionId,
+        interactionSeq: preparedAttempt?.interactionSeq || run.activeInteractionSeq,
+        interactionStep: preparedAttempt?.interactionStep || run.interactionStep,
+        maxStepsPerInteraction: this.maxStepsForInteraction(run),
         agentId,
         resumedPrepared: Boolean(preparedAttempt),
       }, { runId: run.id, sessionId: run.sessions[agentId] || null, agentId });
@@ -1893,7 +2263,9 @@ export class Orchestrator {
     let response;
     const checkpoint = (phase, data = {}) => this.withLifecycleEffect(run, controller, () =>
       this.checkpointTurn(run, agentId, attemptId, phase, {
-        sessionId: data.sessionId || run.sessions[agentId] || null,
+        sessionId: Object.hasOwn(data, "sessionId") ? data.sessionId : (run.sessions[agentId] || null),
+        tentativeSessionId: data.tentativeSessionId ?? null,
+        sessionResumable: data.sessionResumable,
         protocol: data.protocol || null,
         clientUserMessageId: data.clientUserMessageId || null,
         nativeTurnId: data.turnId || null,
@@ -1927,7 +2299,19 @@ export class Orchestrator {
       const attempt = (run.turnAttempts || []).find((item) => item.attemptId === attemptId);
       if (error.submissionRejected === true && attempt?.phase === "submitting") {
         await checkpoint("rejected", {
-          sessionId: error.sessionId || run.sessions[agentId] || null,
+          sessionId: error.sessionId ?? run.sessions[agentId] ?? null,
+          tentativeSessionId: error.tentativeSessionId ?? null,
+          sessionResumable: error.sessionResumable,
+          protocol: error.protocol || null,
+          clientUserMessageId: error.clientUserMessageId || null,
+          turnId: error.turnId || null,
+        });
+      }
+      if (error.nativeTurnSettled === true && ["submitting", "submitted"].includes(attempt?.phase)) {
+        await checkpoint("failed", {
+          sessionId: error.sessionId ?? run.sessions[agentId] ?? null,
+          tentativeSessionId: error.tentativeSessionId ?? null,
+          sessionResumable: error.sessionResumable,
           protocol: error.protocol || null,
           clientUserMessageId: error.clientUserMessageId || null,
           turnId: error.turnId || null,
@@ -1966,6 +2350,7 @@ export class Orchestrator {
         const recovery = this.autoRecoveryDecision(run, agentId, error, effectivePermissionMode);
         if (recovery.ok) {
           run.autoRecoveries = (run.autoRecoveries || 0) + 1;
+          run.interactionAutoRecoveries = (run.interactionAutoRecoveries || 0) + 1;
           await checkpoint("failed", {
             sessionId: error.sessionId || run.sessions[agentId] || null,
             protocol: error.protocol || null,
@@ -1978,8 +2363,11 @@ export class Orchestrator {
             {
               agentId,
               round: run.round,
-              count: run.autoRecoveries,
-              cap: MAX_AUTO_RECOVERIES_PER_RUN,
+              interactionId: run.activeInteractionId,
+              interactionSeq: run.activeInteractionSeq,
+              interactionStep: run.interactionStep,
+              count: run.interactionAutoRecoveries,
+              cap: MAX_AUTO_RECOVERIES_PER_INTERACTION,
               nextRound: run.round + 1,
               reason: error.message,
             },
@@ -2016,18 +2404,33 @@ export class Orchestrator {
         response = await fallback.send(sendInput);
       }
     }
+    // provider 返回 end 事件不等于交付完成：Grok 会用 exit 0 + stopReason=cancelled 表示
+    // 权限/用户中断。零文本也不是可交付答复。两者都必须在写 completed/turn_completed 前分流。
+    const stopReason = response.stopReason ?? null;
+    const hasPartialOutput = Boolean(String(response.text ?? "").trim());
+    const unproductive = !hasPartialOutput
+      ? "EMPTY_OUTPUT"
+      : isAbnormalProviderTurnStop(stopReason) ? "ABNORMAL_STOP" : null;
+    let incompleteError = null;
     // Some CLIs cannot or do not honor AbortSignal. Response mutation is owner-gated;
     // all later bus/result projections use projectionChains, which cancel drains before
     // publishing the terminal cancellation state.
     await this.withLifecycleEffect(run, controller, async () => {
       run.sessions[agentId] = response.sessionId;
-      // run 级累计成本（烛致命9）：有回执的轮累加；无成本回执的 CLI（codex/grok/kimi）如实计不到——
-      // 累计闸只对已知成本硬止损，轮次闸（maxRounds/guardLimit）仍是全 agent 生效的第一道闸
-      if (Number.isFinite(response.costUsd)) run.costUsdTotal = (run.costUsdTotal || 0) + response.costUsd;
-      run.turns.push({
+      // 全会话成本只做审计；派发硬闸按当前 interaction 已知成本计算，避免聊天久了永久锁死。
+      // 无成本回执的 CLI（codex/grok/kimi）仍如实计不到，不能把这道闸宣称为普适保证。
+      if (Number.isFinite(response.costUsd)) {
+        run.costUsdTotal = (run.costUsdTotal || 0) + response.costUsd;
+        run.interactionCostUsd = (run.interactionCostUsd || 0) + response.costUsd;
+      }
+      const attemptRecord = (run.turnAttempts || []).find((item) => item.attemptId === attemptId) || null;
+      const turnRecord = {
         // id/createdAt/role 供前端重启后从 turns 恢复对话时稳定去重、真实时序排序、正确归属（避免倒置/全显 Agent）
         id: attemptId,
         round: run.round,
+        interactionId: attemptRecord?.interactionId || run.activeInteractionId,
+        interactionSeq: attemptRecord?.interactionSeq || run.activeInteractionSeq,
+        interactionStep: attemptRecord?.interactionStep || run.interactionStep,
         role: "assistant",
         agentId,
         createdAt: new Date().toISOString(),
@@ -2039,7 +2442,43 @@ export class Orchestrator {
         costUsd: response.costUsd ?? null,
         tokens: response.tokens ?? null, // 状态栏累计用量
         text: response.text,
-      });
+        stopReason,
+      };
+      if (unproductive) {
+        // partial text/usage 保留用于排查，但明确标成 incomplete；外层 social/pipeline/continue
+        // 收到错误后按 durable claim 所有权进入 recovery_required 或 failed，绝不再落 succeeded。
+        run.turns.push({ ...turnRecord, outcome: "incomplete" });
+        await this.checkpointTurn(run, agentId, attemptId, "failed", {
+          sessionId: response.sessionId,
+          protocol: response.protocol,
+          clientUserMessageId: (run.turnAttempts || []).find((item) => item.attemptId === attemptId)?.clientUserMessageId || null,
+        });
+        await this.emitEvent(run, "agent.turn_unproductive", {
+          round: run.round,
+          interactionId: turnRecord.interactionId,
+          interactionSeq: turnRecord.interactionSeq,
+          interactionStep: turnRecord.interactionStep,
+          maxStepsPerInteraction: this.maxStepsForInteraction(run),
+          agentId,
+          reason: unproductive,
+          stopReason,
+          hasPartialOutput,
+          tokens: response.tokens ?? null,
+        }, { runId: run.id, sessionId: response.sessionId, agentId });
+        const reason = stopReason ? `provider stopReason=${stopReason}` : "empty provider response";
+        incompleteError = Object.assign(
+          new Error(`provider turn did not produce a deliverable result (${reason}); partial output, if any, was retained for diagnosis`),
+          {
+            code: "PROVIDER_TURN_INCOMPLETE",
+            stopReason,
+            sessionId: response.sessionId,
+            partialOutput: hasPartialOutput,
+            interruptConfirmed: true,
+          },
+        );
+        return;
+      }
+      run.turns.push({ ...turnRecord, outcome: "completed" });
       await this.checkpointTurn(run, agentId, attemptId, "completed", {
         sessionId: response.sessionId,
         protocol: response.protocol,
@@ -2048,6 +2487,10 @@ export class Orchestrator {
       this.assertLifecycleOwner(run, controller);
       await this.emitEvent(run, "agent.turn_completed", {
         round: run.round,
+        interactionId: turnRecord.interactionId,
+        interactionSeq: turnRecord.interactionSeq,
+        interactionStep: turnRecord.interactionStep,
+        maxStepsPerInteraction: this.maxStepsForInteraction(run),
         agentId,
         protocol: response.protocol,
         permissionMode: effectivePermissionMode,
@@ -2057,13 +2500,44 @@ export class Orchestrator {
         tokens: response.tokens ?? null,
       }, { runId: run.id, sessionId: response.sessionId, agentId });
     });
+    if (incompleteError) throw incompleteError;
     return response.text;
   }
 
-  /** run 级已知成本止损：只覆盖会回传 costUsd 的 adapter，不冒充所有 provider 的货币硬顶。 */
+  /**
+   * 续轮（轮间插话 / 直发续聊）的写权限预检。
+   *
+   * 建 run 时批过的授权在同一 run 的后续轮里继续有效——否则 LO 说「继续执行」时执行所有者
+   * 只拿到 plan，只能反复回「请确认是否要我立即执行」，指令与权限两端一起锁死（LO 2026-08-14
+   * 报障：run d63b839d 第 1 轮 workspace-write，之后 4 轮全 plan，审批/租约/工作树全部就绪
+   * 却没有任何一条续轮路径去申请）。
+   *
+   * 这里只做**预检**：真正的把关仍在 turn() 内部（审批有效性 / 租约 / worktree 校验 /
+   * adapter per-turn cwd fail-closed），本方法不绕过、不放宽任何一道闸。授权链缺失时返回
+   * allow:false + reason，调用方降级为只读并明确播报——续聊里「这一轮只能读」是可继续的
+   * 状态，直接抛 POLICY_VIOLATION 会把整轮打死，比只读更糟。
+   *
+   * reason=null 表示本来就该只读（非执行所有者 / 非 build 档位），不是降级，无需播报。
+   */
+  continuationWriteGrant(run, agentId) {
+    if (run.permissionMode !== "build" || agentId !== executionOwnerIdOf(run)) {
+      return { allow: false, reason: null };
+    }
+    if (!this.buildApprovalIsValid(run)) return { allow: false, reason: "BUILD_APPROVAL_INVALID" };
+    if (!this.activeCapabilityLease(run)) return { allow: false, reason: "CAPABILITY_LEASE_INACTIVE" };
+    return { allow: true, reason: null };
+  }
+
+  /** 写权限降级必须看得见：静默降级 = LO 以为在写盘、其实只读（安全底座禁 silent fallback）。 */
+  async emitWriteDegraded(run, agentId, reason) {
+    if (!reason) return;
+    await this.emitEvent(run, "run.write_degraded", { agentId, reason }, { runId: run.id, agentId });
+  }
+
+  /** 当前交互已知成本止损：只覆盖会回传 costUsd 的 adapter，不冒充所有 provider 的货币硬顶。 */
   budgetExhausted(run) {
-    const cap = (Number(run.maxBudgetUsdPerTurn) || 0) * (Number(run.maxRounds) || 0);
-    return cap > 0 && Number(run.costUsdTotal || 0) >= cap;
+    const cap = (Number(run.maxBudgetUsdPerTurn) || 0) * this.maxStepsForInteraction(run);
+    return cap > 0 && Number(run.interactionCostUsd || 0) >= cap;
   }
 
   async ensureStablePendingAsk(run, { messages = null, persist = true } = {}) {
@@ -2122,16 +2596,6 @@ export class Orchestrator {
     for (const ask of asks) {
       const answer = messages.find((message) => answerOwnsAsk(run, message, ask));
       if (answer) answersByAsk.set(ask.id, answer);
-    }
-
-    run.askCounts ||= {};
-    const durableAskCounts = new Map();
-    for (const ask of asks) durableAskCounts.set(ask.from, (durableAskCounts.get(ask.from) || 0) + 1);
-    for (const [agentId, count] of durableAskCounts) {
-      if ((run.askCounts[agentId] || 0) < count) {
-        run.askCounts[agentId] = count;
-        changed = true;
-      }
     }
 
     const consumedRouteIds = new Set((run.turnAttempts || [])
@@ -2263,8 +2727,16 @@ export class Orchestrator {
       const teamContext = run.teamBrief ? `${run.teamBrief}\n\n` : "";
       // 轮间插话：每个 turn 边界尝试注入最早一条排队追问（turn 原子性不变——只在边界接管，不打断子进程）
       const turn = async (...args) => {
+        const topologyInteraction = this.currentInteraction(run);
         const text = await this.turn(run, ...args);
-        await this.injectNextSteer(run);
+        if ((run.pendingSteer || []).length || run.activeSteer) {
+          await this.injectNextSteer(run);
+          // 插话处理完后恢复旧拓扑的独立步骤/成本/附件账；下一阶段不能继承插话图片。
+          await this.withRunTransition(run.id, async () => {
+            this.activateInteraction(run, topologyInteraction, { adoptDurableWork: false });
+            await this.save(run);
+          });
+        }
         return text;
       };
       const coordinatorOwnsBuild = run.permissionMode === "build" && specialistId === coordinatorId;
@@ -2275,13 +2747,13 @@ export class Orchestrator {
           : `${teamContext}你是 514cc 团队主脑与总协调者。本轮是规划阶段（plan 权限模式，只读不落盘）；禁止声称已写入、已部署或未验证的完成。请输出可公开审计的计划、派工理由、验收标准和给执行者的任务包，不输出隐藏思维链。\n\n用户目标：\n${run.prompt}\n\n执行所有者：${specialistId}\n路由器建议：${run.route.selected.id}\n路由理由：${run.route.reason}`,
         { allowWorkspaceWrite: coordinatorOwnsBuild },
       );
-      if (specialistId === coordinatorId || run.round >= run.maxRounds) {
-        if (independentId && run.round < run.maxRounds) {
+      if (specialistId === coordinatorId || this.interactionLimitReached(run)) {
+        if (independentId && !this.interactionLimitReached(run)) {
           const independent = await turn(
             independentId,
             `你是独立验证者，不受主脑结论约束。请核查以下计划的正确性、遗漏、风险和可执行性，给出证据化 verdict。不要输出隐藏思维链。\n\n原始目标：\n${run.prompt}\n\n主脑计划：\n${plan}`,
           );
-          const final = run.round < run.maxRounds
+          const final = !this.interactionLimitReached(run)
             ? await turn(
                 coordinatorId,
                 `独立验证者 ${independentId} 已审查你的计划。请吸收有效纠偏并给出最终可执行结论、验收证据和剩余风险。\n\n原始计划：\n${plan}\n\n独立审查：\n${independent}`,
@@ -2297,8 +2769,8 @@ export class Orchestrator {
           `主脑（${coordinatorId}）派发以下任务。请作为独立技术/研究执行者完成，保留证据、指出阻塞并提出明确反问。\n\n原始目标：\n${run.prompt}\n\n主脑计划：\n${plan}`,
           { allowWorkspaceWrite: true },
         );
-        if (run.round >= run.maxRounds) {
-          // 自动恢复也消耗真实 round。预算已尽时保留已完成执行结果并明确标记未复核，
+        if (this.interactionLimitReached(run)) {
+          // 自动恢复也消耗当前交互的真实 step。预算已尽时保留已完成执行结果并明确标记未复核，
           // 不能再调用 provider，也不能伪造 independent critique。
           run.result = { plan, specialist, critique: null, verified: specialist, final: specialist, truncated: true };
         } else {
@@ -2308,14 +2780,14 @@ export class Orchestrator {
             `你是本轮独立验证者。执行者 ${specialistId} 已返回结果。请检查它是否满足原目标，指出缺口、核验证据，并输出可直接作为最终审计结论使用的 verdict；如仍有轮次，再附给执行者的补强指令。\n\n原始目标：\n${run.prompt}\n\n执行结果：\n${specialist}`,
           );
           let verified = specialist;
-          if (run.collaborationMode === "deep" && run.round < run.maxRounds - 1) {
+          if (run.collaborationMode === "deep" && !this.interactionLimitReached(run, 1)) {
             verified = await turn(
               specialistId,
               `独立验证者（${verifierId}）对上一轮结果的复核如下。请在同一个原生会话中完成补强并给出最终证据。\n\n${critique}`,
               { allowWorkspaceWrite: true },
             );
           }
-          const final = run.round < run.maxRounds
+          const final = !this.interactionLimitReached(run)
             ? await turn(
                 coordinatorId,
                 `作为主脑，请综合原始目标、执行结果和复核结果，输出最终结论、已验证证据、未完成风险与下一步。不要隐藏工具失败。\n\n原始目标：${run.prompt}\n\n初次执行：${specialist}\n\n复核/补强：${verified}`,
@@ -2345,7 +2817,8 @@ export class Orchestrator {
           });
         }
       } else if (ownsLifecycle) {
-      // 轮间插话收尾：拓扑走完后仍排队的追问按 FIFO 逐轮续跑，直到清空/封顶/取消（不打断子进程）
+      // 轮间插话收尾：拓扑走完后仍排队的追问按 FIFO 逐条续跑；每条追问开启独立 interaction，
+      // 因此只受自己的自主步骤上限约束，不消耗整场会话额度。
       while ((run.pendingSteer || []).length || run.activeSteer) {
         if (!(await this.injectNextSteer(run))) break;
         run.result = { ...(run.result || {}), continued: run.turns.at(-1)?.text ?? null };
@@ -2464,6 +2937,9 @@ export class Orchestrator {
         itemId: item.itemId,
         busMessageId: item.busMessageId || null,
         to: item.to,
+        interactionId: item.interactionId || run.activeInteractionId,
+        interactionSeq: item.interactionSeq || run.activeInteractionSeq,
+        sources: normalizeRunSources(item.sources || run.activeInteractionSources || []),
         claimedAt: new Date().toISOString(),
       };
       try {
@@ -2488,7 +2964,11 @@ export class Orchestrator {
       if (remaining.length === previousQueue.length) {
         throw Object.assign(new Error("resume item is missing from the durable queue"), { code: "RESUME_OWNERSHIP_LOST" });
       }
-      run.resumeQueue = mergeResumeQueues(remaining, generatedQueue);
+      const currentInteraction = this.currentInteraction(run);
+      const boundGeneratedQueue = generatedQueue.map((candidate) => candidate?.interactionId
+        ? candidate
+        : { ...candidate, ...currentInteraction });
+      run.resumeQueue = mergeResumeQueues(remaining, boundGeneratedQueue);
       run.resumeClaim = null;
       try {
         await this.save(run);
@@ -2499,6 +2979,19 @@ export class Orchestrator {
       }
       return true;
     });
+  }
+
+  /**
+   * finalize（leader 收敛轮）只在真有多方产出需要综合时才值得烧一轮。
+   *
+   * 单成员会话里它是纯冗余：同一个 agent 被要求「综合」自己刚说完的那句话，产出一段
+     * 「线程已收敛，无后续输入 / 已验证证据：仅初始问候记录」的官腔，还吃掉当前 interaction 的 1 个 step
+   * 预算（LO 2026-08-14 报障：只说了「你好」，系统自己派了第 2 轮）。判据用发言者数量——
+   * 有第二个 agent 发过言，才存在「需要 leader 综合」的对象。
+   */
+  socialFinalizationWorthwhile(run) {
+    const speakers = new Set((run.turns || []).map((turn) => turn?.agentId).filter(Boolean));
+    return speakers.size >= 2;
   }
 
   async enqueueSocialFinalization(run, coordinatorId) {
@@ -2512,6 +3005,7 @@ export class Orchestrator {
         itemId: operationMessageId("work", JSON.stringify({ runId: run.id, kind: "finalize", priorAttemptId })),
         to: coordinatorId,
         kind: "finalize",
+        ...this.currentInteraction(run),
       };
       const previousQueue = run.resumeQueue;
       run.resumeQueue = mergeResumeQueues(run.resumeQueue, [item]);
@@ -2574,6 +3068,7 @@ export class Orchestrator {
           to: startAgentId,
           busMessageId: operationMessageId("task", run.id),
           kind: "task",
+          ...this.currentInteraction(run),
         }]);
         await this.save(run);
       });
@@ -2582,36 +3077,30 @@ export class Orchestrator {
     let guard = 0;
     let finalizationCompleted = false;
     let budgetStopped = false;
-    const guardLimit = Math.max(4, run.maxRounds * 2); // turn() 的 ROUND_LIMIT 之外的第二道闸
+    const guardLimit = Math.max(4, this.maxStepsForInteraction(run) * 2); // turn() step 闸之外的循环保险
     const hasWork = () => Boolean(run.resumeClaim || (run.resumeQueue || []).length);
     while (hasWork() && !controller.signal.aborted) {
+      const ownedWork = run.resumeClaim?.itemId
+        ? (run.resumeQueue || []).find((item) => item?.itemId === run.resumeClaim.itemId)
+        : (run.resumeQueue || [])[0];
+      if (ownedWork?.interactionId) {
+        this.activateInteraction(run, ownedWork, { adoptDurableWork: false });
+      }
       const preparedClaim = run.resumeClaim?.itemId
         ? (run.turnAttempts || []).some((attempt) =>
             attempt.sourceWorkItemId === run.resumeClaim.itemId && attempt.phase === "prepared")
         : false;
-      if (guard++ >= guardLimit || (run.round >= run.maxRounds && !preparedClaim)) break;
+      if (guard++ >= guardLimit || (this.interactionLimitReached(run) && !preparedClaim)) break;
       if (this.budgetExhausted(run)) {
-        // run 级累计成本闸（烛致命9）：已知成本回执超硬顶即停派——落 system 证据，不静默烧穿
+        // 当前交互的已知成本回执超硬顶即停派。队列保留，下一条用户消息会开启新交互预算。
         await this.withProjectionEffect(run, controller, async () => {
-          await this.appendBus(run, { from: "system", to: coordinatorId, kind: "system", text: `run 累计成本 ${run.costUsdTotal.toFixed(4)} USD 已达硬顶，停止派发新轮` });
-          await this.withRunTransition(run.id, async () => {
-            if (run.resumeClaim) {
-              throw Object.assign(new Error("budget stop encountered a claimed durable work item"), { code: "RECOVERY_REQUIRED" });
-            }
-            const previousQueue = run.resumeQueue;
-            const dropped = (run.resumeQueue || []).length;
-            run.resumeQueue = [];
-            try {
-              await this.save(run);
-            } catch (error) {
-              run.resumeQueue = previousQueue;
-              throw error;
-            }
-            if (dropped) {
-              await this.emitEvent(run, "run.resume_dropped", { reason: "BUDGET_EXHAUSTED", count: dropped }, { runId: run.id });
-            }
-          });
-          await this.emitEvent(run, "run.budget_exhausted", { costUsdTotal: run.costUsdTotal }, { runId: run.id });
+          await this.appendBus(run, { from: "system", to: coordinatorId, kind: "system", text: `本次交互已知成本 ${Number(run.interactionCostUsd || 0).toFixed(4)} USD 已达硬顶，暂停自主派发；下一条用户消息可继续` });
+          await this.save(run);
+          await this.emitEvent(run, "run.budget_exhausted", {
+            interactionId: run.activeInteractionId,
+            interactionSeq: run.activeInteractionSeq,
+            interactionCostUsd: run.interactionCostUsd || 0,
+          }, { runId: run.id });
         });
         budgetStopped = true;
         break;
@@ -2697,18 +3186,6 @@ ${rosterLine}
             continue;
           }
           loDirectiveSeen = true;
-          // ask 频次熔断（2026-07-20 LO 报障：grok 每轮拿结论当提问，ask→answer→resume 无限
-          // 打转）：计数持久化在 run 上（pingPong 表是本函数局部量，resume 即归零管不住跨恢复
-          // 循环）——同 agent 每 run 至多挂起 2 次，超限降级为普通发言并落 system 证据，循环
-          // 走向自然收敛而不是第 N 次伸手要回答
-          run.askCounts ||= {};
-          const asks = run.askCounts[next.to] ?? 0;
-          if (asks >= 2) {
-            await this.appendBus(run, { from: next.to, to: "team", kind: "say", text: directive.text });
-            await this.appendBus(run, { from: "system", to: coordinatorId, kind: "system", text: `${next.to} 对 LO 的提问已达单 run 上限（2 次），本条按结论处理不再挂起等待` });
-            await this.emitEvent(run, "run.ask_throttled", { from: next.to, asks }, { runId: run.id, agentId: next.to });
-            continue;
-          }
           const askMessage = await this.appendBus(run, {
             from: next.to,
             to: "lo",
@@ -2716,9 +3193,8 @@ ${rosterLine}
             text: directive.text,
             refs: sourceAttemptId ? { sourceAttemptId } : null,
           });
-          run.askCounts[next.to] = asks + 1;
-          // ask/answer 挂起语义（烛致命5：ask 后继续消费队列会烧到轮顶，把 run 锁死在
-          // 不可恢复的 waiting_agent）——ask 是硬状态转换，本轮 directive 处理完立即停止派发
+          // ask/answer 挂起语义：ask 是硬状态转换，本次 interaction 停止自主派发；LO 的回答
+          // 会开启新 interaction，因此回答次数不受整场会话累计轮数限制。
           run.pendingAsk = { id: askMessage.id, from: next.to, text: directive.text, at: askMessage.ts };
           askRaised = true;
           await this.emitEvent(run, "bus.routed", { from: next.to, to: "lo", text: directive.text.slice(0, 140) }, { runId: run.id, agentId: next.to });
@@ -2800,6 +3276,7 @@ ${rosterLine}
           busMessageId: routedMessage.id,
           sourceAttemptId,
           kind: "route",
+          ...this.currentInteraction(run),
         });
         }
         await this.ackResumeItem(run, next, generatedQueue);
@@ -2826,13 +3303,7 @@ ${rosterLine}
       return;
     }
     // 挂起优先于收敛：有未回答的 [[msg:lo]] → 等 LO 回答（execute 收尾转 waiting_agent，continue 恢复）。
-    // 策略硬顶下连回答轮都腾不出时不挂起（挂了永远无法恢复，烛致命5）——如实按截断收敛
-    if (run.pendingAsk && !controller.signal.aborted && run.round >= this.policy.limits.maxRounds) {
-      await this.withProjectionEffect(run, controller, async () => {
-        await this.appendBus(run, { from: "system", to: "team", kind: "system", text: `${run.pendingAsk.from} 的提问已到策略轮次硬顶，无轮次可回答，按截断收敛` });
-        run.pendingAsk = null;
-      });
-    }
+    // ask 等待的是下一条用户交互；当前 step 用尽不能清掉它，否则用户永远失去回答入口。
     if (run.pendingAsk && !controller.signal.aborted) {
       await this.withProjectionEffect(run, controller, async () => {
         run.pausedForInput = true;
@@ -2843,13 +3314,21 @@ ${rosterLine}
     run.pausedForInput = false;
     // 自然收敛后将 leader 最终答复先登记为 durable work；prepared checkpoint 可安全复跑，
     // submitted/ambiguous/completed-but-unacked 则由重启门 fail closed，避免无 owner 永久停车。
-    if (!controller.signal.aborted && run.round < run.maxRounds) {
+    if (!controller.signal.aborted && !this.interactionLimitReached(run) && this.socialFinalizationWorthwhile(run)) {
       await this.enqueueSocialFinalization(run, coordinatorId);
       const finalization = await this.claimResumeItem(run);
       await this.processSocialFinalization(run, controller, finalization, { coordinatorId, teamContext });
       await this.injectNextSteer(run);
     } else {
-      run.result = { mode: "social", final: run.turns.at(-1)?.text ?? null, bus: this.bus.file(run.id), worktree: run.worktreePath ?? null, truncated: true };
+      // truncated 只在真被本次交互的自主步骤上限截断时标记：跳过冗余 finalize 是正常收敛，谎报截断
+      // 会让 UI 显示「结果不完整」并诱导 LO 白续一轮
+      run.result = {
+        mode: "social",
+        final: run.turns.at(-1)?.text ?? null,
+        bus: this.bus.file(run.id),
+        worktree: run.worktreePath ?? null,
+        ...(this.interactionLimitReached(run) ? { truncated: true, reason: "interaction_step_limit" } : {}),
+      };
     }
   }
 
@@ -2910,15 +3389,13 @@ ${rosterLine}
   // 收尾窗口兜底：terminal 置位与 controller/executions 释放之间排入的插话没有活跃消费者，
   // 协程链彻底结束后补启后台 drain——排队项最多滞留一瞬，绝不静默丢失。队列空/run 已清除时 no-op。
   ensureSteerDrained(id) {
-    if (this.closing) return; // 关闭中不重启任何排干（烛 R6）
+    if (this.closing || this.interruptingRuns.has(id)) return; // 关闭/显式中断中不重启任何排干
     const run = this.runs.get(id);
     if (!run || this.clearedRuns.has(id)) return;
     if (this.executions.has(id)) return; // 已有 execute/drain 在消费——再建 controller 只会覆盖占位（烛 R6）
     if (!(run.pendingSteer || []).length && !run.activeSteer) return;
     // 仅 succeeded 补收：cancelled/failed 的留队是取消/失败语义的如实呈现，重启消费违背用户意图（烛 R6）
     if (run.status !== "succeeded") return;
-    // 封顶主动留队（丢弃即停排、剩余如实可见）不是滞留——补启只会把留队项逐条丢光，违背审计语义
-    if (run.round >= this.policy.limits.maxRounds) return;
     const controller = new AbortController();
     this.controllers.set(id, controller); // cancel(id) 仍可中止补启的排干
     this.startSteerDrain(id, controller);
@@ -2949,17 +3426,21 @@ ${rosterLine}
   /**
    * 只有机械证明未被 provider 接受的轮次才可退：prepared/session_ready 尚未提交 prompt，
    * rejected 是 turn/start 的窄白名单准入拒绝。submitting/submitted/ambiguous 都可能已经
-   * 到达 provider，退还会允许超过 maxRounds 次真实派发。
+   * 到达 provider，退还会允许超过当前 interaction 的自主步骤上限。
    */
   refundableAbandonedAttempt(run) {
-    const refunded = Math.max(0, Math.trunc(Number(run.roundsRefunded) || 0));
-    const cap = Math.max(0, Math.trunc(Number(run.maxRounds) || 0));
+    this.ensureInteractionState(run);
+    const refunded = Math.max(0, Math.trunc(Number(run.interactionStepsRefunded) || 0));
+    const cap = this.maxStepsForInteraction(run);
     const round = Math.max(0, Math.trunc(Number(run.round) || 0));
-    if (refunded >= cap || round === 0) return null;
+    const interactionStep = Math.max(0, Math.trunc(Number(run.interactionStep) || 0));
+    if (refunded >= cap || round === 0 || interactionStep === 0) return null;
     const attempt = (run.turnAttempts || []).at(-1);
     if (!attempt || Number(attempt.round) !== round) return null;
+    if (attempt.interactionId && attempt.interactionId !== run.activeInteractionId) return null;
+    if ((run.refundedAttemptIds || []).includes(attempt.attemptId)) return null;
     if (!["prepared", "session_ready", "rejected"].includes(attempt.phase)) return null;
-    return { attempt, refunded, round };
+    return { attempt, refunded, round, interactionStep };
   }
 
   canRefundAbandonedRound(run) {
@@ -2969,10 +3450,21 @@ ${rosterLine}
   refundAbandonedRound(run) {
     const candidate = this.refundableAbandonedAttempt(run);
     if (!candidate) return null;
-    const { attempt, refunded, round } = candidate;
-    run.round = round - 1;
-    run.roundsRefunded = refunded + 1;
-    return { round: run.round, roundsRefunded: run.roundsRefunded, attemptId: attempt.attemptId, phase: attempt.phase };
+    const { attempt, refunded, round, interactionStep } = candidate;
+    run.interactionStep = interactionStep - 1;
+    run.interactionStepsRefunded = refunded + 1;
+    run.roundsRefunded = Math.max(0, Math.trunc(Number(run.roundsRefunded) || 0)) + 1;
+    run.refundedAttemptIds = [...new Set([...(run.refundedAttemptIds || []), attempt.attemptId])].slice(-200);
+    return {
+      round,
+      interactionId: run.activeInteractionId,
+      interactionSeq: run.activeInteractionSeq,
+      interactionStep: run.interactionStep,
+      interactionStepsRefunded: run.interactionStepsRefunded,
+      roundsRefunded: run.roundsRefunded,
+      attemptId: attempt.attemptId,
+      phase: attempt.phase,
+    };
   }
 
   /** 恢复确认涉及的全部字段快照——save 失败必须整体回滚，不能留半套状态。 */
@@ -2985,6 +3477,9 @@ ${rosterLine}
       inflightTurns: { ...(run.inflightTurns || {}) },
       round: run.round,
       roundsRefunded: run.roundsRefunded,
+      interactionStep: run.interactionStep,
+      interactionStepsRefunded: run.interactionStepsRefunded,
+      refundedAttemptIds: [...(run.refundedAttemptIds || [])],
       recoveryAcknowledgedAt: run.recoveryAcknowledgedAt,
       recoveryNote: run.recoveryNote,
     };
@@ -2998,6 +3493,7 @@ ${rosterLine}
   async queueSteer(run, {
     prompt,
     agentId,
+    sources = [],
     answerCandidate = false,
     admissionEpoch = null,
     acknowledgeRecovery = false,
@@ -3010,28 +3506,39 @@ ${rosterLine}
       ...(answerCandidate ? { answerCandidate: true } : {}),
     };
     let refund = null;
-    await this.withRunTransition(run.id, async () => {
-      if (admissionEpoch != null) this.assertContinuationAdmission(run.id, admissionEpoch);
-      const previousRecovery = acknowledgeRecovery ? this.abandonmentSnapshot(run) : null;
-      if (run.status === "recovery_required" && acknowledgeRecovery) {
-        refund = this.acknowledgeAbandonedWork(run);
-      }
-      run.pendingSteer ||= [];
-      run.pendingSteer.push(queued);
-      try {
-        await this.save(run);
-        await this.emitEvent(run, "run.steer_queued", {
-          text: prompt,
-          agentId,
-          depth: run.pendingSteer.length,
-        }, { runId: run.id, agentId: "LO" });
-      } catch (error) {
-        const ownedIndex = run.pendingSteer.findIndex((item) => item?.id === queued.id);
-        if (ownedIndex >= 0) run.pendingSteer.splice(ownedIndex, 1);
-        this.restoreAbandonment(run, previousRecovery);
-        refund = null;
-        throw error;
-      }
+    await withManagedClipboardSourceRegistration({
+      dataRoot: this.dataRoot,
+      sources,
+      operation: () => this.withRunTransition(run.id, async () => {
+        if (admissionEpoch != null) this.assertContinuationAdmission(run.id, admissionEpoch);
+        const previousInteraction = this.interactionSnapshot(run);
+        const preparedSources = this.prepareInteractionSources(run, sources);
+        Object.assign(queued, this.allocateInteraction(run), { sources: preparedSources.sources });
+        const previousRecovery = acknowledgeRecovery ? this.abandonmentSnapshot(run) : null;
+        if (run.status === "recovery_required" && acknowledgeRecovery) {
+          refund = this.acknowledgeAbandonedWork(run);
+        }
+        run.pendingSteer ||= [];
+        run.pendingSteer.push(queued);
+        try {
+          await this.save(run);
+          await this.emitEvent(run, "run.steer_queued", {
+            text: prompt,
+            agentId,
+            depth: run.pendingSteer.length,
+            interactionId: queued.interactionId,
+            interactionSeq: queued.interactionSeq,
+          }, { runId: run.id, agentId: "LO" });
+        } catch (error) {
+          const ownedIndex = run.pendingSteer.findIndex((item) => item?.id === queued.id);
+          if (ownedIndex >= 0) run.pendingSteer.splice(ownedIndex, 1);
+          this.restoreAbandonment(run, previousRecovery);
+          this.restoreInteraction(run, previousInteraction);
+          this.restorePreparedInteractionSources(run, preparedSources.previous);
+          refund = null;
+          throw error;
+        }
+      }),
     });
     // 退还只在落盘成功后才播报，避免回滚过的账目出现在会话流里
     if (refund) await this.emitRoundRefund(run, refund);
@@ -3042,7 +3549,11 @@ ${rosterLine}
   async emitRoundRefund(run, refund) {
     await this.emitEvent(run, "run.round_refunded", {
       round: refund.round,
-      maxRounds: run.maxRounds,
+      interactionId: refund.interactionId,
+      interactionSeq: refund.interactionSeq,
+      interactionStep: refund.interactionStep,
+      maxStepsPerInteraction: this.maxStepsForInteraction(run),
+      interactionStepsRefunded: refund.interactionStepsRefunded,
       roundsRefunded: refund.roundsRefunded,
       attemptId: refund.attemptId,
       phase: refund.phase,
@@ -3082,16 +3593,23 @@ ${rosterLine}
           pendingAsk: run.pendingAsk,
           pausedForInput: run.pausedForInput,
           resumeQueue: [...(run.resumeQueue || [])],
-          maxRounds: run.maxRounds,
+          interaction: this.interactionSnapshot(run),
         };
         run.pendingSteer.splice(liveIndex, 1);
         run.pendingAsk = null;
         run.pausedForInput = false;
         run.resumeQueue = mergeResumeQueues(
-          [{ to: ask.from, busMessageId: answerMessage.id, kind: "answer" }],
+          [{
+            to: ask.from,
+            busMessageId: answerMessage.id,
+            kind: "answer",
+            interactionId: candidate.interactionId,
+            interactionSeq: candidate.interactionSeq,
+            sources: candidate.sources,
+          }],
           run.resumeQueue,
         );
-        run.maxRounds = Math.min(this.policy.limits.maxRounds, Math.max(run.maxRounds, run.round + 2));
+        this.activateInteraction(run, candidate);
         try {
           await this.save(run);
         } catch (error) {
@@ -3101,7 +3619,7 @@ ${rosterLine}
           run.pendingAsk = previous.pendingAsk;
           run.pausedForInput = previous.pausedForInput;
           run.resumeQueue = previous.resumeQueue;
-          run.maxRounds = previous.maxRounds;
+          this.restoreInteraction(run, previous.interaction);
           throw error;
         }
       });
@@ -3129,10 +3647,9 @@ ${rosterLine}
     }
   }
 
-  // 取最早一条排队追问注入为下一轮：先发 user.message（前端实时可见），再走既有 turn 路径。
+  // 取最早一条排队追问注入为下一次用户交互：先发 user.message，再走既有 turn 路径。
   // 只在 turn 边界被调用（execute 轮间 / 排干 driver），绝不打断进行中的子进程。
-  // 轮预算尽量自带（maxRounds+1、封顶策略上限，不吃拓扑既有轮次）；腾挪不出一轮时如实丢弃留痕，不把 run 打 failed。
-  // 返回 false = 轮次封顶已丢弃，调用方应停止排干（剩余追问留在队列里如实可见）。
+  // 每条排队消息在入队时已分配 interactionId，激活时获得独立 step/cost/ask 预算。
   async injectNextSteer(run) {
     const controller = this.controllers.get(run.id);
     if (controller) this.assertLifecycleOwner(run, controller);
@@ -3149,28 +3666,6 @@ ${rosterLine}
         throw Object.assign(new Error("active steer claim is orphaned"), { code: "RECOVERY_REQUIRED" });
       }
       return true;
-    }
-    const priorMaxRounds = run.activeSteer?.priorMaxRounds ?? run.maxRounds;
-    const nextMaxRounds = run.activeSteer?.maxRounds
-      ?? Math.min(this.policy.limits.maxRounds, run.maxRounds + 1);
-    if (!run.activeSteer && run.round >= nextMaxRounds) {
-      await project(async () => {
-        await this.withRunTransition(run.id, async () => {
-          const liveIndex = (run.pendingSteer || []).findIndex((item) => item?.id === steer.id);
-          if (liveIndex < 0) return;
-          run.pendingSteer.splice(liveIndex, 1);
-          run.maxRounds = nextMaxRounds;
-          try {
-            await this.save(run);
-          } catch (error) {
-            run.pendingSteer.splice(Math.min(liveIndex, run.pendingSteer.length), 0, steer);
-            run.maxRounds = priorMaxRounds;
-            throw error;
-          }
-        });
-        await this.emitEvent(run, "run.steer_dropped", { text: steer.prompt, agentId: steer.agentId, reason: "ROUND_LIMIT" }, { runId: run.id, agentId: "LO" });
-      });
-      return false;
     }
     const targetAgentId = steer.agentId || run.coordinatorId || "claude-fable";
     let steerMessage = null;
@@ -3194,32 +3689,45 @@ ${rosterLine}
           throw Object.assign(new Error("another queued steer already owns the active claim"), { code: "STEER_OWNERSHIP_LOST" });
         }
         const previousActive = run.activeSteer || null;
-        const previousMaxRounds = run.maxRounds;
+        const previousInteraction = this.interactionSnapshot(run);
+        if (!steer.interactionId) Object.assign(steer, this.allocateInteraction(run));
         run.activeSteer ||= {
           steerId: steer.id,
           busMessageId: steerMessage?.id || null,
           to: targetAgentId,
-          priorMaxRounds,
-          maxRounds: nextMaxRounds,
+          interactionId: steer.interactionId,
+          interactionSeq: steer.interactionSeq,
           claimedAt: new Date().toISOString(),
         };
-        run.maxRounds = nextMaxRounds;
+        // 插话只拥有自己的 turn；旧 pipeline/social durable work 保留原 interaction 与附件。
+        this.activateInteraction(run, steer, { adoptDurableWork: false });
         try {
           await this.save(run);
         } catch (error) {
           run.activeSteer = previousActive;
-          run.maxRounds = previousMaxRounds;
+          this.restoreInteraction(run, previousInteraction);
           throw error;
         }
       });
-      await this.emitEvent(run, "user.message", { text: steer.prompt }, { runId: run.id, agentId: "LO" });
+      await this.emitEvent(run, "user.message", {
+        text: steer.prompt,
+        interactionId: steer.interactionId,
+        interactionSeq: steer.interactionSeq,
+      }, { runId: run.id, agentId: "LO" });
     });
+    // 排队插话与 socialLoop 派轮同权：批过的授权在续轮继续有效，缺失则降级只读并播报
+    const writeGrant = this.continuationWriteGrant(run, targetAgentId);
+    await this.emitWriteDegraded(run, targetAgentId, writeGrant.reason);
     const response = await this.turn(run, targetAgentId, steer.prompt, {
+      allowWorkspaceWrite: writeGrant.allow,
+      cwd: writeGrant.allow && run.worktreePath ? run.worktreePath : null,
       sourceWorkItemId: steer.id,
       sourceBusMessageId: steerMessage?.id || run.activeSteer?.busMessageId || null,
     });
     await project(async () => {
-      if (run.orchestrationMode === "social") {
+      // 空回复不进 bus：空气泡既骗人（看着像回答了）又污染后续轮的对话快照。无产出本身
+      // 已由 turn() 的 agent.turn_unproductive 如实播报，这里只是不再伪造一条“发言”。
+      if (run.orchestrationMode === "social" && String(response ?? "").trim()) {
         await this.appendBus(run, {
           id: operationMessageId("steer-reply", steer.id),
           from: targetAgentId,
@@ -3285,7 +3793,7 @@ ${rosterLine}
     }
   }
 
-  // 轮间插话排干：接管续聊的 controller，按 FIFO 把排队追问逐轮注入直到清空/封顶/取消。
+  // 轮间插话排干：接管续聊的 controller，按 FIFO 把排队追问逐条注入直到清空或取消。
   // 与 startExecution 同构的后台执行：进 executions（close() 会等待、isBusy() 计入），不进 HTTP 等待路径。
   startSteerDrain(id, controller) {
     if (this.executions.has(id)) return this.executions.get(id);
@@ -3298,10 +3806,21 @@ ${rosterLine}
 
   async continue(id, request = {}) {
     const run = this.get(id);
+    if (run.status === "cancelled") {
+      throw Object.assign(new Error("cancelled runs cannot be continued"), { code: "RUN_TERMINAL" });
+    }
     const admissionEpoch = this.cancelEpoch(id);
     this.assertContinuationAdmission(id, admissionEpoch);
     const explicitAgentTarget = typeof request.agentId === "string" && request.agentId.trim().length > 0;
-    let { prompt, agentId = null, answerToAskId = null, messageIntent = null, acknowledgeRecovery = false } = request;
+    let {
+      prompt,
+      agentId = null,
+      answerToAskId = null,
+      messageIntent = null,
+      acknowledgeRecovery = false,
+      sources = [],
+    } = request;
+    sources = normalizeRunSources(sources);
     answerToAskId = answerToAskId == null ? null : String(answerToAskId).trim();
     messageIntent = messageIntent == null ? null : String(messageIntent).trim().toLowerCase();
     if (messageIntent && !["answer", "steer"].includes(messageIntent)) {
@@ -3329,6 +3848,17 @@ ${rosterLine}
     if (!nextPrompt) throw Object.assign(new Error("prompt is required"), { code: "INVALID_PROMPT" });
     if (Buffer.byteLength(nextPrompt, "utf8") > 256 * 1024) throw Object.assign(new Error("prompt exceeds 256 KiB"), { code: "INVALID_PROMPT" });
     if (findSecretCandidates(nextPrompt).length) throw Object.assign(new Error("prompt contains secret-like material"), { code: "SENSITIVE_PROMPT" });
+    // 重复提交幂等门：同一 run、同一收件人、同一段文本，在它还没被处理时再次提交没有语义——
+    // 客户端在途锁被 UI 同步冲掉时会把同一句话派成两轮（LO 2026-08-14 报障：同一条 19 字消息
+    // 占掉第 3、4 两轮，同一个问题被回答两遍还给出互相矛盾的结论，各烧一轮预算）。
+    // 只拦「尚未被消费」的重复：已经回答过的同一句话是 LO 有意重发，照常放行。
+    const continuationKey = `${id}::${agentId}`;
+    if (this.inflightContinuations.get(continuationKey) === nextPrompt
+      || (run.pendingSteer || []).some((item) => item?.prompt === nextPrompt && (item.agentId || null) === agentId)) {
+      throw Object.assign(new Error("the same message is already queued or in flight for this recipient"), {
+        code: "DUPLICATE_MESSAGE",
+      });
+    }
     if (run.status === "waiting_approval" || run.buildApproval?.status === "pending") {
       throw Object.assign(new Error("run is waiting for its action-bound build approval"), { code: "APPROVAL_REQUIRED" });
     }
@@ -3362,19 +3892,16 @@ ${rosterLine}
         });
       }
       if (wantsAnswer && !this.askClaims.has(id)) {
-        await this.resumePendingAsk(id, nextPrompt, { answerToAskId, admissionEpoch });
+        await this.resumePendingAsk(id, nextPrompt, { answerToAskId, admissionEpoch, sources });
         return this.get(id);
       }
       if (wantsAnswer) {
         throw Object.assign(new Error("an answer for this ask is already being persisted"), { code: "ANSWER_IN_PROGRESS" });
       }
       if (messageIntent === "steer") {
-        await this.queueSteer(run, { prompt: nextPrompt, agentId, admissionEpoch, acknowledgeRecovery });
+        await this.queueSteer(run, { prompt: nextPrompt, agentId, sources, admissionEpoch, acknowledgeRecovery });
         return this.get(id);
       }
-    }
-    if (run.round >= this.policy.limits.maxRounds && !this.canRefundAbandonedRound(run)) {
-      throw Object.assign(new Error("maximum collaboration rounds reached"), { code: "ROUND_LIMIT" });
     }
     if (this.controllers.has(id)) {
       // 轮间插话：run 活跃时 continue 不再抛 RUN_ACTIVE——准入校验同上，排队持久化到 run.pendingSteer，
@@ -3382,6 +3909,7 @@ ${rosterLine}
       await this.queueSteer(run, {
         prompt: nextPrompt,
         agentId,
+        sources,
         answerCandidate: messageIntent == null && !answerToAskId && !run.pendingAsk && !explicitAgentTarget,
         admissionEpoch,
         acknowledgeRecovery,
@@ -3394,6 +3922,13 @@ ${rosterLine}
     // controller 建立、状态变更与 executions 注册同 tick 完成（首个 await 前）——close 的
     // active 快照不再有"已进入但未注册"的漏等窗口。
     const controller = new AbortController();
+    // 同步占住 run 级生命周期。第二个并发 continue 会进入 queueSteer，而不是在 transition
+    // 后半段争抢 controller、覆盖 continue:<id> execution owner 或把第一条运行写成 failed。
+    this.controllers.set(id, controller);
+    // 在途记账与 controller 同 tick 建立（首个 await 前）：晚一步就留出「同一句话第二次提交
+    // 已经过了幂等门」的窗口
+    this.inflightContinuations.set(continuationKey, nextPrompt);
+    const directInteractionId = randomUUID();
     const directPromptMessageId = run.orchestrationMode === "social"
       ? operationMessageId("steer", randomUUID())
       : null;
@@ -3403,31 +3938,42 @@ ${rosterLine}
       let promptProjected = false;
       let directRefund = null;
       try {
-        await this.withRunTransition(id, async () => {
-          this.assertContinuationAdmission(id, admissionEpoch);
-          if (this.controllers.has(id)) {
-            throw Object.assign(new Error("another continuation became active before admission committed"), { code: "RUN_ACTIVE" });
-          }
-          const previous = { status: run.status, maxRounds: run.maxRounds, ...this.abandonmentSnapshot(run) };
-          if (run.status === "recovery_required") {
-            directRefund = this.acknowledgeAbandonedWork(run);
-          } else if (this.canRefundAbandonedRound(run)) {
-            // A definitively rejected/pre-submit attempt needs no ambiguous-recovery acknowledgement.
-            // Refund at continuation admission, then persist it atomically with the new running state.
-            directRefund = this.refundAbandonedRound(run);
-          }
-          this.controllers.set(id, controller);
-          run.status = "running";
-          run.maxRounds = Math.min(this.policy.limits.maxRounds, Math.max(run.maxRounds, run.round + 1));
-          try {
-            await this.save(run);
-            admissionCommitted = true;
-          } catch (error) {
-            if (this.controllers.get(id) === controller) this.controllers.delete(id);
-            Object.assign(run, previous);
-            directRefund = null;
-            throw error;
-          }
+        await withManagedClipboardSourceRegistration({
+          dataRoot: this.dataRoot,
+          sources,
+          operation: () => this.withRunTransition(id, async () => {
+            this.assertContinuationAdmission(id, admissionEpoch);
+            if (this.controllers.get(id) !== controller) {
+              throw Object.assign(new Error("another continuation owns this run"), { code: "RUN_ACTIVE" });
+            }
+            const previous = { status: run.status, ...this.abandonmentSnapshot(run) };
+            const previousInteraction = this.interactionSnapshot(run);
+            const preparedSources = this.prepareInteractionSources(run, sources);
+            if (run.status === "recovery_required") {
+              directRefund = this.acknowledgeAbandonedWork(run);
+            } else if (this.canRefundAbandonedRound(run)) {
+              // A definitively rejected/pre-submit attempt needs no ambiguous-recovery acknowledgement.
+              // Refund at continuation admission, then persist it atomically with the new running state.
+              directRefund = this.refundAbandonedRound(run);
+            }
+            const interaction = {
+              ...this.allocateInteraction(run, directInteractionId),
+              sources: preparedSources.sources,
+            };
+            this.activateInteraction(run, interaction);
+            run.status = "running";
+            try {
+              await this.save(run);
+              admissionCommitted = true;
+            } catch (error) {
+              if (this.controllers.get(id) === controller) this.controllers.delete(id);
+              Object.assign(run, previous);
+              this.restoreInteraction(run, previousInteraction);
+              this.restorePreparedInteractionSources(run, preparedSources.previous);
+              directRefund = null;
+              throw error;
+            }
+          }),
         });
         if (directRefund) await this.emitRoundRefund(run, directRefund);
         await this.withProjectionEffect(run, controller, async () => {
@@ -3443,12 +3989,23 @@ ${rosterLine}
             promptProjected = true;
           }
           // 续聊的用户追问进对话历史（实时+重启后都可见）——否则只有 assistant 回复、看不到问的是什么
-          await this.emitEvent(run, "user.message", { text: nextPrompt }, { runId: run.id, agentId: "LO" });
+          await this.emitEvent(run, "user.message", {
+            text: nextPrompt,
+            interactionId: run.activeInteractionId,
+            interactionSeq: run.activeInteractionSeq,
+          }, { runId: run.id, agentId: "LO" });
           if (run.orchestrationMode !== "social") promptProjected = true;
         });
-        const text = await this.turn(run, agentId, nextPrompt);
+        // 直发续聊与 socialLoop 派轮同权（同上）：LO 说「继续执行」时执行所有者必须真能落盘
+        const writeGrant = this.continuationWriteGrant(run, agentId);
+        await this.emitWriteDegraded(run, agentId, writeGrant.reason);
+        const text = await this.turn(run, agentId, nextPrompt, {
+          allowWorkspaceWrite: writeGrant.allow,
+          cwd: writeGrant.allow && run.worktreePath ? run.worktreePath : null,
+        });
         await this.withProjectionEffect(run, controller, async () => {
-          if (run.orchestrationMode === "social") {
+          // 同上：空回复不伪造成一条发言（LO 那次的空白气泡就是从这里 append 的）
+          if (run.orchestrationMode === "social" && String(text ?? "").trim()) {
             await this.appendBus(run, { from: agentId, to: "lo", kind: "say", text });
           }
           run.result = { ...(run.result || {}), continued: text };
@@ -3464,14 +4021,25 @@ ${rosterLine}
               from: run.pendingAsk?.from ?? null,
               text: run.pendingAsk?.text ?? null,
             }, { runId: run.id });
-          } else if (run.resumeClaim || (run.resumeQueue || []).length) {
+          } else if (run.resumeClaim) {
             run.status = "recovery_required";
-            run.recoveryNote = "Acknowledged recovery left safe queued work that could not be drained within the current round budget.";
+            run.recoveryNote = "A claimed durable work item still owns an unfinished provider turn.";
             await this.save(run);
             await this.emitEvent(run, "run.recovery_required", {
               status: run.status,
               code: "RESUME_WORK_REMAINS",
               message: run.recoveryNote,
+            }, { runId: run.id });
+          } else if ((run.resumeQueue || []).length && this.interactionLimitReached(run)) {
+            run.status = "succeeded";
+            run.result = { ...(run.result || {}), truncated: true, reason: "interaction_step_limit" };
+            await this.save(run);
+            await this.emitEvent(run, "run.interaction_steps_exhausted", {
+              interactionId: run.activeInteractionId,
+              interactionSeq: run.activeInteractionSeq,
+              interactionStep: run.interactionStep,
+              maxStepsPerInteraction: this.maxStepsForInteraction(run),
+              queuedWork: run.resumeQueue.length,
             }, { runId: run.id });
           } else {
             run.status = "succeeded";
@@ -3486,7 +4054,7 @@ ${rosterLine}
         return this.get(id);
       } catch (error) {
         if (controller.signal.aborted || ["ABORTED", "RUN_CANCELLED", "CONTROL_PLANE_CLOSING"].includes(error.code)) {
-          if (admissionCommitted && this.controllers.get(id) === controller && run.status === "running") {
+          if (admissionCommitted && !this.interruptingRuns.has(id) && this.controllers.get(id) === controller && run.status === "running") {
             await this.withRunTransition(id, async () => {
               if (this.controllers.get(id) !== controller || run.status !== "running") return;
               run.status = "cancelled";
@@ -3505,6 +4073,10 @@ ${rosterLine}
             }).catch(() => {});
           }
           return this.get(id);
+        }
+        if (!admissionCommitted || this.controllers.get(id) !== controller || run.status === "cancelled") {
+          // 生命周期已被另一条 continuation/cancel 接管；失败只能回给本请求，禁止改写 owner 的 run。
+          throw error;
         }
         const recoveryBlocked = this.requiresRecovery(run, error);
         run.status = recoveryBlocked ? "recovery_required" : "failed";
@@ -3528,6 +4100,10 @@ ${rosterLine}
         }
         throw error;
       } finally {
+        // 只清自己那条记账：期间可能已被另一次续聊接管
+        if (this.inflightContinuations.get(continuationKey) === nextPrompt) {
+          this.inflightContinuations.delete(continuationKey);
+        }
         if (!drainStarted && this.controllers.get(id) === controller) this.controllers.delete(id);
       }
     })();
@@ -3544,16 +4120,53 @@ ${rosterLine}
     const sources = normalizeRunSources(value);
     const run = this.get(id);
     if (!sources.length) return run;
-    await this.withRunTransition(id, async () => {
-      const merged = normalizeRunSources([...(run.sources || []), ...sources]);
-      run.sources = merged;
-      run.updatedAt = new Date().toISOString();
-      await this.save(run);
+    let addedSources = [];
+    let queuedSources = [];
+    await withManagedClipboardSourceRegistration({
+      dataRoot: this.dataRoot,
+      sources,
+      operation: () => this.withRunTransition(id, async () => {
+        const existing = normalizeRunSources(run.sources || []);
+        const existingPaths = new Set(existing.map((source) => (
+          process.platform === "win32" ? source.path.toLowerCase() : source.path
+        )));
+        const merged = normalizeRunSources([...existing, ...sources]);
+        addedSources = merged.filter((source) => !existingPaths.has(
+          process.platform === "win32" ? source.path.toLowerCase() : source.path,
+        ));
+        const previousPending = normalizeRunSources(run.pendingInteractionSources || []);
+        const previousPendingPaths = new Set(previousPending.map((source) => (
+          process.platform === "win32" ? source.path.toLowerCase() : source.path
+        )));
+        const nextPending = normalizeRunSources([...previousPending, ...sources]);
+        queuedSources = nextPending.filter((source) => !previousPendingPaths.has(
+          process.platform === "win32" ? source.path.toLowerCase() : source.path,
+        ));
+        if (!addedSources.length && !queuedSources.length) return;
+        const previous = {
+          sources: existing,
+          pendingInteractionSources: previousPending,
+          updatedAt: run.updatedAt,
+        };
+        try {
+          run.sources = merged;
+          run.pendingInteractionSources = nextPending;
+          run.updatedAt = new Date().toISOString();
+          await this.save(run);
+        } catch (error) {
+          Object.assign(run, previous);
+          addedSources = [];
+          queuedSources = [];
+          throw error;
+        }
+      }),
     });
-    await this.emitEvent(run, "run.sources_added", {
-      count: sources.length,
-      names: sources.map((item) => item.name),
-    }, { runId: run.id, agentId: "LO" });
+    if (addedSources.length) {
+      await this.emitEvent(run, "run.sources_added", {
+        count: addedSources.length,
+        names: addedSources.map((item) => item.name),
+      }, { runId: run.id, agentId: "LO" });
+    }
     return run;
   }
 
@@ -3562,8 +4175,10 @@ ${rosterLine}
   async resumePendingAsk(id, answerText, {
     answerToAskId = null,
     admissionEpoch = this.cancelEpoch(id),
+    sources = [],
   } = {}) {
     const run = this.get(id);
+    sources = normalizeRunSources(sources);
     await this.ensureStablePendingAsk(run);
     this.assertContinuationAdmission(id, admissionEpoch);
     const ask = run.pendingAsk;
@@ -3573,6 +4188,7 @@ ${rosterLine}
     }
     const claimId = ask.id;
     if (this.askClaims.has(id)) throw Object.assign(new Error("an answer is already being persisted"), { code: "ANSWER_IN_PROGRESS" });
+    const answerInteractionId = randomUUID();
     this.askClaims.set(id, claimId);
     const placeholder = new AbortController();
     this.controllers.set(id, placeholder);
@@ -3587,49 +4203,66 @@ ${rosterLine}
       if (run.pendingAsk?.id !== ask.id) {
         throw Object.assign(new Error("the pending ask changed before the answer could commit"), { code: "ASK_MISMATCH" });
       }
-      const answerMessage = await this.withProjectionEffect(run, placeholder, () => this.appendBus(run, {
-        id: operationMessageId("answer", ask.id),
-        from: "lo",
-        to: ask.from,
-        kind: "answer",
-        text: answerText,
-        refs: { answerToAskId: ask.id },
-      }));
-      // cancel/close wins after the durable append: answer remains auditable but no new execution starts.
-      if (placeholder.signal.aborted || this.closing) return;
-      await this.withRunTransition(id, async () => {
-        this.assertContinuationAdmission(id, admissionEpoch);
-        if (placeholder.signal.aborted || this.closing || run.status === "cancelled") return;
-        if (run.pendingAsk?.id !== ask.id) {
-          throw Object.assign(new Error("the pending ask changed before the answer state committed"), { code: "ASK_MISMATCH" });
-        }
-        const previousState = {
-          pendingAsk: run.pendingAsk,
-          pausedForInput: run.pausedForInput,
-          resumeQueue: [...(run.resumeQueue || [])],
-          maxRounds: run.maxRounds,
-        };
-        run.pendingAsk = null;
-        run.pausedForInput = false;
-        run.resumeQueue = mergeResumeQueues(
-          [{ to: ask.from, busMessageId: answerMessage.id, kind: "answer" }],
-          run.resumeQueue,
-        );
-        run.maxRounds = Math.min(this.policy.limits.maxRounds, Math.max(run.maxRounds, run.round + 2)); // 回答轮+收敛轮预算
-        try {
-          await this.save(run);
-          committed = true;
-        } catch (error) {
-          run.pendingAsk = previousState.pendingAsk;
-          run.pausedForInput = previousState.pausedForInput;
-          run.resumeQueue = previousState.resumeQueue;
-          run.maxRounds = previousState.maxRounds;
-          transferError = error;
-        }
+      let answerMessage = null;
+      await withManagedClipboardSourceRegistration({
+        dataRoot: this.dataRoot,
+        sources,
+        operation: async () => {
+          answerMessage = await this.withProjectionEffect(run, placeholder, () => this.appendBus(run, {
+            id: operationMessageId("answer", ask.id),
+            from: "lo",
+            to: ask.from,
+            kind: "answer",
+            text: answerText,
+            refs: { answerToAskId: ask.id },
+          }));
+          // cancel/close wins after the durable append: answer remains auditable but no new execution starts.
+          if (placeholder.signal.aborted || this.closing) return;
+          await this.withRunTransition(id, async () => {
+            this.assertContinuationAdmission(id, admissionEpoch);
+            if (placeholder.signal.aborted || this.closing || run.status === "cancelled") return;
+            if (run.pendingAsk?.id !== ask.id) {
+              throw Object.assign(new Error("the pending ask changed before the answer state committed"), { code: "ASK_MISMATCH" });
+            }
+            const previousState = {
+              pendingAsk: run.pendingAsk,
+              pausedForInput: run.pausedForInput,
+              resumeQueue: [...(run.resumeQueue || [])],
+              interaction: this.interactionSnapshot(run),
+            };
+            const preparedSources = this.prepareInteractionSources(run, sources);
+            const interaction = {
+              ...this.allocateInteraction(run, answerInteractionId),
+              sources: preparedSources.sources,
+            };
+            run.pendingAsk = null;
+            run.pausedForInput = false;
+            run.resumeQueue = mergeResumeQueues(
+              [{ to: ask.from, busMessageId: answerMessage.id, kind: "answer", ...interaction }],
+              run.resumeQueue,
+            );
+            this.activateInteraction(run, interaction);
+            try {
+              await this.save(run);
+              committed = true;
+            } catch (error) {
+              run.pendingAsk = previousState.pendingAsk;
+              run.pausedForInput = previousState.pausedForInput;
+              run.resumeQueue = previousState.resumeQueue;
+              this.restoreInteraction(run, previousState.interaction);
+              this.restorePreparedInteractionSources(run, preparedSources.previous);
+              transferError = error;
+            }
+          });
+        },
       });
       if (committed) {
         await this.withProjectionEffect(run, placeholder, () =>
-          this.emitEvent(run, "user.message", { text: answerText }, { runId: id, agentId: "LO" }));
+          this.emitEvent(run, "user.message", {
+            text: answerText,
+            interactionId: run.activeInteractionId,
+            interactionSeq: run.activeInteractionSeq,
+          }, { runId: id, agentId: "LO" }));
       }
     } finally {
       if (this.askClaims.get(id) === claimId) this.askClaims.delete(id);
@@ -3794,6 +4427,96 @@ ${rosterLine}
     return { archived: archived.length, runIds: archived };
   }
 
+  /**
+   * 只中断当前 provider turn。与 cancel 的关键区别：保留原生 session、worktree、build approval、
+   * capability lease、pending ask 与 durable queue；待子进程确认退出后进入可续聊的 interrupted 状态。
+   */
+  async interrupt(id) {
+    const run = this.get(id);
+    if (this.interruptingRuns.has(id)) {
+      throw Object.assign(new Error("the current provider turn is already being interrupted"), { code: "RUN_INTERRUPTING" });
+    }
+    const controller = this.controllers.get(id) || null;
+    const activeExecutions = [
+      this.executions.get(id),
+      this.executions.get(`continue:${id}`),
+    ].filter(Boolean);
+    const hasInflightTurn = Object.keys(run.inflightTurns || {}).length > 0;
+    if (!controller && !activeExecutions.length && !hasInflightTurn) return this.get(id);
+
+    const interruptEpoch = this.cancelEpoch(id);
+    const cancellationWon = () => run.status === "cancelled"
+      || this.cancellingRuns.has(id)
+      || this.cancelEpoch(id) !== interruptEpoch;
+    this.interruptingRuns.add(id);
+    controller?.abort();
+    let settled = false;
+    const settlement = Promise.allSettled(activeExecutions).then(() => { settled = true; });
+    try {
+      await Promise.race([
+        settlement,
+        new Promise((resolveTimeout) => setTimeout(resolveTimeout, this.interruptTimeoutMs)),
+      ]);
+      if (!settled) {
+        let timeoutCommitted = false;
+        await this.withRunTransition(id, async () => {
+          if (cancellationWon()) return;
+          run.status = "recovery_required";
+          run.error = `The provider turn did not confirm termination within ${this.interruptTimeoutMs} ms.`;
+          run.recoveryNote = "Do not continue yet: the native turn may still be stopping. The control plane will release the interrupt gate only after the execution settles.";
+          await this.save(run);
+          timeoutCommitted = !cancellationWon();
+        });
+        if (!timeoutCommitted || cancellationWon()) return this.get(id);
+        await this.emitEvent(run, "run.interrupt_timeout", {
+          round: run.round,
+          interactionId: run.activeInteractionId || null,
+          interactionSeq: run.activeInteractionSeq || null,
+        }, { runId: id });
+        void settlement.finally(() => this.interruptingRuns.delete(id));
+        return this.get(id);
+      }
+
+      const projection = this.projectionChains.get(id);
+      if (projection) await projection.catch(() => {});
+      if (cancellationWon()) return this.get(id);
+      const interruptedAttempts = [];
+      let interruptCommitted = false;
+      await this.withRunTransition(id, async () => {
+        if (cancellationWon()) return;
+        const inflightIds = new Set(Object.values(run.inflightTurns || {}).filter(Boolean));
+        for (const attempt of run.turnAttempts || []) {
+          if (!inflightIds.has(attempt.attemptId)) continue;
+          attempt.phase = "interrupted";
+          attempt.interruptedAt = new Date().toISOString();
+          attempt.updatedAt = attempt.interruptedAt;
+          interruptedAttempts.push(attempt.attemptId);
+        }
+        run.inflightTurns = {};
+        run.status = "interrupted";
+        run.error = null;
+        run.recoveryNote = "Current provider turn was interrupted and confirmed stopped. Send another message to continue in the same native session.";
+        run.result = { ...(run.result || {}), interrupted: true };
+        await this.save(run);
+        interruptCommitted = !cancellationWon();
+      });
+      if (!interruptCommitted || cancellationWon()) return this.get(id);
+      await this.emitEvent(run, "run.interrupted", {
+        round: run.round,
+        interactionId: run.activeInteractionId || null,
+        interactionSeq: run.activeInteractionSeq || null,
+        interactionStep: run.interactionStep || 0,
+        attempts: interruptedAttempts,
+        sessionPreserved: true,
+        buildApprovalPreserved: run.buildApproval?.status === "approved",
+        leasePreserved: Boolean(this.activeCapabilityLease(run)),
+      }, { runId: id });
+      return this.get(id);
+    } finally {
+      if (settled) this.interruptingRuns.delete(id);
+    }
+  }
+
   async cancel(id) {
     const run = this.get(id);
     // Cancellation ownership must cross the in-memory execution boundary before any
@@ -3812,6 +4535,8 @@ ${rosterLine}
         run.pausedForInput = false;
         run.resumeQueue = [];
         run.resumeClaim = null;
+        run.pendingSteer = [];
+        run.pendingInteractionSources = [];
         run.activeSteer = null;
         if (run.buildApproval && run.buildApproval.status !== "denied") run.buildApproval.status = "revoked";
         this.revokeCapabilityLease(run, "run-cancelled");
@@ -3876,6 +4601,7 @@ ${rosterLine}
       return snapshot;
     } finally {
       if (this.cancelEpoch(id) === cancelEpoch) this.cancellingRuns.delete(id);
+      this.interruptingRuns.delete(id);
       // 远程 run 取消=终态：waiting_agent 挂起的 run 没有 execute 在飞（不会走那边的 finally），
       // 这里兜底处置专用 adapter——远端进程树绝不因取消路径不同而漏杀
       if (run.remote) await this.disposeRemoteAdapters(id);

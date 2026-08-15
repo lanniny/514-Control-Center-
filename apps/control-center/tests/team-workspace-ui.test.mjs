@@ -106,6 +106,9 @@ test("team workspace contains a first-class editable member registry wired back 
   ]) {
     assert.match(teamView, new RegExp(`id="${id}"`), `${id} must remain inside the unified team workspace`);
   }
+  assert.match(teamView, /默认能力与身份提示/);
+  assert.match(memberLibrary, /capabilities:\s*\["\*"\]/);
+  assert.doesNotMatch(memberLibrary, /member-capabilities-wall"\)\.querySelectorAll|runtime-capability-conflict/);
 
   assert.match(api, /teamMembers:\s*"\/api\/team-members"/);
   assert.match(api, /adapterTemplates:\s*"\/api\/adapter-templates"/);

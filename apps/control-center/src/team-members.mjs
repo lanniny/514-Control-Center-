@@ -8,7 +8,6 @@ import { findSecretCandidates } from "./redaction.mjs";
 const STORE_VERSION = 1;
 const STORE_MAX_BYTES = 2 * 1024 * 1024;
 const MEMBER_MAX = 512;
-const CAPABILITY_MAX = 64;
 const ID_MAX = 128;
 const LABEL_MAX = 120;
 const SHORT_LABEL_MAX = 48;
@@ -161,28 +160,9 @@ function cleanCapabilities(value, label = "capabilities", {
 } = {}) {
   if (value === undefined && optional) return undefined;
   if (!Array.isArray(value)) fail(`${label} must be an array`, code);
-  if (value.length > CAPABILITY_MAX) fail(`${label} exceeds ${CAPABILITY_MAX} entries`, code);
-  const capabilities = [];
-  const seen = new Set();
-  for (const raw of value) {
-    if (typeof raw !== "string") fail(`${label} entries must be strings`, code);
-    const capability = raw.trim();
-    if (
-      !capability
-      || capability.length > ID_MAX
-      || PROTOTYPE_KEYS.has(capability)
-    ) {
-      fail(`${label} contains an invalid entry`, code);
-    }
-    if (findSecretCandidates(capability).length) {
-      fail(`${label} contains secret-like material`, code);
-    }
-    if (!seen.has(capability)) {
-      seen.add(capability);
-      capabilities.push(capability);
-    }
-  }
-  return capabilities;
+  // 能力列表只保留为向后兼容字段。模型、运行席位和成员统一以 `*` 表示默认全能力，
+  // 旧持久化数组的内容会被无条件丢弃，不能再阻断加载、成员资格或派工。
+  return ["*"];
 }
 
 function cleanRuntimeOptions(value, label, { objects = false } = {}) {
@@ -286,18 +266,6 @@ function normalizeRuntimeCatalog(rawCatalog) {
   return { profiles, byId };
 }
 
-function assertCapabilitySubset(capabilities, runtimeProfile, memberId = "member") {
-  const available = new Set(runtimeProfile.capabilities);
-  const unsupported = capabilities.filter((capability) => !available.has(capability));
-  if (unsupported.length) {
-    fail(
-      `${memberId} capabilities are not provided by runtime profile ${runtimeProfile.id}: ${unsupported.join(", ")}`,
-      "RUNTIME_CAPABILITY_CONFLICT",
-      { memberId, runtimeProfileId: runtimeProfile.id, unsupportedCapabilities: unsupported },
-    );
-  }
-}
-
 function runtimeDefaultIssues(member, runtimeProfile) {
   const issues = [];
   const model = member.defaultModel == null ? "" : String(member.defaultModel).trim();
@@ -342,8 +310,7 @@ function runtimeStatus(member, runtimeById) {
       eligibilityReason: "runtime-profile-missing",
     };
   }
-  const unsupported = member.capabilities.filter((capability) => !runtime.capabilities.includes(capability));
-  const teamMemberEligible = runtime.teamMemberEligible === true && unsupported.length === 0;
+  const teamMemberEligible = runtime.teamMemberEligible === true;
   const mainBrainAllowed = member.mainBrainAllowed !== false;
   const coordinatorEligible = teamMemberEligible && runtime.coordinatorEligible === true && mainBrainAllowed;
   return {
@@ -372,11 +339,7 @@ function runtimeStatus(member, runtimeById) {
       : !teamMemberEligible
       ? runtime.eligibilityReason || "runtime-profile-ineligible"
       : "runtime-profile-ineligible",
-    eligibilityReason: teamMemberEligible
-      ? null
-      : runtime.teamMemberEligible !== true
-      ? runtime.eligibilityReason || "runtime-profile-ineligible"
-      : "runtime-capability-conflict",
+    eligibilityReason: teamMemberEligible ? null : runtime.eligibilityReason || "runtime-profile-ineligible",
   };
 }
 
@@ -727,7 +690,6 @@ export class TeamMemberStore {
       const capabilities = input.capabilities === undefined
         ? [...runtime.capabilities]
         : cleanCapabilities(input.capabilities);
-      assertCapabilitySubset(capabilities, runtime);
       const now = nextTimestamp();
       let id;
       do id = `member-${randomUUID()}`;
@@ -806,7 +768,6 @@ export class TeamMemberStore {
         if (Object.hasOwn(input, "defaultModel")) member.defaultModel = cleanText(input.defaultModel, "member default model", OPTION_MAX, { nullable: true });
         if (Object.hasOwn(input, "defaultEffort")) member.defaultEffort = cleanText(input.defaultEffort, "member default effort", OPTION_MAX, { nullable: true });
         if (Object.hasOwn(input, "mainBrainAllowed")) member.mainBrainAllowed = cleanBoolean(input.mainBrainAllowed, "mainBrainAllowed");
-        assertCapabilitySubset(member.capabilities, runtime, memberId);
         assertRuntimeDefaults(member, runtime, memberId);
         member.updatedAt = nextTimestamp(existingCustom.updatedAt);
         const custom = new Map(this.custom);
@@ -865,7 +826,6 @@ export class TeamMemberStore {
         else if (key === "systemPrompt") override.systemPrompt = cleanText(input.systemPrompt, "member system prompt", SYSTEM_PROMPT_MAX);
         else override[key] = cleanText(input[key], `member ${key}`, OPTION_MAX, { nullable: true });
       }
-      assertCapabilitySubset(override.capabilities ?? defaultRuntime.capabilities, runtime, memberId);
       assertRuntimeDefaults({
         defaultModel: Object.hasOwn(override, "defaultModel") ? override.defaultModel : runtime.defaultModel,
         defaultEffort: Object.hasOwn(override, "defaultEffort") ? override.defaultEffort : runtime.defaultEffort,
@@ -967,8 +927,6 @@ export class TeamMemberStore {
         if (runtime.teamMemberEligible !== true) {
           reasons.push(`runtime profile is ineligible (${runtime.eligibilityReason || "unknown"})`);
         }
-        const unsupported = (member.capabilities ?? []).filter((capability) => !runtime.capabilities.includes(capability));
-        if (unsupported.length) reasons.push(`unsupported capabilities: ${unsupported.join(", ")}`);
         reasons.push(...runtimeDefaultIssues(member, runtime));
       }
       if (reasons.length) {

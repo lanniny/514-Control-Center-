@@ -29,12 +29,14 @@ const API = Object.freeze({
   runtimeSeats: "/api/runtime-seats",
   agentActions: "/api/agents/actions",
   providers: "/api/providers",
+  providerLive: "/api/providers/live",
   providerSwitch: "/api/providers/switch",
   providerPreview: "/api/providers/preview",
   providerApplyTeam: "/api/providers/apply-team",
   providerTestEndpoints: "/api/providers/test-endpoints",
   providerUsageTemplates: "/api/providers/usage-templates",
   providerPresets: "/api/providers/presets",
+  providerFetchModels: "/api/providers/fetch-models",
   providerUsageTest: "/api/providers/usage-test",
   providerSort: "/api/providers/sort",
   providerExport: "/api/providers/export",
@@ -47,6 +49,7 @@ const API = Object.freeze({
   providerBackup: (name) => `/api/providers/backups/${encodeURIComponent(name)}`,
   providerBackupRestore: (name) => `/api/providers/backups/${encodeURIComponent(name)}/restore`,
   providerFailover: (app) => `/api/providers/failover/${encodeURIComponent(app)}`,
+  providerDuplicate: (id) => `/api/providers/${encodeURIComponent(id)}/duplicate`,
   providerCheck: (id) => `/api/providers/${encodeURIComponent(id)}/check`,
   providerModelTest: (id) => `/api/providers/${encodeURIComponent(id)}/model-test`,
   providerUsage: (id) => `/api/providers/${encodeURIComponent(id)}/usage`,
@@ -87,6 +90,8 @@ export class ApiError extends Error {
     this.name = "ApiError";
     this.status = status;
     this.payload = payload;
+    const errorPayload = payload && typeof payload === "object" ? payload.error ?? payload : null;
+    this.code = typeof errorPayload?.code === "string" ? errorPayload.code : null;
   }
 }
 
