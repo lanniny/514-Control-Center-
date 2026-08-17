@@ -1062,6 +1062,9 @@ fn supervisor(
                             WebviewUrl::External(url),
                         )
                         .title("514 Forge · Control Center")
+                        // 控制台形态第七轮：去掉原生标题栏，窗口框与 topbar 合一（Codex 式 slim 横带）。
+                        // 前端通过 data-tauri-drag-region + plugin:window 命令自绘拖拽区与最小化/最大化/关闭钮。
+                        .decorations(false)
                         .inner_size(1440.0, 920.0)
                         .min_inner_size(960.0, 640.0)
                         .visible(true)

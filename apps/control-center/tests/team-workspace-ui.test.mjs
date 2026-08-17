@@ -55,6 +55,10 @@ test("team route owns activation, settings and runtime surfaces without a separa
     "team-apply-providers-button",
     "team-form",
     "team-roster-summary",
+    "team-starmap-root",
+    "team-router-workbench",
+    "router-form",
+    "team-routing-root",
     "team-hero-root",
     "team-roster-root",
     "team-flow-root",
@@ -63,17 +67,23 @@ test("team route owns activation, settings and runtime surfaces without a separa
   }
   assert.doesNotMatch(index, /<dialog[^>]+id="team-dialog"/, "team settings must not regress to a detached modal");
   assert.doesNotMatch(index, /默认 Claude|claude-fable 席位不可移除/);
-  assert.doesNotMatch(index, /src="\.\/collab-flow\.js"/, "app.js must own team runtime refresh instead of a second auto-boot script");
+  assert.doesNotMatch(index, /src="\.\/collab-flow\.js"|src="\.\/hero-starmap\.js"/, "app.js must own team runtime refresh instead of a second auto-boot script");
+  assert.doesNotMatch(index, /id="view-hero"|data-view="hero"/, "协作星图 must live on the team page, not as a separate nav view");
+  assert.doesNotMatch(index, /id="view-router"|data-view-panel="router"/, "模型路由 must live on the team page, not as a separate view panel");
+  assert.match(teamView, /id="team-starmap-title"/);
+  assert.match(teamView, /class="team-command-deck"/);
+  assert.match(teamView, /class="team-command-deck"[\s\S]*id="team-surface-tabs"[\s\S]*<\/div>/);
 });
 
 test("team workspace contains a first-class editable member registry wired back into team composition", async () => {
-  const [index, app, api, memberLibrary, runtimeSeatManager, teamCss] = await Promise.all([
+  const [index, app, api, memberLibrary, runtimeSeatManager, teamCss, teamPanel] = await Promise.all([
     readFile(resolve(publicRoot, "index.html"), "utf8"),
     readFile(resolve(publicRoot, "app.js"), "utf8"),
     readFile(resolve(publicRoot, "api.js"), "utf8"),
     readFile(resolve(publicRoot, "modules/member-library.js"), "utf8"),
     readFile(resolve(publicRoot, "modules/runtime-seat-manager.js"), "utf8"),
     readFile(resolve(publicRoot, "forge/team.css"), "utf8"),
+    readFile(resolve(publicRoot, "team-panel.js"), "utf8"),
   ]);
   const teamStart = index.indexOf('id="view-team"');
   const configStart = index.indexOf('id="view-config"');
@@ -83,9 +93,15 @@ test("team workspace contains a first-class editable member registry wired back 
     "team-surface-tabs",
     "team-surface-orchestration",
     "team-surface-members",
+    "team-surface-settings",
     "member-library-list",
     "member-new-button",
     "member-form",
+    "member-avatar-field",
+    "member-avatar-preview",
+    "member-avatar-upload",
+    "member-avatar-reset",
+    "member-avatar-file",
     "member-runtime-profile-select",
     "member-seat-picker",
     "member-seat-picker-trigger",
@@ -107,6 +123,15 @@ test("team workspace contains a first-class editable member registry wired back 
     assert.match(teamView, new RegExp(`id="${id}"`), `${id} must remain inside the unified team workspace`);
   }
   assert.match(teamView, /默认能力与身份提示/);
+  assert.match(teamView, /id="team-surface-settings"[\s\S]*id="team-form"/);
+  assert.doesNotMatch(
+    teamView.slice(teamView.indexOf('id="team-surface-orchestration"'), teamView.indexOf('id="team-surface-members"')),
+    /id="team-form"/,
+    "live orchestration must not keep the settings form in the first screen",
+  );
+  assert.match(memberLibrary, /const TEAM_SURFACES = \["orchestration", "members", "settings"\]/);
+  assert.match(app, /function openTeamSettingsSurface\(/);
+  assert.match(app, /setSurface\("settings"/);
   assert.match(memberLibrary, /capabilities:\s*\["\*"\]/);
   assert.doesNotMatch(memberLibrary, /member-capabilities-wall"\)\.querySelectorAll|runtime-capability-conflict/);
 
@@ -114,6 +139,14 @@ test("team workspace contains a first-class editable member registry wired back 
   assert.match(api, /adapterTemplates:\s*"\/api\/adapter-templates"/);
   assert.match(api, /runtimeSeats:\s*"\/api\/runtime-seats"/);
   assert.match(app, /createMemberLibrary\(\{/);
+  assert.match(app, /account-dock/);
+  assert.match(app, /requestBlob/);
+  assert.match(memberLibrary, /memberAvatarMarkup/);
+  assert.match(index, /id="account-dock"/);
+  assert.match(index, /id="account-dock-label"/);
+  assert.match(index, /id="settings-avatar-button"/);
+  assert.match(teamPanel, /memberAvatarMarkup/);
+  assert.doesNotMatch(teamPanel, /tp-avatar[\s\S]{0,80}lucide-bot/, "team cards default to official CLI icons, not a generic bot glyph");
   assert.match(app, /createRuntimeSeatManager\(\{/);
   assert.match(app, /data-edit-team-member/);
   assert.match(app, /onMemberSaved:[\s\S]{0,520}memberLibrary\?\.updateTeamToggle\(\)/);
@@ -160,17 +193,31 @@ test("team workspace contains a first-class editable member registry wired back 
   assert.match(teamCss, /\.member-seat-picker-option\s*\{/);
   assert.match(teamCss, /\.member-library\s*\{/);
   assert.match(teamCss, /@media \(max-width: 680px\)/);
+  assert.match(teamCss, /@media \(max-width: 680px\)[\s\S]*?\.team-surface-switcher\s*\{[\s\S]*?grid-template-columns: repeat\(3, minmax\(0, 1fr\)\);/);
   assert.match(teamCss, /\.team-settings-form \.team-members-list,\s*\.tm-group-body,\s*\.team-runtime-overview \.cf-hero,[\s\S]*?grid-template-columns: minmax\(0, 1fr\);/);
   assert.match(teamCss, /@media \(min-width: 681px\) and \(max-width: 1120px\)\s*\{\s*\.tm-group-body\s*\{\s*grid-template-columns: repeat\(2, minmax\(0, 1fr\)\);/);
 });
 
 test("team entry points and refresh path converge on the unified workspace", async () => {
   const app = await readFile(resolve(publicRoot, "app.js"), "utf8");
+  assert.match(app, /activateButton\.classList\.add\("is-current"\)/);
   assert.match(app, /function openTeamWorkspace\(/);
   assert.match(app, /manage-teams-button[^\n]+openTeamWorkspace/);
   assert.match(app, /state\.view === "team"[\s\S]{0,260}jobs\.push\(loadTeams\(\)\.then\(async \(teamsResult\)[\s\S]{0,180}const flowResult = await refreshCollabFlow\(\)[\s\S]{0,140}loadResultFailed\(teamsResult\) \? teamsResult : flowResult/);
   assert.match(app, /function applyTeamProviders\(teamId =/);
   assert.doesNotMatch(app, /openTeamDialog|closeTeamDialog|team-dialog/);
+});
+
+test("team export refuses unsaved drafts instead of silently packing the active team", async () => {
+  const app = await readFile(resolve(publicRoot, "app.js"), "utf8");
+  const exportStart = app.indexOf("async function exportEditingTeam");
+  const importStart = app.indexOf("async function importTeamPack");
+  assert.ok(exportStart >= 0 && importStart > exportStart, "exportEditingTeam block is missing");
+  const exportBody = app.slice(exportStart, importStart);
+  assert.match(exportBody, /if \(!state\.editingTeamId\)/);
+  assert.match(exportBody, /先保存团队，再导出/);
+  assert.doesNotMatch(exportBody, /currentTeam\(\)/, "new drafts must not fall back to the activated team");
+  assert.match(app, /team-export-button"\]\) elements\["team-export-button"\]\.hidden = !team/);
 });
 
 test("team writes force a fresh read without implicitly activating newly saved teams", async () => {

@@ -110,6 +110,96 @@ export function attachSplitter(container, options = {}) {
   return { handle, apply, reset };
 }
 
+/* 右栏已是浮层抽屉，grid 末轨拖柄碰不到它的宽。把手贴在面板左缘，
+ * 改 --codex-context-width；拖左变宽、拖右变窄；双击回到默认。 */
+export function attachOverlaySplitter(panel, options = {}) {
+  const {
+    host = panel?.parentElement,
+    storageKey = "514cc-context-rail-width",
+    cssVar = "--codex-context-width",
+    min = 260,
+    max = 720,
+    defaultWidth = 326,
+  } = options;
+  if (!panel || !host || panel.dataset.overlaySplitter) return null;
+  panel.dataset.overlaySplitter = "1";
+
+  const saved = storageKey ? Number.parseFloat(localStorage.getItem(storageKey) || "") : NaN;
+
+  const handle = document.createElement("div");
+  handle.className = `${HANDLE_CLASS} is-overlay-left`;
+  handle.setAttribute("role", "separator");
+  handle.setAttribute("aria-orientation", "vertical");
+  handle.setAttribute("aria-label", "调整右栏宽度");
+  handle.title = "拖动调整宽度，双击恢复默认";
+  handle.tabIndex = 0;
+  handle.setAttribute("aria-valuemin", String(min));
+  panel.prepend(handle);
+
+  const ceiling = () => {
+    const hostWidth = host.getBoundingClientRect().width;
+    return Math.max(min, Math.min(max, Math.round(hostWidth * 0.72)));
+  };
+
+  const apply = (width) => {
+    const clamped = Math.min(ceiling(), Math.max(min, Math.round(width)));
+    host.style.setProperty(cssVar, `${clamped}px`);
+    handle.dataset.width = String(clamped);
+    handle.setAttribute("aria-valuenow", String(clamped));
+    handle.setAttribute("aria-valuemax", String(ceiling()));
+    return clamped;
+  };
+
+  const persist = () => {
+    if (!storageKey) return;
+    const width = Number.parseFloat(handle.dataset.width || "");
+    if (Number.isFinite(width)) localStorage.setItem(storageKey, String(width));
+  };
+
+  const reset = () => {
+    const width = apply(defaultWidth);
+    if (storageKey) localStorage.removeItem(storageKey);
+    return width;
+  };
+
+  const currentWidth = () => Number.parseFloat(handle.dataset.width || "")
+    || Number.parseFloat(getComputedStyle(host).getPropertyValue(cssVar))
+    || defaultWidth;
+
+  handle.addEventListener("pointerdown", (event) => {
+    if (panel.getAttribute("aria-hidden") === "true") return;
+    event.preventDefault();
+    handle.setPointerCapture(event.pointerId);
+    document.documentElement.classList.add("forge-splitting");
+    const startX = event.clientX;
+    const startWidth = currentWidth();
+    const onMove = (moveEvent) => apply(startWidth - (moveEvent.clientX - startX));
+    const onUp = () => {
+      handle.removeEventListener("pointermove", onMove);
+      handle.removeEventListener("pointerup", onUp);
+      handle.removeEventListener("pointercancel", onUp);
+      document.documentElement.classList.remove("forge-splitting");
+      persist();
+    };
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", onUp);
+    handle.addEventListener("pointercancel", onUp);
+  });
+
+  handle.addEventListener("dblclick", () => reset());
+
+  handle.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    const step = event.key === "ArrowLeft" ? 16 : -16;
+    apply(currentWidth() + step);
+    persist();
+  });
+
+  apply(Number.isFinite(saved) ? saved : defaultWidth);
+  return { handle, apply, reset };
+}
+
 /* —— 自举：协作台三栏左右缝（与其它 panel 的 bootWhenReady 同惯例）—— */
 function bootSplitters() {
   if (typeof document === "undefined") return;
@@ -118,6 +208,11 @@ function bootSplitters() {
     if (!shell) return;
     attachSplitter(shell, { side: "left", storageKey: "514cc-split-left", min: 180, max: 420, defaultWidth: 248 });
     attachSplitter(shell, { side: "right", storageKey: "514cc-split-right", min: 220, max: 480, defaultWidth: 292 });
+    attachOverlaySplitter(document.getElementById("mission-control-dock"), {
+      host: shell,
+      storageKey: "514cc-context-rail-width",
+      defaultWidth: 326,
+    });
   };
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start, { once: true });
   else start();

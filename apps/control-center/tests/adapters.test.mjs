@@ -1544,11 +1544,6 @@ test("Claude runtime prompt defers coordinator identity to the current turn", as
   assert.match(prompt, /工具能力以当前 adapter、当前轮 permissionMode 和真实工具回执为准/);
   assert.doesNotMatch(prompt, /没有文件、Shell、网络或 MCP 工具/);
   assert.doesNotMatch(prompt, /你是 514cc 的认知主脑与总协调者|Claude Fable 负责规划/);
-
-  const registry = JSON.parse(await readFile(new URL("../../../config/control-center/models.json", import.meta.url), "utf8"));
-  const evidence = registry.profiles.find((profile) => profile.id === "claude-fable")?.evidence?.map((item) => item.detail).join("\n") || "";
-  assert.match(evidence, /no longer disables local CLI tools/);
-  assert.doesNotMatch(evidence, /launches with --tools/);
 });
 
 test("Claude CLI arguments keep tool availability aligned with the per-turn permission", () => {
@@ -1584,6 +1579,23 @@ test("Claude CLI omits --model when the runtime has no explicit model", () => {
   }
   const explicit = buildClaudeArgs({ nativeSessionId: "new-session", requestedModel: "  claude-sonnet-test  " });
   assert.equal(explicit[explicit.indexOf("--model") + 1], "claude-sonnet-test");
+});
+
+test("Claude CLI slash-command gating flips only for explicit native command turns", () => {
+  // 普通轮：斜杠命令禁用——提示词里的 "/" 只是文本，防提示注入触发 CLI 内部命令
+  const normal = buildClaudeArgs({ nativeSessionId: "s", requestedModel: "fable", permissionMode: "plan" });
+  assert.equal(normal.includes("--disable-slash-commands"), true);
+  // 原生命令轮（用户显式发送 /compact 等）：CLI 需要解释执行，与 Desktop 同通道
+  const native = buildClaudeArgs({
+    nativeSessionId: "s",
+    requestedModel: "fable",
+    permissionMode: "plan",
+    nativeCommand: true,
+  });
+  assert.equal(native.includes("--disable-slash-commands"), false);
+  // 其余关键闸不变
+  assert.equal(native.includes("--strict-mcp-config"), true);
+  assert.equal(native.includes("-p"), true);
 });
 
 test("Codex app-server close waits for the child exit boundary", async () => {

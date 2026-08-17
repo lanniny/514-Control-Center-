@@ -17,7 +17,7 @@
 import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { chmod, mkdir, open, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { isDeepStrictEqual, promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -648,6 +648,14 @@ export function createCapabilities({
     return new Set(caps.agents[cleanAgentId]?.disabledSkills ?? []);
   }
 
+  async function disabledMcpNames() {
+    const quarantineState = await readQuarantineState();
+    return {
+      failClosed: Boolean(quarantineState.status?.failClosed),
+      names: new Set(Object.keys(quarantineState.config?.servers ?? {})),
+    };
+  }
+
   async function setAgentSkill(agentId, skill, enabled) {
     ({ agentId, skill } = await validateAgentSkill(agentId, skill));
     return serializeMutation(`agent-capabilities:${capsPath}`, async () => {
@@ -836,9 +844,37 @@ export function createCapabilities({
 
   return {
     agentDisabledSkills,
+    disabledMcpNames,
     agentConfigStatus,
     setAgentSkill,
     toggleMcpServer,
+    async createSkill({ name, description = "", body = "" } = {}) {
+      const code = String(name ?? "").trim();
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(code) || PROTOTYPE_KEYS.has(code)) {
+        throw Object.assign(new Error("Skill 名称只能用字母、数字、点、下划线和连字符，且不能超过 64 字"), { code: "VALIDATION_FAILED" });
+      }
+      const desc = String(description ?? "").replace(/\s+/g, " ").trim().slice(0, 200);
+      const textBody = String(body ?? "").slice(0, 64 * 1024);
+      const relative = join(".agents", "skills", code);
+      const dir = resolve(repoRoot, relative);
+      const rootResolved = resolve(repoRoot);
+      if (dir !== join(rootResolved, ".agents", "skills", code)) {
+        throw Object.assign(new Error("Skill 路径越界"), { code: "VALIDATION_FAILED" });
+      }
+      try {
+        await io.stat(dir);
+        throw Object.assign(new Error(`Skill「${code}」已存在`), { code: "SKILL_EXISTS" });
+      } catch (error) {
+        if (error?.code === "SKILL_EXISTS") throw error;
+        if (error?.code !== "ENOENT") throw error;
+      }
+      await io.mkdir(dir, { recursive: true });
+      const yamlDesc = desc.replace(/"/g, '\\"');
+      const content = `---\nname: ${code}\ndescription: "${yamlDesc}"\n---\n\n${textBody.trim() ? `${textBody.trim()}\n` : ""}`;
+      await io.writeFile(join(dir, "SKILL.md"), content, { encoding: "utf8", flag: "wx" });
+      await eventStore?.emit("capabilities.skill_created", { code, path: relative.split(sep).join("/") }, { sensitivity: "internal", agentId: "control-plane" }).catch(() => {});
+      return { code, path: relative.split(sep).join("/"), description: desc, created: true };
+    },
     async summary() {
       const moduleYamlPath = join(repoRoot, "module.yaml");
       let registry = { skills: [], agents: [], mcp_servers: [] };

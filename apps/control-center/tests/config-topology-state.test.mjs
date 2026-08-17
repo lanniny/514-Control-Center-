@@ -233,9 +233,12 @@ test("config hash routes preserve member targets with deterministic provider def
     location: { hash: "#workbench" },
   });
 
-  const emptyTarget = { memberId: null, runtimeProfileId: null };
+  // parseForgeRoute 现统一带 settingsFocus（observability/memory 路由用），期望对象补齐该键
+  const emptyTarget = { memberId: null, runtimeProfileId: null, settingsFocus: null };
   assert.deepEqual(parseForgeRoute("#config"), { view: "config", configSurface: "providers", ...emptyTarget });
   assert.deepEqual(parseForgeRoute("#config/unknown"), { view: "config", configSurface: "providers", ...emptyTarget });
+  assert.deepEqual(parseForgeRoute("#config/local-runtime"), { view: "config", configSurface: "local-runtime", ...emptyTarget });
+  assert.deepEqual(parseForgeRoute("#config/hooks"), { view: "config", configSurface: "hooks", ...emptyTarget });
   assert.deepEqual(parseForgeRoute("#config/sources"), { view: "config", configSurface: "sources", ...emptyTarget });
   assert.deepEqual(parseForgeRoute("#capabilities"), { view: "config", configSurface: "capabilities", ...emptyTarget });
   assert.deepEqual(parseForgeRoute("#workbench"), { view: "workbench", configSurface: null, ...emptyTarget });
@@ -249,12 +252,21 @@ test("config hash routes preserve member targets with deterministic provider def
     configSurface: "capabilities",
     memberId: "member-custom-1",
     runtimeProfileId: "codex-technical",
+    settingsFocus: null,
   });
   assert.deepEqual(parseForgeRoute("#config/capabilities?member=%3Cscript%3E&runtime=codex-technical"), {
     view: "config",
     configSurface: "capabilities",
     memberId: null,
     runtimeProfileId: "codex-technical",
+    settingsFocus: null,
+  });
+  assert.deepEqual(parseForgeRoute("#observability?focus=memory"), {
+    view: "observability",
+    configSurface: null,
+    memberId: null,
+    runtimeProfileId: null,
+    settingsFocus: "memory",
   });
 });
 
@@ -1581,7 +1593,7 @@ test("remote source save preserves edits made while the request is in flight and
   assert.equal(state.configRemoteBusy.size, 0);
 });
 
-test("native CC-Switch deeplinks switch to providers and drain in FIFO order", async () => {
+test("native CC-Switch deeplinks switch to local-runtime and drain in FIFO order", async () => {
   const firstOpen = deferred();
   const events = [];
   const window = {
@@ -1607,13 +1619,13 @@ test("native CC-Switch deeplinks switch to providers and drain in FIFO order", a
   const first = enqueueCcSwitchDeeplink("ccswitch://a");
   const second = enqueueCcSwitchDeeplink("ccswitch://b");
   await Promise.resolve();
-  assert.deepEqual(events, ["view:config/providers", "open:ccswitch://a"]);
+  assert.deepEqual(events, ["view:config/local-runtime", "open:ccswitch://a"]);
   firstOpen.resolve();
   await Promise.all([first, second]);
   assert.deepEqual(events, [
-    "view:config/providers",
+    "view:config/local-runtime",
     "open:ccswitch://a",
-    "view:config/providers",
+    "view:config/local-runtime",
     "open:ccswitch://b",
   ]);
   assert.match(appSource, /__FORGE_CCSWITCH_DEEPLINKS__\.splice\(0\)/);
@@ -1652,7 +1664,7 @@ test("provider-dialog fallback keeps native deeplinks in FIFO order", async () =
     "fallback:ccswitch://b",
   ]);
   assert.match(appSource, /async function openProviderDeeplink[\s\S]+if \(url\) await previewProviderDeeplink\(\)/);
-  assert.match(appSource, /else await openProviderDeeplink\(normalizedUrl\)/);
+  assert.match(appSource, /await openProviderDeeplink\(normalizedUrl\)/);
 });
 
 test("config refresh reports resolved loader failures", async () => {

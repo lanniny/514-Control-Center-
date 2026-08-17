@@ -1,7 +1,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { cliEnvFailureDetail, mountCcSwitchPanel } from "../public/modules/ccswitch-panel.js";
+import {
+  breakerStateMeta,
+  cliEnvFailureDetail,
+  cliEnvPulse,
+  formatAuthResource,
+  mountCcSwitchPanel,
+  syncChannelMeta,
+  workbenchPulse,
+} from "../public/modules/ccswitch-panel.js";
 
 function deferred() {
   let resolve;
@@ -302,6 +310,94 @@ test("CLI 环境 busy 态：安装/升级中渲染动态按钮，头部全部升
     assert.doesNotMatch(refreshButton, /ccs-cli-busy/);
     // 非 busy 卡片仍是普通状态文本
     assert.doesNotMatch(html.match(/data-ccs-cli-card="grok"[\s\S]*?<\/section>/)?.[0] ?? "", /ccs-cli-busy/);
+  } finally {
+    globalThis.window = previousWindow;
+  }
+});
+
+test("syncChannelMeta 区分未配置 / 已关闭 / 已同步 / 错误", () => {
+  assert.deepEqual(syncChannelMeta({}), { tone: "muted", label: "未配置", detail: "" });
+  assert.equal(syncChannelMeta({ enabled: false, baseUrl: "https://dav.example" }).label, "已关闭");
+  assert.equal(syncChannelMeta({ enabled: true }).label, "已启用");
+  assert.equal(syncChannelMeta({ enabled: true, status: { lastSuccessAt: "2026-08-16T00:00:00Z" } }).tone, "ok");
+  assert.equal(syncChannelMeta({ enabled: true, status: { lastError: "401" } }).label, "错误");
+});
+
+test("breakerStateMeta 把 closed/open 译成正常/熔断", () => {
+  assert.deepEqual(breakerStateMeta("closed"), { tone: "is-ok", label: "正常" });
+  assert.deepEqual(breakerStateMeta("open"), { tone: "is-error", label: "熔断" });
+  assert.equal(breakerStateMeta("half-open").label, "试探");
+});
+
+test("cliEnvPulse 与 workbenchPulse 用真实计数而不是占位", () => {
+  const pulse = cliEnvPulse([
+    { status: "up-to-date" },
+    { status: "upgrade-available" },
+    { status: "not-installed" },
+    { status: "broken" },
+  ]);
+  assert.deepEqual(pulse, { ready: 1, upgrade: 1, missing: 1, broken: 1, total: 4 });
+  const tabs = workbenchPulse({
+    cliEnv: { tools: [{ status: "upgrade-available" }] },
+    proxy: { running: true, takeover: { claude: true } },
+    domain: { prompts: { claude: { a: {} } }, mcps: {}, skills: {}, profiles: {}, settings: { webdav: {}, s3: {} } },
+    auth: { providers: [{ accounts: [{ id: "1" }] }] },
+  });
+  assert.equal(tabs.env.badge, "1 可升级");
+  assert.equal(tabs.proxy.badge, "运行中");
+  assert.equal(tabs.resources.badge, "1");
+  assert.equal(tabs.sync.badge, "未配置");
+  assert.equal(tabs.accounts.badge, "1 已登录");
+});
+
+test("formatAuthResource 把模型列表收成 chips，额度收成键值，密钥字段不露", () => {
+  const models = formatAuthResource("models", { data: [{ id: "gpt-5" }, { slug: "claude-opus" }] });
+  assert.deepEqual(models, { mode: "models", items: ["gpt-5", "claude-opus"] });
+  const quota = formatAuthResource("quota", { copilot_plan: "pro", access_token: "secret", nested: { remaining: 12 } });
+  assert.equal(quota.mode, "quota");
+  assert.deepEqual(quota.items, [["copilot_plan", "pro"], ["nested.remaining", "12"]]);
+});
+
+test("代理面显示成功率与中文熔断状态，接管格带品牌图标", async () => {
+  const previousWindow = globalThis.window;
+  globalThis.window = {};
+  try {
+    const root = createRoot();
+    const panel = mountCcSwitchPanel({
+      root,
+      request: (path) => {
+        if (path === "/api/ccswitch/proxy/status") return Promise.resolve({ status: { running: true, listenAddress: "127.0.0.1", listenPort: 15721, takeover: { claude: true } } });
+        if (path.includes("usage/summary")) return Promise.resolve({ summary: { windowDays: 30, requests: 9, failedRequests: 1, totalRequests: 10, successRate: 0.9, inputTokens: 1200, outputTokens: 800, costUsd: 0.12 } });
+        if (path.includes("/health")) return Promise.resolve({ items: [{ app: "claude", providerId: "p1", state: "open", consecutiveFailures: 3, lastFailure: "timeout" }] });
+        return Promise.resolve(responseFor(path));
+      },
+    });
+    await panel.refresh();
+    const html = root.body.innerHTML;
+    assert.match(html, /成功率/);
+    assert.match(html, /90\.0%/);
+    assert.match(html, />熔断</);
+    assert.match(html, /ccs-takeover is-on/);
+    assert.match(html, /icon-cli-claude/);
+    assert.doesNotMatch(html, />open</);
+  } finally {
+    globalThis.window = previousWindow;
+  }
+});
+
+test("同步面把空通道标成未配置而不是未同步", async () => {
+  const previousWindow = globalThis.window;
+  globalThis.window = {};
+  try {
+    const root = createRoot();
+    const panel = mountCcSwitchPanel({ root, request: (path) => Promise.resolve(responseFor(path)) });
+    await panel.refresh();
+    panel.state.tab = "sync";
+    await panel.refresh();
+    assert.match(root.body.innerHTML, /未配置/);
+    assert.doesNotMatch(root.body.innerHTML, /未同步/);
+    assert.match(root.body.innerHTML, /云端备份/);
+    assert.match(root.body.innerHTML, /本机健康/);
   } finally {
     globalThis.window = previousWindow;
   }

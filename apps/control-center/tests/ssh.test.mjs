@@ -51,9 +51,17 @@ function fakeClientFactory(behavior = {}) {
       callback(null, {
         readdir: (path, cb) => cb(null, listing),
         realpath: (path, cb) => {
-          const resolved = behavior.realpaths?.[path] ?? path;
-          if (resolved instanceof Error) cb(resolved);
-          else cb(null, resolved);
+          if (behavior.realpaths && Object.prototype.hasOwnProperty.call(behavior.realpaths, path)) {
+            const resolved = behavior.realpaths[path];
+            if (resolved instanceof Error) cb(resolved);
+            else cb(null, resolved);
+            return;
+          }
+          if (behavior.realpathStrict) {
+            cb(Object.assign(new Error("No such file"), { code: 2 }));
+            return;
+          }
+          cb(null, path);
         },
         createReadStream: () => {
           const stream = new EventEmitter();
@@ -69,6 +77,11 @@ function fakeClientFactory(behavior = {}) {
           stream.end = () => setImmediate(() => stream.emit("close"));
           return stream;
         },
+        mkdir: (path, cb) => {
+          client.mkdirCalls = [...(client.mkdirCalls ?? []), path];
+          cb(null);
+        },
+        stat: (path, cb) => cb(null, { isDirectory: () => true }),
       });
     };
     created.push(client);
@@ -143,6 +156,28 @@ test("ssh: connection pool reuses a live client within idle window", async (t) =
   assert.equal(first.code, 0);
   assert.equal(second.code, 0);
   assert.equal(clientFactory.created.length, 1, "second exec reused pooled client");
+});
+
+test("ssh: sftpEnsureDir creates prefixes inside the allowlist", async (t) => {
+  const { service, clientFactory } = await fixture(t, {
+    fingerprint: "SHA256:MK",
+    realpathStrict: true,
+    realpaths: {
+      "/srv/data": "/srv/data",
+    },
+  });
+  const host = await service.create({ host: "h", user: "u", rootAllowlist: ["/srv/data"] });
+  await service.trust(host.id, "SHA256:MK");
+  const made = await service.sftpEnsureDir(host.id, "/srv/data/514-projects/app", { hostKeyFingerprint: "SHA256:MK" });
+  assert.equal(made.ok, true);
+  assert.deepEqual(clientFactory.created[0].mkdirCalls, [
+    "/srv/data/514-projects",
+    "/srv/data/514-projects/app",
+  ]);
+  await assert.rejects(
+    () => service.sftpEnsureDir(host.id, "/etc/oops", { hostKeyFingerprint: "SHA256:MK" }),
+    { code: "SFTP_PATH_BOUNDARY" },
+  );
 });
 
 test("ssh: sftp path boundary refuses escape before any remote call", async (t) => {

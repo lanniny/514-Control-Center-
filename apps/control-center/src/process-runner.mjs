@@ -52,6 +52,9 @@ const RUNTIME_ENV_KEYS = new Set([
   "XDG_DATA_HOME",
   "XDG_RUNTIME_DIR",
   "XDG_STATE_HOME",
+  // Node/Bun：用系统证书库（Windows 根证书）。OpenCode 在 Win 上的
+  // "unknown certificate verification error" 常因 rustls 不读系统库。
+  "NODE_USE_SYSTEM_CA",
 ]);
 
 const PROVIDER_NETWORK_ENV_KEYS = new Set([
@@ -262,6 +265,12 @@ export function resolveCommand(command, env = process.env) {
       // in the first matching directory instead of jumping to a later desktop
       // executable that may proxy into a shared, long-lived host.
       for (const directory of directories) {
+        if (command.toLowerCase() === "opencode") {
+          // npm 的 opencode.ps1 只是跳板，真正的二进制在 node_modules/opencode-ai/bin。
+          // 走 powershell -File 会把内核和子进程放进同一 console 组，OpenCode 退出时
+          // 控制事件能 SIGINT 内核，桌面壳就会当成内核死亡而闪退。
+          candidates.push(join(directory, "node_modules", "opencode-ai", "bin", "opencode.exe"));
+        }
         if (command.toLowerCase() === "codex" && (existsSync(join(directory, "codex.ps1")) || existsSync(join(directory, "codex.cmd")))) {
           const packageArch = process.arch === "arm64" ? "arm64" : "x64";
           const target = packageArch === "arm64" ? "aarch64-pc-windows-msvc" : "x86_64-pc-windows-msvc";
@@ -371,6 +380,10 @@ export function childProcessEnv(overrides = {}, base = process.env, policy = {})
     // Overrides are explicit, but they still cannot smuggle a foreign/unknown
     // provider credential into a child or reintroduce control-plane state.
     if (value != null && (allowed.has(normalized) || allowedGitConfig)) env[key] = value;
+  }
+  if (provider === "opencode" && process.platform === "win32") {
+    const hasSystemCa = Object.keys(env).some((key) => envName(key) === "NODE_USE_SYSTEM_CA");
+    if (!hasSystemCa) env.NODE_USE_SYSTEM_CA = "1";
   }
   return env;
 }

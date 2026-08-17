@@ -8,6 +8,7 @@
 import { copyFile, mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { copyFileSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { homedir } from "node:os";
 import { basename, dirname, join, relative } from "node:path";
 import JSON5 from "json5";
@@ -1012,6 +1013,33 @@ export class ProviderStore {
 
   #queue;
 
+  #projectionQueues = new Map();
+
+  #projectionContext = new AsyncLocalStorage();
+
+  #proxyTakeoverRevisions = appMap(() => 0);
+
+  #withProjectionLock(app, task, { queueIfHeld = false } = {}) {
+    const heldApps = this.#projectionContext.getStore();
+    if (heldApps?.has(app) && !queueIfHeld) {
+      fail(`provider projection for ${app} cannot re-enter the same app`, "PROJECTION_REENTRANT");
+    }
+    const previous = this.#projectionQueues.get(app) ?? Promise.resolve();
+    let release;
+    const gate = new Promise((resolveGate) => { release = resolveGate; });
+    const queued = previous.catch(() => {}).then(() => gate);
+    this.#projectionQueues.set(app, queued);
+    return this.#projectionContext.run(new Set([...(heldApps ?? []), app]), async () => {
+      await previous.catch(() => {});
+      try {
+        return await task();
+      } finally {
+        release();
+        if (this.#projectionQueues.get(app) === queued) this.#projectionQueues.delete(app);
+      }
+    });
+  }
+
   /** 配置预览干跑：非 null 时所有写盘助手改为收集「目标路径 → 最终内容」，不落盘不备份。 */
   #dryRunFiles = null;
 
@@ -1920,6 +1948,16 @@ export class ProviderStore {
       if (!Object.prototype.hasOwnProperty.call(input, "meta")) merged.meta = undefined;
       const fields = this.#validate(merged, { existing });
       const next = { ...existing, ...fields, updatedAt: new Date().toISOString() };
+      const disabledActiveApps = PROVIDER_APPS.filter((app) =>
+        existing.apps?.[app] === true
+        && next.apps?.[app] !== true
+        && this.current[app] === id);
+      if (disabledActiveApps.length) {
+        fail(
+          `provider is active for ${disabledActiveApps.map((app) => APP_LABELS[app]).join(", ")}; switch those apps before disabling them`,
+          "PROVIDER_ACTIVE",
+        );
+      }
       if (typeof this.referencesForProvider === "function") {
         const references = await this.#references(id, "update");
         const incompatible = references.filter((reference) => reference?.providerApp && next.apps?.[reference.providerApp] !== true);
@@ -3149,7 +3187,13 @@ export class ProviderStore {
       // 缺省 AI SDK 适配器与模型表——没有 npm 的自定义供应商 opencode 根本加载不了
       if (!settings.npm) settings.npm = OPENCODE_NPM_BY_FORMAT[provider.meta?.apiFormat] ?? "@ai-sdk/openai-compatible";
       const model = provider.models?.opencode?.model || "";
-      if (model && !Object.keys(isPlainObject(settings.models) ? settings.models : {}).length) settings.models = { [model]: { name: model } };
+      if (!isPlainObject(settings.models)) settings.models = {};
+      const existingModels = isPlainObject(data.provider?.[providerKey]?.models)
+        ? data.provider[providerKey].models
+        : {};
+      settings.models = { ...existingModels, ...settings.models };
+      // 顶层 model 指针必须能在模型表里找到——只改指针、表里还是另一档，headless `opencode run` 会打空
+      if (model && !settings.models[model]) settings.models[model] = { name: model };
       data.provider[providerKey] = settings;
       // 顶层 model 指针：没有它 CLI 仍停在默认/上次供应商——「启用了但没生效」的根因
       if (model) data.model = `${providerKey}/${model}`;
@@ -3222,6 +3266,10 @@ export class ProviderStore {
   /** 切到应用内置官方登录：Grok 写回空 config.toml，current 指针清空。 */
   switchToOfficial(app) {
     if (app !== "grokbuild") fail("official login switch is only supported for Grok Build", "VALIDATION_FAILED");
+    return this.#withProjectionLock(app, () => this.#switchToOfficialSerialized(app));
+  }
+
+  #switchToOfficialSerialized(app) {
     return this.#serialize(async () => {
       const candidate = this.#snapshotState();
       candidate.current[app] = null;
@@ -3260,7 +3308,11 @@ export class ProviderStore {
   /** 一键切换：投影 → 备份 → 原子写 → current 指针落盘 → 审计事件。 */
   switchTo(app, providerId) {
     if (!PROVIDER_APPS.includes(app)) fail(`unknown app: ${app}`, "VALIDATION_FAILED");
-    if (providerId === OFFICIAL_PROVIDER_SWITCH_ID) return this.switchToOfficial(app);
+    return this.#withProjectionLock(app, () => this.#switchToSerialized(app, providerId));
+  }
+
+  #switchToSerialized(app, providerId) {
+    if (providerId === OFFICIAL_PROVIDER_SWITCH_ID) return this.#switchToOfficialSerialized(app);
     return this.#serialize(async () => {
       const provider = this.get(providerId);
       if (!provider.apps[app]) fail(`provider "${provider.name}" is not enabled for ${APP_LABELS[app]}`, "VALIDATION_FAILED");
@@ -3299,6 +3351,23 @@ export class ProviderStore {
         this.#publishPlan = previousPlan;
         this.#backupContext = previousBackupContext;
       }
+    });
+  }
+
+  withProviderProjection(app, providerIdOrResolver, operation) {
+    if (!PROVIDER_APPS.includes(app)) fail(`unknown app: ${app}`, "VALIDATION_FAILED");
+    if (typeof operation !== "function") fail("provider projection operation must be a function", "VALIDATION_FAILED");
+    return this.#withProjectionLock(app, async () => {
+      const providerId = typeof providerIdOrResolver === "function"
+        ? await providerIdOrResolver()
+        : providerIdOrResolver;
+      if (providerId !== null && providerId !== undefined) {
+        if (typeof providerId !== "string" || !providerId) {
+          fail("provider projection resolver must return a provider id or null", "VALIDATION_FAILED");
+        }
+        if (this.current?.[app] !== providerId) await this.#switchToSerialized(app, providerId);
+      }
+      return operation(providerId ?? null);
     });
   }
 
@@ -3384,12 +3453,13 @@ export class ProviderStore {
     deadline = Infinity,
     sidecarWrites = [],
     onCommitted = null,
+    queueIfProjectionHeld = false,
   } = {}) {
     if (!PROVIDER_APPS.includes(app)) fail(`unknown app: ${app}`, "VALIDATION_FAILED");
     if (sidecarWrites?.length && !signal) fail("sidecar writes require an AbortSignal", "VALIDATION_FAILED");
     if (onCommitted !== null && typeof onCommitted !== "function") fail("onCommitted must be a function", "VALIDATION_FAILED");
     if (onCommitted && !signal) fail("onCommitted requires an AbortSignal", "VALIDATION_FAILED");
-    return this.#serialize(async () => {
+    return this.#withProjectionLock(app, () => this.#serialize(async () => {
       this.#assertPublishable(signal);
       const currentId = this.current[app];
       if (!currentId) fail(`no current provider for ${APP_LABELS[app]}`, "VALIDATION_FAILED");
@@ -3410,6 +3480,9 @@ export class ProviderStore {
         const commitRuntime = () => {
           if (enabled) this.proxyRuntime.takeover.add(app);
           else this.proxyRuntime.takeover.delete(app);
+          if (previousTakeover !== Boolean(enabled)) {
+            this.#proxyTakeoverRevisions[app] += 1;
+          }
           onCommitted?.({
             app,
             enabled: Boolean(enabled),
@@ -3448,18 +3521,45 @@ export class ProviderStore {
         this.#publishDeadline = previousDeadline;
         this.#publishPlan = previousPlan;
       }
-    });
+    }), { queueIfHeld: queueIfProjectionHeld });
   }
 
-  markProxyCurrent(app, providerId) {
+  markProxyCurrent(app, providerId, { proxyObserved = false } = {}) {
     if (!PROVIDER_APPS.includes(app)) fail(`unknown app: ${app}`, "VALIDATION_FAILED");
-    return this.#serialize(async () => {
+    const observedTakeoverRevision = this.#proxyTakeoverRevisions[app];
+    const persistCurrent = ({ requireSameTakeover = false } = {}) => this.#serialize(async () => {
+      if (
+        requireSameTakeover
+        && (
+          !this.proxyRuntime.takeover.has(app)
+          || this.#proxyTakeoverRevisions[app] !== observedTakeoverRevision
+        )
+      ) {
+        return { app, providerId, ignored: true, reason: "takeover-changed" };
+      }
       const provider = this.get(providerId);
       if (!provider.apps?.[app]) fail(`provider "${provider.name}" is not enabled for ${APP_LABELS[app]}`, "VALIDATION_FAILED");
       const candidate = this.#snapshotState();
       candidate.current[app] = providerId;
       await this.#commitState(candidate);
       return { app, providerId };
+    });
+    // Proxy takeover keeps the live CLI pinned to the local proxy endpoint. Its own successful
+    // request may therefore update only the upstream pointer without waiting behind the operation
+    // that issued that request. The takeover revision makes this conditional write stale if a
+    // queued close/restore wins first, so current can never move away from the live direct config.
+    // External callers still queue behind the app projection lock.
+    if (proxyObserved && this.proxyRuntime.takeover.has(app)) {
+      return persistCurrent({ requireSameTakeover: true });
+    }
+    return this.#withProjectionLock(app, async () => {
+      // takeover 关闭时 current 与 live CLI 配置必须保持同一事实；只改指针会让下一次
+      // execution projection 误以为已经切到 providerId，实际请求却仍发往旧 Provider。
+      if (!this.proxyRuntime.takeover.has(app)) {
+        await this.#switchToSerialized(app, providerId);
+        return { app, providerId };
+      }
+      return persistCurrent();
     });
   }
 

@@ -11,6 +11,34 @@ import { randomUUID } from "node:crypto";
 import { runProcess } from "../process-runner.mjs";
 import { createBoundedTaskTracker, createLfCollector } from "./stream-utils.mjs";
 
+export function extractOpencodeEventError(event) {
+  if (!event || typeof event !== "object") return "";
+  const err = event.error;
+  if (typeof err === "string" && err.trim()) return err.trim();
+  if (!err || typeof err !== "object") return "";
+  const data = err.data;
+  if (typeof data === "string" && data.trim()) return data.trim();
+  if (data && typeof data === "object" && typeof data.message === "string" && data.message.trim()) {
+    return data.message.trim();
+  }
+  if (typeof err.message === "string" && err.message.trim()) return err.message.trim();
+  if (typeof err.name === "string" && err.name.trim()) return err.name.trim();
+  return "";
+}
+
+export function formatOpencodeExitError({ code, stderr = "", sessionId = null, eventError = "" } = {}) {
+  const details = [...new Set([String(eventError || "").trim(), String(stderr || "").trim()].filter(Boolean))];
+  const detail = details.join(" — ");
+  if (detail) {
+    return sessionId
+      ? `opencode exited ${code} (session ${sessionId}): ${detail}`
+      : `opencode exited ${code}: ${detail}`;
+  }
+  return sessionId
+    ? `opencode exited ${code} after opening session ${sessionId}`
+    : `opencode exited ${code} without a session id`;
+}
+
 export function buildOpencodeArgs({ prompt, sessionId = null, model = null, effort = null, permissionMode = "read-only" }) {
   const args = ["run", "--format", "json"];
   if (permissionMode === "workspace-write") args.push("--auto");
@@ -44,10 +72,13 @@ export class OpencodeCliAdapter {
     const args = buildOpencodeArgs({ prompt, sessionId, model: model || this.model, effort, permissionMode });
     let resolvedSessionId = sessionId || null;
     const textParts = [];
+    const eventErrors = [];
     const pendingTasks = createBoundedTaskTracker();
     const collector = createLfCollector(
       (event) => {
         if (!event || typeof event !== "object") return;
+        const eventError = extractOpencodeEventError(event);
+        if (eventError && !eventErrors.includes(eventError)) eventErrors.push(eventError);
         if (typeof event.sessionID === "string" && event.sessionID && event.sessionID !== resolvedSessionId) {
           resolvedSessionId = event.sessionID;
           pendingTasks.run(() => onSessionStarted?.({ sessionId: resolvedSessionId, protocol: "opencode-run-json" }));
@@ -106,9 +137,16 @@ export class OpencodeCliAdapter {
       throw error;
     }
     if (result.code !== 0 || !resolvedSessionId) {
-      let message = result.stderr.trim() || `opencode exited ${result.code} without a session id`;
+      let message = formatOpencodeExitError({
+        code: result.code,
+        stderr: result.stderr,
+        sessionId: resolvedSessionId,
+        eventError: eventErrors.join(" — "),
+      });
       if (/api.?key|auth|unauthorized|401/i.test(message)) {
         message = `${message} — 检查供应商投影（~/.config/opencode/opencode.json）与密钥后重试。`;
+      } else if (/certificate verification/i.test(message)) {
+        message = `${message} — OpenCode/Bun 在 Windows 上默认不读系统证书库。514cc 已为子进程打开 NODE_USE_SYSTEM_CA；重启桌面壳后再试。不要关 TLS 校验。`;
       }
       const error = new Error(message);
       error.code = "OPENCODE_FAILED";

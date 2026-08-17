@@ -93,6 +93,41 @@ test("MCP 统一管理：JSON/TOML/YAML live 配置保留用户字段并可关�
   await domain.toggleMcp("filesystem", "kimi", false);
   const kimiDisabled = JSON.parse(await readFile(join(runtimeHome, ".kimi-code", "mcp.json"), "utf8"));
   assert.equal(kimiDisabled.mcpServers.filesystem, undefined);
+
+  await domain.upsertMcp({
+    id: "remote-docs",
+    name: "Remote Docs",
+    config: {
+      type: "http",
+      url: "https://mcp.example.com/mcp",
+      headers: { Authorization: "Bearer secret-token", "X-Trace": "ok" },
+      env: { MCP_BEARER_TOKEN: "secret-token" },
+    },
+    apps: { claude: true },
+  });
+  const httpClaude = JSON.parse(await readFile(join(runtimeHome, ".claude.json"), "utf8"));
+  assert.equal(httpClaude.mcpServers["remote-docs"].type, "http");
+  assert.equal(httpClaude.mcpServers["remote-docs"].url, "https://mcp.example.com/mcp");
+  assert.equal(httpClaude.mcpServers["remote-docs"].headers.Authorization, "Bearer secret-token");
+  assert.equal(httpClaude.mcpServers["remote-docs"].headers["X-Trace"], "ok");
+
+  await domain.upsertMcp({
+    id: "local-cwd",
+    name: "Local Cwd",
+    config: {
+      type: "stdio",
+      command: "node",
+      args: ["server.mjs"],
+      cwd: "C:/work/mcp",
+      envPassthrough: ["PATH", "HOME"],
+    },
+    apps: { claude: true, codex: true },
+  });
+  const cwdClaude = JSON.parse(await readFile(join(runtimeHome, ".claude.json"), "utf8"));
+  assert.equal(cwdClaude.mcpServers["local-cwd"].cwd, "C:/work/mcp");
+  assert.deepEqual(cwdClaude.mcpServers["local-cwd"].envPassthrough, ["PATH", "HOME"]);
+  const cwdCodex = await readFile(join(runtimeHome, ".codex", "config.toml"), "utf8");
+  assert.match(cwdCodex, /cwd = "C:\/work\/mcp"/);
 });
 
 test("Skill 管理：规范存储、跨应用物化和禁用备份", async (t) => {

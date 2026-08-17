@@ -3023,3 +3023,219 @@ critical 源无确认 403 fail-closed、无 Bearer 401、坏 JSON/2MB/并发写�
   下次正常启动后进入运行态。
 
 __DELTA__: 烛(Codex) | 1 | 证据：独立 reviewer 发现旧 run roster 能力子集仍进入 provider prompt；当前由 `apps/control-center/src/orchestrator.mjs:119`、`:147` 补齐内存迁移、磁盘回写与续聊回归并获 APPROVED。
+
+### D-2026-08-15-003 · 协作台会话状态机：HTTP 不堵死、停止真停、中断不复活
+
+- **date**: 2026-08-15
+- **decider**: LO（继续深度完善协作台，仔细审查协作台逻辑）
+- **verdict**: 已落地；待重启现有 Control Center 后验收
+- **adopted**: true
+- **source_handoff**: `.ai-shared/handoff/claude-selfreview__collab-turn-state-machine__20260815-2048.md`
+- **tags**: control-center, orchestrator, continue, interrupt, approval, social, composer
+
+#### 决定
+
+1. 空闲续聊的 HTTP `/messages` 只等准入落盘，不等整轮 provider。`waitForTurn` 由服务端强制 `false`，客户端不能把同步等待塞回来。进程内测试默认仍等整轮。
+2. 审批挂起时停止 = 撤回尚未开始的执行：先翻 `interrupted`/`withdrawn`，再 `denyRun`。批准与撤回抢同一把 `withRunTransition`；`execute()` 拒绝 `interrupted`/`withdrawn`。迟到的 accept 不得把已撤回的 run 拉回 running。
+3. 停止当前回复时丢弃该次 `resumeClaim`，避免下一句先答新消息再重派旧 work。`pendingAsk` / 其余 queue / `pendingSteer` 保留。
+4. 确认放弃的 `recoveryNote` 必须留下（即使步数不可退）；中断粘性注记随新一轮准入清掉。
+5. 发送/停止键只停「等模型 / 审批中 / 在跑」，不停「等你回答」。续聊 toast 不再伪报完成。新任务与旧会话草稿分柜。
+
+#### 验证
+
+- 编排器新回归：HTTP 早返回、撤回审批、迟到批准不能复活、interrupt 丢 claim — 通过。
+- social 定向：promotion 并发失败保 steer、cancel vs continue、abandoned 注记 — `3/3`。
+- UI 契约 `12/12`。
+- 烛独立评审 `__DELTA__=1`，致命项（Approve∥Stop）已按建议收口。
+
+#### 边界
+
+- 未重启现有 Control Center；LO 需重启后才能感到服务端状态机变化。
+- 未 commit / 未 push。
+
+### D-2026-08-15-004 · MCP 向导以完整 JSON 为提交真源；Skill 列表对齐管理面
+
+- **date**: 2026-08-15
+- **decider**: LO（mcp配置参考图，最好有直接完整 JSON 配置面；skill管理也可以参考图）
+- **verdict**: 已落地；测试 44/44
+- **adopted**: true
+- **tags**: control-center, mcp, skills, wizard
+
+#### 决定
+
+1. 新建 MCP 双栏：左侧 STDIO / 流式 HTTP 表单，右侧完整 JSON 是提交真源。`env` / `headers` / `cwd` / `envPassthrough` 走 JSON，不另开 `cap-mcp-wizard-env` 表单。密钥键回读打码。
+2. 扫描卡片仍不展示 env/args（白名单只读面不变）。
+3. Skill 列表加「本地 · skills / .agents」标签、成员声明数 chips、「去市场发现」。仓库 / ZIP 不另造入口。
+4. `validateMcpConfig` 接受 `type` / `cwd` / `headers` / `envPassthrough`，投影进 live 配置。
+
+#### 验证
+
+- `config-topology-ui` + `capability-matrix-bulk` + `capabilities` + `ccswitch-domain`：44/44。
+- 未对真实 `~/.claude.json` / 514cc 仓库提交向导。
+
+### D-2026-08-15-005 · 市场真安装 + MCP 投影到全部 CLI
+
+- **date**: 2026-08-15
+- **decider**: LO（先完善市场，其次 MCP 为什么只能投影到 Claude Code / Codex）
+- **verdict**: 已落地；待刷新 Control Center
+- **adopted**: true
+- **tags**: control-center, market, mcp
+
+#### 决定
+
+1. MCP 向导投影网格覆盖后端已能物化的全部应用（Claude Code / Desktop / Codex / Gemini / Grok Build / Kimi / OpenCode / OpenClaw / Hermes）。不是能力只有两家，是向导漏画了。
+2. 市场 MCP 确认安装调用 `upsertMcp` 写入 live 配置；目录没给 command/url 就拒绝，不再只写台账假装装好了。
+3. 市场 Skills：GitHub 仓库添加/扫描/卡片安装；装完写入当前项目 `.agents/skills` 并按勾选投影 CLI。skills.sh 公开 API 实测 401，不假装有目录。
+
+#### 验证
+
+- 见本轮 `market` + `config-topology-ui` 测试。
+
+### D-2026-08-15-006 · 桌面侧栏钉成常驻带标签列
+
+- **date**: 2026-08-15
+- **decider**: LO（继续完善优化左侧栏界面和布局）
+- **verdict**: 已落地
+- **adopted**: true
+- **tags**: control-center, chrome, sidebar
+
+#### 决定
+
+1. ≥821px 把分组侧栏钉回 `app-shell` 栅格（220px），汉堡与顶栏镜像 nav 让位。窄屏仍走抽屉 + 底栏。
+2. 选中态回到浅铜底 + 铜字/铜标；品牌标是暖瓷贴铜焰，不再被 Codex 层改成灰底。
+3. 桌面侧栏不再 `inert` / `aria-hidden`。抽屉分层只在 `max-width: 820px` 生效。
+
+#### 验证
+
+- `sidebar-nav-ui` 契约测试；桌面 qa-ui 断言侧栏是可见列。
+
+### D-2026-08-15-007 · 主界面不钉左栏；头像进设置后才出现配置侧栏
+
+- **date**: 2026-08-15
+- **decider**: LO（三处 API 已连接取一处；左边栏不要固定；左下角头像点进设置后再有配置侧栏）
+- **verdict**: 已落地
+- **adopted**: true
+- **tags**: control-center, chrome, settings
+
+#### 决定
+
+1. 「API 已连接」只留顶栏 `#api-connection-badge`。侧栏脚和底栏连接文案撤掉。
+2. 主导航恢复为汉堡抽屉，不再钉 220px 列。系统三项（配置图谱 / 模型路由 / 安全诊断）移出主抽屉。
+3. 左下角 `#account-dock` 头像进入设置；设置态 `app-shell.is-settings` 才展开 `#settings-rail`。头像更换改在设置侧栏顶部。
+
+#### 验证
+
+- `sidebar-nav-ui` + `team-workspace-ui` 契约。
+
+### D-2026-08-16-001 · 协作台不放左侧入口；设置侧栏承接全部导航
+
+- **date**: 2026-08-16
+- **decider**: LO（协作台不需要左侧栏入口，所有入口放设置，设置里加返回协作台）
+- **verdict**: 已落地
+- **adopted**: true
+- **tags**: control-center, chrome, settings
+
+#### 决定
+
+1. 协作台隐藏汉堡、旧抽屉和底栏导航。只留左下角头像进入设置。
+2. 离开协作台后展开设置侧栏，收纳原主导航全部分组 + 配置/路由/安全。
+3. 设置侧栏顶部固定「返回协作台」。
+
+#### 验证
+
+- `sidebar-nav-ui` 契约。
+
+
+### D-2026-08-16-002 · 自动化管理对话框编辑体验完善
+
+- **date**: 2026-08-16
+- **decider**: LO（「继续完善自动化界面如图所示」）
+- **verdict**: 已落地
+- **adopted**: true
+- **tags**: control-center, automations-ui, dialog
+
+#### 决定
+
+1. 对话框新增状态条：启停 chip、计划标签、权限、上次运行时间、上次失败摘要、只读提示。
+2. 计划输入升级：预设 chips（manual / every:30m / every:6h / every:1d）+ `automationScheduleIssue` 内联校验（非法格式红字 + `aria-invalid` + 禁用保存），保存前二次校验。
+3. 脏状态跟踪：修改后「保存修改 *」高亮；关闭（含 Esc `cancel` 事件）与切换下拉时经 `confirmAction` 守卫，拒绝则回退下拉不打断编辑。
+4. 对话框内新增「启用/停用」按钮（复用 PATCH enabled 链路）。
+5. 运行历史失败行（status 含 error/fail）标红边 + 失败点。
+
+#### 验证
+
+- `node --check public/app.js` 通过；`node --test tests/automations.test.mjs tests/mission-control-ui-contract.test.mjs` 22/22。
+- 隔离实例（独立 dataRoot + token）浏览器实测：预设填入、脏标记、非法计划禁保存、保存落库回读（every:30m → 状态条更新）、未保存关闭守卫、放弃后关闭，全通过；QA 数据已还原并清理。
+
+#### 边界
+
+- 截图视觉通道本会话不可用（图片解析限流/失败），本轮基于真实 DOM 走查而非像素比对；若 LO 图中有布局级要求，下一轮补视觉走查。
+- 未新增后端接口；对话框内「新建自动化」未做（仍走 composer 快照入口）。
+
+### D-2026-08-17-001 · Control Center 全面审查与五项逻辑补强
+
+- **date**: 2026-08-17
+- **decider**: LO（「首先做一次全面的代码审查并完善，从逻辑上拓展功能，进行一次产品的头脑风暴」）
+- **verdict**: 已补强，交付与运行态仍 partial
+- **adopted**: true
+- **source_handoff**: `.ai-shared/handoff/codex-to-claude__comprehensive-console-review__20260817-1645.md`
+- **tags**: control-center, deep-review, race, automation, market, aria, delivery
+
+#### 决定
+
+1. 热重载候选目录只有在成功发布或已完成 runtime swap 时提交；swap 前失败恢复旧 pending，防止团队目录卡在未激活代。
+2. 终端抽屉用 open generation 约束延迟 RAF；自动化写操作统一按 status/failClosed/degraded/unavailable fail-closed，并以 action key 防重复请求。
+3. 市场刷新与 MCP 搜索使用 latest-wins generation；右栏工具 tab/panel 补完整 ARIA 关联和键盘循环导航。
+4. 产品下一优先级是交付证据闸门、源代码—运行时—进程—证据四面板和协作运行回放中心；成本展示必须尊重 adapter `costUsd` 证据边界。
+
+#### 验证
+
+- 定向 UI/契约组：`28/28 pass`。
+- runtime reload：`3/3 pass`。
+- 全量 Control Center：`1399 pass / 1 skipped / 0 fail`，退出码 `0`。
+- `npm run validate`：13 项 `valid: true`。
+
+#### 边界
+
+- `git status --short --untracked-files=all` 仍显示大量未跟踪源码/测试；本地绿灯不等于可提交交付。
+- 未重启现有 Control Center，未执行真实 provider、Grok 付费图片或远端运行；关闭链全阶段可重试性仍是结构风险。
+
+__DELTA__: 烛(Codex) | 1 | 证据：`src/app.mjs:443-448`、`public/market-panel.js:138-168`、`public/rail-tools.js:120-239` 将独立审查发现转为可回读修复与回归契约。
+
+### D-2026-08-18-001 · CCB 消息收发局按本地 BusStore 薄适配，并收紧身份、完整性与前端所有权
+
+- **date**: 2026-08-18
+- **decider**: LO（继续并参考 `SeemSeam/claude_codex_bridge` 深度完善协作台）
+- **verdict**: 功能与隔离浏览器验收已通过；正式运行态和 Git 交付仍 partial
+- **adopted**: true
+- **source_handoff**: `.ai-shared/handoff/codex-to-claude__ccb-message-bureau__20260818-0058.md`
+- **tags**: control-center, collaboration-inbox, ccb, bus, ask-answer, browser-qa, csp
+
+#### 决定
+
+1. 迁移 CCB 的 Message Bureau / mailbox / diagnose 思想，不复制其 tmux、daemon、pane 或 mobile gateway。514cc 继续以 BusStore、Orchestrator、Mission Control 和 team/run 身份链为真源。
+2. Ask 的已回答身份必须是 `runId + askId`；BusStore 的消息 ID 只保证单 run 唯一，禁止跨 run 用裸 ask id 关闭问题。
+3. Inbox 读取超过 32 个 run 时必须将整体标为 `partial`，不能只给 `runsTruncated=true` 却仍报告 `ok`。
+4. 团队协作刷新使用 AbortController + generation 双所有权；状态标签完整覆盖 loading/error/empty/partial/success。Inbox 打开任务时，若全局 run 缓存陈旧，先刷新 `/api/runs`，仍不存在则显式告知。
+5. 浏览器验收发现的强调色内联 style 迁入 CSS，保持 CSP `style-src 'self'`；隔离实例的能力门 501 仍按既有 QA 契约视为预期降级。
+6. 下一优先级：项目稳定锚点 + Bridge Doctor 四面诊断；随后是协作运行回放/恢复中心；可写 Inbox answer/ACK 需独立 CAS 与审计设计后再开放。
+
+#### 外部证据
+
+- CCB `main` 当前核验 HEAD：`7caed80170f09eb949d3290df7134af8793e2df5`（2026-08-17，`docs: record v8.6.9 publication`）。公开 README/release notes 支持 `.ccb` 项目锚点、`/ask`、共享记忆、mailbox/job、`ccb-diagnose` 和有界 shutdown 方向。
+- GitHub Web UI、提交页与 DeepWiki 返回 200；GitHub REST 首请求超时、raw README 返回 429，未完成 `ccb.py` 源码级核验，因此只采用公开契约，不声称复刻内部状态机。
+
+#### 验证
+
+- 聚焦 Inbox/HTTP/Lucide：`12/12 pass`；补充侧栏/CSP 契约：`9/9 pass`。
+- 全量 Control Center：`1415 pass / 0 fail / 1 skipped`，退出码 0。
+- `npm run validate`：13 项全部 `valid: true`。
+- 隔离浏览器：桌面与移动视口、空态/成功态、故障恢复、stale run 跳转均通过；截图在 `apps/control-center/.qa-ccb-inbox/ccb-inbox-*.png`。
+
+#### 边界
+
+- `qa:delivery --strict` 因 55 个未跟踪源码/测试退出 1；未执行 git add/commit/push。
+- 未重启当前正式 Control Center；新源码尚未进入该运行实例。
+- 未执行付费 provider 推理；隔离 run 使用 `execute:false` 的 route-preview。
+
+__DELTA__: 烛(Codex) | 2 | 证据：`apps/control-center/src/collaboration-inbox.mjs:107` 推翻裸 askId 可跨 run 判定已回答的原实现；`apps/control-center/public/app.js:19923` 推翻 Inbox 按钮在 run 缓存陈旧时仍能可靠打开任务的原判断。

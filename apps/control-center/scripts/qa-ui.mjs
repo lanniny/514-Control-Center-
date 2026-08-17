@@ -38,41 +38,21 @@ async function openControlCenter(page) {
   if (captured) sharedAccessToken = captured; // 首页消费一次性 bootstrap；后续隔离 page 复用测试会话态
 }
 
-// 三套导航并存（顶栏/侧栏抽屉/底部 tab）。移动端必须走真实抽屉路径；
-// transform 移出视口的侧栏仍有 offsetParent，直接 DOM click 会让 QA 伪绿。
+// 协作台只留头像进设置；其余视图走设置侧栏。隐藏抽屉不能再当可点入口。
 async function clickView(page, view) {
-  const menuButton = page.locator("#mobile-menu-button");
-  if (await menuButton.isVisible()) {
-    await menuButton.click();
-    const drawerState = await page.locator("#sidebar").evaluate((sidebar) => ({
-      expanded: document.querySelector("#mobile-menu-button")?.getAttribute("aria-expanded"),
-      hidden: sidebar.getAttribute("aria-hidden"),
-      inert: sidebar.inert,
-      focusedInside: sidebar.contains(document.activeElement),
-      open: document.querySelector(".app-shell")?.classList.contains("nav-open"),
-    }));
-    if (!drawerState.open || drawerState.expanded !== "true" || drawerState.hidden !== "false" || drawerState.inert || !drawerState.focusedInside) {
-      throw new Error(`mobile navigation did not become operable: ${JSON.stringify(drawerState)}`);
-    }
-    const target = page.locator(`.sidebar [data-view="${view}"]`);
-    if (!(await target.count())) throw new Error(`no drawer navigation button for view ${view}`);
-    await target.click();
-    const closedState = await page.locator("#sidebar").evaluate((sidebar) => ({
-      expanded: document.querySelector("#mobile-menu-button")?.getAttribute("aria-expanded"),
-      hidden: sidebar.getAttribute("aria-hidden"),
-      inert: sidebar.inert,
-      open: document.querySelector(".app-shell")?.classList.contains("nav-open"),
-    }));
-    if (closedState.open || closedState.expanded !== "false" || closedState.hidden !== "true" || !closedState.inert) {
-      throw new Error(`mobile navigation did not close accessibly: ${JSON.stringify(closedState)}`);
-    }
-    await page.waitForTimeout(200); // 等待 180ms 抽屉位移动画结束，避免截图记录过渡帧
+  if (view === "workbench") {
+    const back = page.locator('#settings-rail [data-view="workbench"]');
+    if (await back.isVisible()) await back.click();
     return;
   }
-
-  const target = page.locator(`.sidebar [data-view="${view}"]`);
-  if (!(await target.count())) throw new Error(`no desktop navigation button for view ${view}`);
-  await target.click();
+  const railTarget = page.locator(`.settings-rail [data-view="${view}"]`);
+  if (!(await railTarget.isVisible())) {
+    const dock = page.locator("#account-dock, #account-heading-chip").locator("visible=true").first();
+    if (!(await dock.count())) throw new Error(`no account dock to open settings for view ${view}`);
+    await dock.click();
+    await railTarget.waitFor({ state: "visible", timeout: 10_000 });
+  }
+  await railTarget.click();
 }
 
 function checkCleanDeepLink(errors, label, value, key) {
@@ -150,6 +130,23 @@ async function inspect(name, viewport) {
   });
   page.on("pageerror", (error) => errors.push(`pageerror: ${error.message}`));
   await openControlCenter(page);
+  if (viewport.width > 820) {
+    const workbenchChrome = await page.evaluate(() => {
+      const dock = document.getElementById("account-dock");
+      const hamburger = document.getElementById("mobile-menu-button");
+      const rail = document.getElementById("settings-rail");
+      return {
+        dockVisible: dock ? getComputedStyle(dock).display !== "none" : false,
+        hamburgerDisplay: hamburger ? getComputedStyle(hamburger).display : "missing",
+        railHidden: Boolean(rail?.hidden),
+      };
+    });
+    if (!workbenchChrome.dockVisible) errors.push("account dock was not visible on the workbench");
+    if (workbenchChrome.hamburgerDisplay !== "none") {
+      errors.push(`workbench still showed a left-nav entry: ${workbenchChrome.hamburgerDisplay}`);
+    }
+    if (!workbenchChrome.railHidden) errors.push("settings rail was visible on the workbench");
+  }
   await page.screenshot({ path: resolve(outputDir, `control-center-${name}-workbench.png`), fullPage: true });
   await page.locator("#theme-toggle").click();
   await page.waitForTimeout(180);
@@ -178,6 +175,19 @@ async function inspect(name, viewport) {
     approvalVisible: !document.querySelector("#approval-list")?.closest("[hidden]"),
   }));
   await page.screenshot({ path: resolve(outputDir, `control-center-${name}.png`), fullPage: true });
+  if (viewport.width > 820) {
+    const settingsChrome = await page.evaluate(() => {
+      const back = document.querySelector('#settings-rail [data-view="workbench"]');
+      const rail = document.getElementById("settings-rail");
+      return {
+        railHidden: Boolean(rail?.hidden),
+        backVisible: back ? getComputedStyle(back).display !== "none" : false,
+      };
+    });
+    if (settingsChrome.railHidden || !settingsChrome.backVisible) {
+      errors.push(`settings rail did not keep a return-to-workbench entry: ${JSON.stringify(settingsChrome)}`);
+    }
+  }
   if (layout.documentWidth > layout.viewport.width + 1 || layout.bodyWidth > layout.viewport.width + 1) {
     errors.push(`horizontal overflow: viewport=${layout.viewport.width}, document=${layout.documentWidth}, body=${layout.bodyWidth}`);
   }
@@ -396,39 +406,42 @@ async function inspectMissionControl(name, viewport) {
     await page.locator("#global-mc-toggle").click();
     await page.waitForSelector('#mission-control-dock[aria-hidden="false"]');
   }
-  // 左右抽屉可以并存，但 Escape 只 dismiss 最上层导航，不能顺带折叠底层 Mission Control。
-  await page.locator("#mobile-menu-button").click();
-  await page.waitForFunction(() => document.querySelector(".app-shell")?.classList.contains("nav-open"));
-  await page.keyboard.press("Escape");
-  const escapeLayerState = await page.evaluate(() => ({
-    navOpen: document.querySelector(".app-shell")?.classList.contains("nav-open") === true,
-    missionHidden: document.querySelector("#mission-control-dock")?.getAttribute("aria-hidden"),
-    missionInert: Boolean(document.querySelector("#mission-control-dock")?.inert),
-  }));
-  if (escapeLayerState.navOpen) errors.push("Escape did not close the top navigation drawer");
-  if (escapeLayerState.missionHidden !== "false" || escapeLayerState.missionInert) {
-    errors.push("Escape closed Mission Control together with the top navigation drawer");
-  }
-  await page.locator("#mobile-menu-button").click();
-  await page.keyboard.press("Control+K");
-  await page.waitForSelector(".cmd-palette-overlay.is-open");
-  await page.keyboard.press("Escape");
-  const paletteEscapeState = await page.evaluate(() => ({
-    paletteOpen: document.querySelector(".cmd-palette-overlay")?.classList.contains("is-open") === true,
-    navOpen: document.querySelector(".app-shell")?.classList.contains("nav-open") === true,
-    missionHidden: document.querySelector("#mission-control-dock")?.getAttribute("aria-hidden"),
-  }));
-  if (paletteEscapeState.paletteOpen) errors.push("Escape did not close the top command palette");
-  if (!paletteEscapeState.navOpen || paletteEscapeState.missionHidden !== "false") {
-    errors.push("command palette Escape leaked into a lower drawer layer");
-  }
-  await page.keyboard.press("Escape");
-  const postPaletteNavState = await page.evaluate(() => ({
-    navOpen: document.querySelector(".app-shell")?.classList.contains("nav-open") === true,
-    missionHidden: document.querySelector("#mission-control-dock")?.getAttribute("aria-hidden"),
-  }));
-  if (postPaletteNavState.navOpen || postPaletteNavState.missionHidden !== "false") {
-    errors.push("second Escape did not close only the navigation drawer");
+  // 窄屏：左右抽屉可以并存，但 Escape 只 dismiss 最上层导航，不能顺带折叠底层 Mission Control。
+  // 桌面侧栏已钉成常驻列，汉堡隐藏，这组抽屉分层只在汉堡可见时跑。
+  if (await page.locator("#mobile-menu-button").isVisible()) {
+    await page.locator("#mobile-menu-button").click();
+    await page.waitForFunction(() => document.querySelector(".app-shell")?.classList.contains("nav-open"));
+    await page.keyboard.press("Escape");
+    const escapeLayerState = await page.evaluate(() => ({
+      navOpen: document.querySelector(".app-shell")?.classList.contains("nav-open") === true,
+      missionHidden: document.querySelector("#mission-control-dock")?.getAttribute("aria-hidden"),
+      missionInert: Boolean(document.querySelector("#mission-control-dock")?.inert),
+    }));
+    if (escapeLayerState.navOpen) errors.push("Escape did not close the top navigation drawer");
+    if (escapeLayerState.missionHidden !== "false" || escapeLayerState.missionInert) {
+      errors.push("Escape closed Mission Control together with the top navigation drawer");
+    }
+    await page.locator("#mobile-menu-button").click();
+    await page.keyboard.press("Control+K");
+    await page.waitForSelector(".cmd-palette-overlay.is-open");
+    await page.keyboard.press("Escape");
+    const paletteEscapeState = await page.evaluate(() => ({
+      paletteOpen: document.querySelector(".cmd-palette-overlay")?.classList.contains("is-open") === true,
+      navOpen: document.querySelector(".app-shell")?.classList.contains("nav-open") === true,
+      missionHidden: document.querySelector("#mission-control-dock")?.getAttribute("aria-hidden"),
+    }));
+    if (paletteEscapeState.paletteOpen) errors.push("Escape did not close the top command palette");
+    if (!paletteEscapeState.navOpen || paletteEscapeState.missionHidden !== "false") {
+      errors.push("command palette Escape leaked into a lower drawer layer");
+    }
+    await page.keyboard.press("Escape");
+    const postPaletteNavState = await page.evaluate(() => ({
+      navOpen: document.querySelector(".app-shell")?.classList.contains("nav-open") === true,
+      missionHidden: document.querySelector("#mission-control-dock")?.getAttribute("aria-hidden"),
+    }));
+    if (postPaletteNavState.navOpen || postPaletteNavState.missionHidden !== "false") {
+      errors.push("second Escape did not close only the navigation drawer");
+    }
   }
   const currentRun = page.locator(`.run-rail-list [data-run-select=${JSON.stringify(currentRunId)}]`).first();
   await currentRun.waitFor({ state: "visible", timeout: 20_000 });
@@ -3041,15 +3054,15 @@ async function inspectAutomationDegradedState(name, viewport) {
           message: "qa corrupt store",
         },
       },
-      expectedWriteActions: 3,
-      expectedInspectActions: 1,
+      expectedWriteActions: 2,
+      expectedInspectActions: 2,
       expectedText: "原文件已保留",
     },
     {
       id: "unavailable",
       status: 503,
       body: { error: { code: "AUTOMATION_STORE_UNREADABLE", message: "qa unavailable store" } },
-      expectedWriteActions: 0,
+      expectedWriteActions: 1,
       expectedInspectActions: 0,
       expectedText: "状态不可用",
     },
@@ -3062,13 +3075,14 @@ async function inspectAutomationDegradedState(name, viewport) {
       route.fulfill({ status: scenario.status, contentType: "application/json", body: JSON.stringify(scenario.body) }),
     );
     await openControlCenter(page);
+    await page.locator("#rail-automations-row").click();
     const snapshot = await page.evaluate(() => {
-      const rail = document.querySelector("#rail-automations");
-      const writeActions = [...document.querySelectorAll("#automations-list [data-automation-run], #automations-list [data-automation-toggle], #automations-list [data-automation-remove]")];
-      const inspectActions = [...document.querySelectorAll("#automations-list [data-automation-edit]")];
+      const pane = document.querySelector("#automations-workbench");
+      const writeActions = [...document.querySelectorAll("#automations-workbench [data-auto-run], #automations-workbench [data-auto-toggle], #automations-workbench [data-auto-action='create']")];
+      const inspectActions = [...document.querySelectorAll("#automations-workbench [data-auto-edit], #automations-workbench [data-auto-open]")];
       return {
-        hidden: rail?.hidden,
-        alertText: document.querySelector("#automations-list [role=alert]")?.textContent ?? "",
+        hidden: pane?.hidden,
+        alertText: document.querySelector("#automations-workbench [role=alert]")?.textContent ?? "",
         saveDisabled: document.querySelector("#save-automation-button")?.disabled,
         writeActionCount: writeActions.length,
         disabledWriteActions: writeActions.filter((button) => button.disabled).length,
@@ -3076,7 +3090,7 @@ async function inspectAutomationDegradedState(name, viewport) {
         disabledInspectActions: inspectActions.filter((button) => button.disabled).length,
       };
     });
-    if (snapshot.hidden) errors.push(`${scenario.id} automation rail was hidden`);
+    if (snapshot.hidden) errors.push(`${scenario.id} automation pane was hidden`);
     if (!snapshot.alertText.includes(scenario.expectedText)) errors.push(`${scenario.id} alert was not actionable: ${snapshot.alertText}`);
     if (!snapshot.saveDisabled) errors.push(`${scenario.id} save automation remained writable`);
     if (snapshot.writeActionCount !== scenario.expectedWriteActions || snapshot.disabledWriteActions !== snapshot.writeActionCount) {

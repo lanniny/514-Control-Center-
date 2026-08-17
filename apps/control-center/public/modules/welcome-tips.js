@@ -18,11 +18,12 @@ export function pickWelcomeTip(random = Math.random) {
   return WELCOME_TIPS[index] || WELCOME_TIPS[0];
 }
 
-export function welcomeTipMarkup({ iconHtml = "", random = Math.random } = {}) {
+export function welcomeTipMarkup({ iconHtml = "", random = Math.random, dismissible = false } = {}) {
   const tip = pickWelcomeTip(random);
   return `
     <div class="welcome-tip" role="note">
       <span class="welcome-tip-icon" aria-hidden="true">${iconHtml}</span>
       <p>${tip.html}</p>
+      ${dismissible ? '<button class="welcome-tip-dismiss" type="button" data-welcome-tip-dismiss aria-label="关闭提示" title="不再显示">×</button>' : ""}
     </div>`;
 }

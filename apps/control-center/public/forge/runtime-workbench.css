@@ -1,0 +1,467 @@
+/* forge/runtime-workbench.css — 本机/远端「运行与配置工作台」纸面仪表 */
+
+#view-config .ccswitch-workbench,
+.ccswitch-workbench {
+  margin: 18px 0 8px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl, 14px);
+  background:
+    linear-gradient(180deg, color-mix(in oklab, var(--primary) 7%, var(--card)) 0%, var(--card) 46%),
+    var(--card);
+  box-shadow: var(--shadow-sm);
+}
+
+#config-surface-local-runtime .ccswitch-workbench,
+#config-surface-remote .config-remote-workbench {
+  margin-top: 4px;
+}
+
+#view-config .ccswitch-workbench .ccs-heading,
+.ccswitch-workbench .ccs-heading {
+  align-items: flex-end;
+  margin-bottom: 14px;
+}
+
+#view-config .ccswitch-workbench .ccs-heading h2,
+.ccswitch-workbench .ccs-heading h2 {
+  color: var(--foreground);
+  font-size: 18px;
+  letter-spacing: -0.02em;
+}
+
+#view-config .ccswitch-workbench .ccs-heading-sub,
+.ccswitch-workbench .ccs-heading-sub {
+  margin: 4px 0 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+#view-config .ccswitch-workbench .ccs-tabs,
+#view-config .ccswitch-workbench .ccs-subtabs,
+.ccswitch-workbench .ccs-tabs,
+.ccswitch-workbench .ccs-subtabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--muted) 42%, transparent);
+}
+
+#view-config .ccswitch-workbench .ccs-tab,
+#view-config .ccswitch-workbench .ccs-subtabs button,
+.ccswitch-workbench .ccs-tab,
+.ccswitch-workbench .ccs-subtabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 11px;
+  border: 0;
+  border-right: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted-foreground);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+#view-config .ccswitch-workbench .ccs-tab.is-active,
+#view-config .ccswitch-workbench .ccs-subtabs button.is-active,
+.ccswitch-workbench .ccs-tab.is-active,
+.ccswitch-workbench .ccs-subtabs button.is-active {
+  background: var(--card);
+  color: var(--foreground);
+  box-shadow: var(--shadow-sm);
+}
+
+#view-config .ccswitch-workbench .ccs-tab-badge,
+#view-config .ccswitch-workbench .ccs-subtabs em,
+.ccswitch-workbench .ccs-tab-badge,
+.ccswitch-workbench .ccs-subtabs em {
+  display: inline-grid;
+  min-width: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--muted) 70%, transparent);
+  color: var(--muted-foreground);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 650;
+  line-height: 18px;
+}
+
+#view-config .ccswitch-workbench .ccs-tab-badge.is-ok,
+.ccswitch-workbench .ccs-tab-badge.is-ok {
+  background: color-mix(in oklab, var(--success) 16%, transparent);
+  color: var(--success);
+}
+
+#view-config .ccswitch-workbench .ccs-tab-badge.is-warn,
+.ccswitch-workbench .ccs-tab-badge.is-warn {
+  background: color-mix(in oklab, var(--warning) 18%, transparent);
+  color: var(--warning);
+}
+
+#view-config .ccswitch-workbench .ccs-tab-badge.is-error,
+.ccswitch-workbench .ccs-tab-badge.is-error {
+  background: color-mix(in oklab, var(--danger) 16%, transparent);
+  color: var(--danger);
+}
+
+#view-config .ccswitch-workbench .ccs-metrics,
+.ccswitch-workbench .ccs-metrics {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 0;
+  margin-bottom: 10px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--card) 88%, var(--muted));
+}
+
+#view-config .ccswitch-workbench .ccs-metrics > div,
+.ccswitch-workbench .ccs-metrics > div {
+  min-width: 0;
+  padding: 12px 14px;
+  border-right: 1px solid var(--border);
+}
+
+#view-config .ccswitch-workbench .ccs-metrics > div:last-child,
+.ccswitch-workbench .ccs-metrics > div:last-child {
+  border-right: 0;
+}
+
+#view-config .ccswitch-workbench .ccs-metrics span,
+.ccswitch-workbench .ccs-metrics span {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+#view-config .ccswitch-workbench .ccs-metrics strong,
+.ccswitch-workbench .ccs-metrics strong {
+  display: block;
+  overflow: hidden;
+  color: var(--foreground);
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#view-config .ccswitch-workbench .ccs-hint,
+.ccswitch-workbench .ccs-hint {
+  margin: 0 0 12px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+#view-config .ccswitch-workbench .ccs-section-label,
+.ccswitch-workbench .ccs-section-label {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 16px 0 8px;
+}
+
+#view-config .ccswitch-workbench .ccs-section-label strong,
+.ccswitch-workbench .ccs-section-label strong {
+  color: var(--foreground);
+  font-size: 13px;
+}
+
+#view-config .ccswitch-workbench .ccs-section-label span,
+.ccswitch-workbench .ccs-section-label span {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+#view-config .ccswitch-workbench .ccs-tool,
+.ccswitch-workbench .ccs-tool {
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--card) 92%, transparent);
+}
+
+#view-config .ccswitch-workbench .ccs-empty,
+.ccswitch-workbench .ccs-empty {
+  display: grid;
+  gap: 4px;
+  padding: 18px 8px;
+  color: var(--muted-foreground);
+  text-align: center;
+}
+
+#view-config .ccswitch-workbench .ccs-empty p,
+.ccswitch-workbench .ccs-empty p {
+  margin: 0;
+  color: var(--foreground);
+  font-size: 13px;
+}
+
+#view-config .ccswitch-workbench .ccs-empty small,
+.ccswitch-workbench .ccs-empty small {
+  font-size: 12px;
+}
+
+#view-config .ccswitch-workbench .ccs-takeover-grid,
+.ccswitch-workbench .ccs-takeover-grid {
+  display: grid;
+  gap: 8px;
+}
+
+#view-config .ccswitch-workbench .ccs-takeover,
+.ccswitch-workbench .ccs-takeover {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--muted) 28%, transparent);
+}
+
+#view-config .ccswitch-workbench .ccs-takeover.is-on,
+.ccswitch-workbench .ccs-takeover.is-on {
+  border-color: color-mix(in oklab, var(--primary) 35%, var(--border));
+  background: color-mix(in oklab, var(--primary) 8%, var(--card));
+}
+
+#view-config .ccswitch-workbench .ccs-takeover-face,
+#view-config .ccswitch-workbench .ccs-app-logo,
+.ccswitch-workbench .ccs-takeover-face,
+.ccswitch-workbench .ccs-app-logo {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--card);
+}
+
+#view-config .ccswitch-workbench .ccs-takeover-face svg,
+#view-config .ccswitch-workbench .ccs-app-logo,
+.ccswitch-workbench .ccs-takeover-face svg,
+.ccswitch-workbench .ccs-app-logo {
+  width: 16px;
+  height: 16px;
+}
+
+#view-config .ccswitch-workbench .ccs-takeover strong,
+.ccswitch-workbench .ccs-takeover strong {
+  display: block;
+  font-size: 13px;
+}
+
+#view-config .ccswitch-workbench .ccs-takeover small,
+.ccswitch-workbench .ccs-takeover small {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+#view-config .ccswitch-workbench .ccs-app-chip span,
+#view-config .ccswitch-workbench .ccs-mini-apps span,
+.ccswitch-workbench .ccs-app-chip span,
+.ccswitch-workbench .ccs-mini-apps span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  height: auto;
+  padding: 3px 7px;
+  border-radius: 999px;
+}
+
+#view-config .ccswitch-workbench .ccs-app-chip-logo,
+#view-config .ccswitch-workbench .ccs-mini-logo,
+#view-config .ccswitch-workbench .ccs-path-logo,
+.ccswitch-workbench .ccs-app-chip-logo,
+.ccswitch-workbench .ccs-mini-logo,
+.ccswitch-workbench .ccs-path-logo {
+  width: 12px;
+  height: 12px;
+}
+
+#view-config .ccswitch-workbench .ccs-mini-apps em,
+#view-config .ccswitch-workbench .ccs-app-chip em,
+.ccswitch-workbench .ccs-mini-apps em,
+.ccswitch-workbench .ccs-app-chip em {
+  font-style: normal;
+  font-size: 11px;
+}
+
+#view-config .ccswitch-workbench .ccs-path-grid label span,
+.ccswitch-workbench .ccs-path-grid label span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+#view-config .ccswitch-workbench .ccs-pulse,
+.ccswitch-workbench .ccs-pulse {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0 0 14px;
+  padding: 0;
+  list-style: none;
+}
+
+#view-config .ccswitch-workbench .ccs-pulse li,
+.ccswitch-workbench .ccs-pulse li {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--card);
+  font-size: 12px;
+}
+
+#view-config .ccswitch-workbench .ccs-pulse .is-ok strong { color: var(--success); }
+#view-config .ccswitch-workbench .ccs-pulse .is-warn strong { color: var(--warning); }
+#view-config .ccswitch-workbench .ccs-pulse .is-error strong { color: var(--danger); }
+
+#view-config .ccswitch-workbench .ccs-cli-card,
+.ccswitch-workbench .ccs-cli-card {
+  border-radius: 12px;
+  background: color-mix(in oklab, var(--card) 92%, transparent);
+}
+
+#view-config .ccswitch-workbench .ccs-account-title,
+#view-config .ccswitch-workbench .ccs-account-face,
+.ccswitch-workbench .ccs-account-title,
+.ccswitch-workbench .ccs-account-face {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+#view-config .ccswitch-workbench .ccs-account-logo,
+#view-config .ccswitch-workbench .ccs-account-avatar,
+.ccswitch-workbench .ccs-account-logo,
+.ccswitch-workbench .ccs-account-avatar {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+#view-config .ccswitch-workbench .ccs-model-pills,
+.ccswitch-workbench .ccs-model-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+#view-config .ccswitch-workbench .ccs-model-pills li,
+.ccswitch-workbench .ccs-model-pills li {
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--muted) 40%, transparent);
+  color: var(--foreground);
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 11px;
+}
+
+#view-config .ccswitch-workbench .ccs-quota,
+.ccswitch-workbench .ccs-quota {
+  display: grid;
+  gap: 6px;
+  margin: 10px 0 0;
+}
+
+#view-config .ccswitch-workbench .ccs-quota > div,
+.ccswitch-workbench .ccs-quota > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+
+#view-config .ccswitch-workbench .ccs-quota dt,
+.ccswitch-workbench .ccs-quota dt {
+  color: var(--muted-foreground);
+}
+
+#view-config .ccswitch-workbench .ccs-device-flow,
+.ccswitch-workbench .ccs-device-flow {
+  align-items: center;
+  margin-bottom: 12px;
+  padding: 10px;
+  border: 1px dashed color-mix(in oklab, var(--primary) 45%, var(--border));
+  border-radius: 10px;
+  background: color-mix(in oklab, var(--primary) 6%, transparent);
+}
+
+@media (max-width: 1100px) {
+  #view-config .ccswitch-workbench .ccs-metrics,
+  .ccswitch-workbench .ccs-metrics {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  #view-config .ccswitch-workbench .ccs-metrics > div:nth-child(3),
+  .ccswitch-workbench .ccs-metrics > div:nth-child(3) {
+    border-right: 0;
+  }
+
+  #view-config .ccswitch-workbench .ccs-metrics > div:nth-child(n+4),
+  .ccswitch-workbench .ccs-metrics > div:nth-child(n+4) {
+    border-top: 1px solid var(--border);
+  }
+}
+
+@media (max-width: 720px) {
+  #view-config .ccswitch-workbench,
+  .ccswitch-workbench {
+    padding: 12px;
+  }
+
+  #view-config .ccswitch-workbench .ccs-tabs,
+  #view-config .ccswitch-workbench .ccs-subtabs,
+  .ccswitch-workbench .ccs-tabs,
+  .ccswitch-workbench .ccs-subtabs {
+    border-radius: 12px;
+  }
+
+  #view-config .ccswitch-workbench .ccs-metrics,
+  .ccswitch-workbench .ccs-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  #view-config .ccswitch-workbench .ccs-metrics > div,
+  .ccswitch-workbench .ccs-metrics > div {
+    border-right: 1px solid var(--border);
+    border-top: 1px solid var(--border);
+  }
+
+  #view-config .ccswitch-workbench .ccs-metrics > div:nth-child(-n+2),
+  .ccswitch-workbench .ccs-metrics > div:nth-child(-n+2) {
+    border-top: 0;
+  }
+
+  #view-config .ccswitch-workbench .ccs-metrics > div:nth-child(2n),
+  .ccswitch-workbench .ccs-metrics > div:nth-child(2n) {
+    border-right: 0;
+  }
+}

@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -238,6 +239,50 @@ test("settled Grok upstream failure preserves its preassigned native session for
   assert.equal(resumed.status, "succeeded");
   assert.deepEqual(receivedSessionIds, [null, nativeSessionId]);
   assert.equal(resumed.turns.at(-1).sessionId, nativeSessionId);
+});
+
+test("native slash command turns reach the adapter raw and flagged (Codex /compact parity)", async (t) => {
+  const fx = await fixture();
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const created = await fx.orchestrator.create({ prompt: "start", execute: true, orchestrationMode: "pipeline", permissionMode: "plan" });
+  await waitTerminal(fx.orchestrator, created.id);
+
+  await fx.orchestrator.continue(created.id, { prompt: "/compact", agentId: "codex-technical", nativeCommand: true });
+  await waitTerminal(fx.orchestrator, created.id);
+  const nativeCall = fx.calls.at(-1);
+  assert.equal(nativeCall.prompt, "/compact", "raw command only — no attachment/declaration/persona wrapping");
+  assert.equal(nativeCall.nativeCommand, true, "adapter sees the native command flag");
+
+  // 对照：普通续聊不带标记（提示注入无法靠消息内容伪装命令轮）
+  await fx.orchestrator.continue(created.id, { prompt: "普通续聊 /compact 只是文本", agentId: "codex-technical" });
+  await waitTerminal(fx.orchestrator, created.id);
+  const normalCall = fx.calls.at(-1);
+  assert.equal(normalCall.nativeCommand, false);
+  assert.ok(normalCall.prompt.includes("普通续聊"), "normal turns keep full prompt assembly");
+});
+
+test("native command turns reject invalid shapes at admission", async (t) => {
+  const fx = await fixture();
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const created = await fx.orchestrator.create({ prompt: "start", execute: true, orchestrationMode: "pipeline", permissionMode: "plan" });
+  await waitTerminal(fx.orchestrator, created.id);
+
+  await assert.rejects(
+    () => fx.orchestrator.continue(created.id, { prompt: "not-a-slash-command", agentId: "codex-technical", nativeCommand: true }),
+    { code: "VALIDATION_FAILED" },
+  );
+  await assert.rejects(
+    () => fx.orchestrator.continue(created.id, { prompt: "/compact\n第二行走私", agentId: "codex-technical", nativeCommand: true }),
+    { code: "VALIDATION_FAILED" },
+  );
+  const notePath = join(fx.root, "note.txt");
+  await writeFile(notePath, "x", "utf8");
+  await assert.rejects(
+    () => fx.orchestrator.continue(created.id, { prompt: "/compact", agentId: "codex-technical", nativeCommand: true, sources: [notePath] }),
+    { code: "VALIDATION_FAILED" },
+  );
+  const runAfter = fx.orchestrator.get(created.id);
+  assert.equal(runAfter.status, "succeeded", "rejected admissions leave the run untouched");
 });
 
 test("unconfirmed Grok sessions never enter run.sessions and failed attempts settle", async (t) => {
@@ -845,6 +890,80 @@ test("heterogeneous resume hints stay provider-native", async (t) => {
   assert.notEqual(claude.command, codex.command);
 });
 
+test("interactiveCliSpecForRun returns a spawnable interactive resume spec", async (t) => {
+  const fx = await fixture();
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const run = await fx.orchestrator.create({ prompt: "handoff map", execute: false, cwd: fx.root });
+  run.sessions = { "claude-fable": "claude-sess-1", "kimi-frontend": "kimi-sess-9" };
+  fx.orchestrator.adapters.get("claude-fable").id = "claude-stream-json";
+  fx.orchestrator.adapters.get("claude-fable").command = "claude";
+  fx.orchestrator.adapters.get("codex-technical").id = "codex-app-server";
+
+  // 无指定成员：执行所有者（codex-technical）没有原生会话 → 回落到第一个有会话的成员
+  const ownerSpec = fx.orchestrator.interactiveCliSpecForRun(run);
+  assert.equal(ownerSpec.agentId, "claude-fable");
+  assert.equal(ownerSpec.command, "claude");
+  assert.deepEqual(ownerSpec.args, ["-r", "claude-sess-1"]);
+  assert.equal(ownerSpec.cwd, fx.root);
+  assert.equal(ownerSpec.protocol, "claude-stream-json");
+
+  // 显式指定成员：用该成员的原生会话
+  const claudeSpec = fx.orchestrator.interactiveCliSpecForRun(run, "claude-fable");
+  assert.equal(claudeSpec.agentId, "claude-fable");
+  assert.equal(claudeSpec.command, "claude");
+  assert.deepEqual(claudeSpec.args, ["-r", "claude-sess-1"]);
+
+  // OpenCode / Pi 席位同样有交互接续特征（TUI --session / --session-id，均经 --help 实证）
+  const shared = fx.orchestrator.adapters.get("codex-technical");
+  shared.id = "opencode-run-json";
+  shared.command = "opencode";
+  run.sessions = { "codex-technical": "ses_opencode_1" };
+  const opencodeSpec = fx.orchestrator.interactiveCliSpecForRun(run);
+  assert.equal(opencodeSpec.command, "opencode");
+  assert.deepEqual(opencodeSpec.args, ["--session", "ses_opencode_1"]);
+  shared.id = "pi-rpc";
+  shared.command = "pi";
+  run.sessions = { "codex-technical": "019f0000-0000-7000-8000-000000000000" };
+  const piSpec = fx.orchestrator.interactiveCliSpecForRun(run);
+  assert.equal(piSpec.command, "pi");
+  assert.deepEqual(piSpec.args, ["--session-id", "019f0000-0000-7000-8000-000000000000"]);
+
+  // 没有任何已验证 resume 特征的成员全部跳过 → null（调用方如实报不支持）
+  run.sessions = { "kimi-frontend": "kimi-sess-9" }; // fixture 无该席位 adapter → 无 resume 特征
+  assert.equal(fx.orchestrator.interactiveCliSpecForRun(run), null);
+});
+
+test("interactiveCliSpecsForRun lists every resumable member spec, execution owner first", async (t) => {
+  const fx = await fixture();
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const run = await fx.orchestrator.create({ prompt: "handoff members", execute: false, cwd: fx.root });
+  fx.orchestrator.adapters.get("claude-fable").id = "claude-stream-json";
+  fx.orchestrator.adapters.get("claude-fable").command = "claude";
+  const owner = fx.orchestrator.adapters.get("codex-technical");
+  owner.id = "opencode-run-json";
+  owner.command = "opencode";
+  run.sessions = {
+    "claude-fable": "claude-sess-1",
+    "codex-technical": "ses_opencode_1",
+    "kimi-frontend": "kimi-sess-9", // fixture 无该席位 adapter → 不具接续特征，跳过
+  };
+  const specs = fx.orchestrator.interactiveCliSpecsForRun(run);
+  // 执行所有者（codex-technical）排最前；无 adapter 特征的成员不进清单
+  assert.deepEqual(specs.map((spec) => spec.agentId), ["codex-technical", "claude-fable"]);
+  assert.equal(specs[0].command, "opencode");
+  assert.deepEqual(specs[0].args, ["--session", "ses_opencode_1"]);
+  assert.equal(specs[1].command, "claude");
+  assert.deepEqual(specs[1].args, ["-r", "claude-sess-1"]);
+  // 单数入口语义不变：显式成员不具接续特征时回落全成员清单第一条（执行所有者）
+  assert.equal(fx.orchestrator.interactiveCliSpecForRun(run, "kimi-frontend").agentId, "codex-technical");
+  // 严格模式（罩层成员页签点名）：点名落空如实 null，不静默回落到别人的会话
+  assert.equal(fx.orchestrator.interactiveCliSpecForRun(run, "kimi-frontend", { strict: true }), null);
+  assert.equal(fx.orchestrator.interactiveCliSpecForRun(run, "claude-fable", { strict: true }).agentId, "claude-fable");
+  // 全无可接续成员 → 空数组
+  run.sessions = { "kimi-frontend": "kimi-sess-9" };
+  assert.deepEqual(fx.orchestrator.interactiveCliSpecsForRun(run), []);
+});
+
 test("dry-run build metadata cannot grant workspace-write through continue", async (t) => {
   const fx = await fixture();
   t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
@@ -1258,6 +1377,89 @@ test("a confirmed-interrupted read-only timeout auto-continues natively instead 
   assert.equal(completed.result.critique, null);
   assert.ok(fx.events.some((event) => event.type === "run.auto_recovery" && event.data.count === 1));
   assert.ok(!fx.events.some((event) => event.type === "adapter.replay_blocked"), "自动续跑成功时不产生阻断事件");
+});
+
+test("known failed-turn cost reaches the interaction cap before automatic recovery", async (t) => {
+  const fx = await fixture();
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  let codexCalls = 0;
+  fx.orchestrator.adapters.get("codex-technical").send = async (input) => {
+    codexCalls += 1;
+    await input.onSessionStarted?.({ sessionId: "budget-session", protocol: "mock" });
+    await input.onTurnSubmitting?.({ sessionId: "budget-session", protocol: "mock", clientUserMessageId: "budget-message" });
+    await input.onTurnAccepted?.({ sessionId: "budget-session", protocol: "mock", clientUserMessageId: "budget-message", turnId: "budget-turn" });
+    throw Object.assign(new Error("timeout after reaching the interaction budget"), {
+      code: "TURN_TIMEOUT",
+      safeToFallback: false,
+      interruptConfirmed: true,
+      sessionId: "budget-session",
+      codexPhase: "turn-submitted-or-unknown",
+      costUsd: 0.15,
+      tokens: 9,
+    });
+  };
+  const created = await fx.orchestrator.create({
+    prompt: "bounded investigation",
+    execute: true,
+    orchestrationMode: "pipeline",
+    maxRounds: 3,
+    maxBudgetUsdPerTurn: 0.05,
+    permissionMode: "plan",
+  });
+  const completed = await waitTerminal(fx.orchestrator, created.id);
+  assert.equal(completed.status, "failed");
+  assert.equal(codexCalls, 1, "known failed-turn cost at the cap must block the automatic continuation");
+  assert.equal(completed.interactionCostUsd, 0.16, "协调员规划轮的已知成本也必须计入 interaction 闸");
+  assert.equal(completed.costUsdTotal, 0.16);
+  assert.equal(completed.turnAttempts.at(-1).failureCostUsd, 0.15);
+  assert.equal(completed.turnAttempts.at(-1).failureTokens, 9);
+  assert.equal(completed.autoRecoveries ?? 0, 0);
+  assert.equal(completed.interactionAutoRecoveries ?? 0, 0);
+  assert.equal(fx.events.filter((event) => event.type === "run.auto_recovery").length, 0);
+  const exhausted = fx.events.find((event) => event.type === "run.budget_exhausted");
+  assert.equal(exhausted?.data.source, "failed-turn");
+  assert.equal(exhausted?.data.interactionCostUsd, 0.16);
+});
+
+test("known primary failure cost reaches the interaction cap before fallback dispatch", async (t) => {
+  const fx = await fixture();
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const created = await fx.orchestrator.create({
+    prompt: "route only",
+    execute: false,
+    permissionMode: "plan",
+    maxBudgetUsdPerTurn: 0.04,
+  });
+  const primary = fx.orchestrator.adapters.get("codex-technical");
+  const fallback = fx.orchestrator.adapters.get("codex-technical-fallback");
+  let fallbackCalls = 0;
+  primary.send = async () => {
+    throw Object.assign(new Error("billable app server exit"), {
+      code: "APP_SERVER_EXIT",
+      safeToFallback: true,
+      costUsd: 0.31,
+      tokens: 11,
+    });
+  };
+  fallback.send = async () => {
+    fallbackCalls += 1;
+    return { sessionId: "must-not-run", text: "unexpected", protocol: "mock" };
+  };
+
+  await assert.rejects(
+    () => fx.orchestrator.continue(created.id, { prompt: "bounded fallback", agentId: "codex-technical" }),
+    { code: "APP_SERVER_EXIT" },
+  );
+  const failed = fx.orchestrator.get(created.id);
+  assert.equal(fallbackCalls, 0);
+  assert.equal(failed.costUsdTotal, 0.31);
+  assert.equal(failed.interactionCostUsd, 0.31);
+  assert.equal(failed.turnAttempts.at(-1).failureCostUsd, 0.31);
+  assert.equal(failed.turnAttempts.at(-1).failureTokens, 11);
+  assert.equal(fx.events.filter((event) => event.type === "adapter.fallback").length, 0);
+  const exhausted = fx.events.find((event) => event.type === "run.budget_exhausted");
+  assert.equal(exhausted?.data.source, "failed-turn-fallback");
+  assert.equal(exhausted?.data.interactionCostUsd, 0.31);
 });
 
 test("an unconfirmed-interrupt timeout keeps the strict manual recovery gate", async (t) => {
@@ -1859,7 +2061,306 @@ test("agent.turn_completed events carry adapter tokens and cost for message-leve
   for (const event of turnEvents) {
     assert.equal(typeof event.data.tokens, "number", "tokens 计量随事件出仓（消息级徽标数据源）");
     assert.equal(typeof event.data.costUsd, "number", "costUsd 随事件出仓");
+    assert.equal(event.data.providerBinding?.mode, "adapter-managed", "每轮必须带实际 Provider 绑定模式");
+    assert.equal(event.data.providerBinding?.effectiveProviderId, null);
   }
+  const persisted = fx.orchestrator.get(created.id);
+  assert.ok(persisted.turnAttempts.every((attempt) => attempt.providerBinding?.mode === "adapter-managed"));
+  assert.ok(persisted.turns.every((turn) => turn.providerBinding?.mode === "adapter-managed"));
+});
+
+test("failed provider turns persist the error binding and emit agent.turn_failed", async (t) => {
+  const fx = await fixture();
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const created = await fx.orchestrator.create({ prompt: "preview", execute: false, permissionMode: "plan" });
+  const target = fx.orchestrator.adapters.get("codex-technical");
+  const dispatchBinding = {
+    requestedProviderId: "provider-a",
+    effectiveProviderId: "provider-a",
+    mode: "bound",
+    degradedReason: null,
+    degradedDetail: null,
+    providerApp: "codex",
+    adapterId: "codex-app-server",
+  };
+  const errorBinding = { ...dispatchBinding, effectiveProviderId: "provider-b" };
+  target.id = "codex-app-server";
+  target.getProviderBinding = () => dispatchBinding;
+  target.send = async () => {
+    throw Object.assign(new Error("provider failed after dispatch"), {
+      code: "PROVIDER_DOWN",
+      providerBinding: errorBinding,
+      costUsd: 0.25,
+      tokens: 17,
+    });
+  };
+
+  await assert.rejects(
+    () => fx.orchestrator.continue(created.id, { prompt: "run", agentId: "codex-technical" }),
+    { code: "PROVIDER_DOWN" },
+  );
+  const failed = fx.orchestrator.get(created.id);
+  assert.equal(failed.turnAttempts.at(-1).phase, "failed");
+  assert.deepEqual(failed.turnAttempts.at(-1).providerBinding, errorBinding);
+  assert.equal(failed.turnAttempts.at(-1).failureCostUsd, 0.25);
+  assert.equal(failed.turnAttempts.at(-1).failureTokens, 17);
+  assert.equal(failed.turnAttempts.at(-1).failureUsageAccounted, true);
+  assert.equal(failed.turnAttempts.at(-1).failureUsages.length, 1);
+  assert.equal(failed.turnAttempts.at(-1).failureUsages[0].adapterId, "codex-app-server");
+  assert.equal(failed.costUsdTotal, 0.25);
+  assert.equal(failed.interactionCostUsd, 0.25);
+  const failureEvent = fx.events.find((event) => event.type === "agent.turn_failed");
+  assert.deepEqual(failureEvent?.data.providerBinding, errorBinding);
+  assert.equal(failureEvent?.data.costUsd, 0.25);
+  assert.equal(failureEvent?.data.tokens, 17);
+  const persisted = JSON.parse(await readFile(join(fx.root, "runs", `${created.id}.json`), "utf8"));
+  assert.equal(persisted.turnAttempts.at(-1).failureCostUsd, 0.25);
+  assert.equal(persisted.costUsdTotal, 0.25);
+  assert.equal(persisted.interactionCostUsd, 0.25);
+});
+
+test("successful fallback preserves its response binding and accounts the primary failure usage", async (t) => {
+  const fx = await fixture();
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const created = await fx.orchestrator.create({ prompt: "preview", execute: false, permissionMode: "plan" });
+  const primary = fx.orchestrator.adapters.get("codex-technical");
+  const fallback = fx.orchestrator.adapters.get("codex-technical-fallback");
+  const primaryBinding = {
+    requestedProviderId: "provider-primary",
+    effectiveProviderId: "provider-primary",
+    mode: "bound",
+    degradedReason: null,
+    degradedDetail: null,
+    providerApp: "codex",
+    adapterId: "codex-app-server",
+    routeMode: "direct-projection",
+    bindingScope: "upstream",
+    upstreamProviderId: "provider-primary",
+    upstreamAttribution: "exact",
+  };
+  const fallbackDispatchBinding = {
+    ...primaryBinding,
+    requestedProviderId: "provider-fallback",
+    effectiveProviderId: "provider-fallback",
+    adapterId: "codex-exec-json",
+  };
+  const fallbackResponseBinding = {
+    ...fallbackDispatchBinding,
+    effectiveProviderId: "provider-fallback-actual",
+    upstreamProviderId: "provider-fallback-actual",
+  };
+  primary.id = "codex-app-server";
+  primary.getProviderBinding = () => primaryBinding;
+  primary.send = async () => {
+    throw Object.assign(new Error("app server exited after billable work"), {
+      code: "APP_SERVER_EXIT",
+      safeToFallback: true,
+      providerBinding: primaryBinding,
+      costUsd: 0.25,
+      tokens: 10,
+    });
+  };
+  fallback.id = "codex-exec-json";
+  fallback.getProviderBinding = () => fallbackDispatchBinding;
+  fallback.send = async () => ({
+    sessionId: "fallback-session",
+    text: "fallback succeeded",
+    protocol: "codex-exec-json",
+    tokens: 20,
+    costUsd: 0.5,
+    providerBinding: fallbackResponseBinding,
+  });
+
+  const completed = await fx.orchestrator.continue(created.id, { prompt: "run", agentId: "codex-technical" });
+  const attempt = completed.turnAttempts.at(-1);
+  assert.equal(attempt.phase, "completed");
+  assert.deepEqual(attempt.providerBinding, fallbackResponseBinding);
+  assert.equal(attempt.failureCostUsd, 0.25);
+  assert.equal(attempt.failureTokens, 10);
+  assert.equal(attempt.failureUsages.length, 1);
+  assert.deepEqual(completed.turns.at(-1).providerBinding, fallbackResponseBinding);
+  assert.equal(completed.costUsdTotal, 0.75);
+  assert.equal(completed.interactionCostUsd, 0.75);
+  const fallbackEvent = fx.events.find((event) => event.type === "adapter.fallback");
+  assert.deepEqual(fallbackEvent?.data.fromProviderBinding, primaryBinding);
+  assert.deepEqual(fallbackEvent?.data.toProviderBinding, fallbackDispatchBinding);
+  assert.equal(fallbackEvent?.data.fromCostUsd, 0.25);
+  assert.equal(fallbackEvent?.data.fromTokens, 10);
+  const completedEvent = fx.events.find((event) => event.type === "agent.turn_completed");
+  assert.deepEqual(completedEvent?.data.providerBinding, fallbackResponseBinding);
+});
+
+test("fallback failures replace the prepared binding with the fallback error binding", async (t) => {
+  const fx = await fixture();
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const created = await fx.orchestrator.create({ prompt: "preview", execute: false, permissionMode: "plan" });
+  const primary = fx.orchestrator.adapters.get("codex-technical");
+  const fallback = fx.orchestrator.adapters.get("codex-technical-fallback");
+  const primaryBinding = {
+    requestedProviderId: "provider-primary",
+    effectiveProviderId: "provider-primary",
+    mode: "bound",
+    degradedReason: null,
+    degradedDetail: null,
+    providerApp: "codex",
+    adapterId: "codex-app-server",
+    routeMode: "direct-projection",
+    bindingScope: "upstream",
+    upstreamProviderId: "provider-primary",
+    upstreamAttribution: "exact",
+  };
+  const fallbackDispatchBinding = {
+    ...primaryBinding,
+    requestedProviderId: "provider-fallback",
+    effectiveProviderId: "provider-fallback",
+    adapterId: "codex-exec-json",
+  };
+  const fallbackErrorBinding = {
+    ...fallbackDispatchBinding,
+    effectiveProviderId: null,
+    mode: "adapter-managed",
+    degradedReason: "provider-missing",
+    routeMode: "adapter-managed",
+    bindingScope: "adapter",
+    upstreamProviderId: null,
+    upstreamAttribution: "unavailable",
+  };
+  primary.id = "codex-app-server";
+  primary.getProviderBinding = () => primaryBinding;
+  primary.send = async () => {
+    throw Object.assign(new Error("app server exited"), {
+      code: "APP_SERVER_EXIT",
+      safeToFallback: true,
+      providerBinding: primaryBinding,
+      costUsd: 0.25,
+      tokens: 10,
+    });
+  };
+  fallback.id = "codex-exec-json";
+  fallback.getProviderBinding = () => fallbackDispatchBinding;
+  fallback.send = async () => {
+    throw Object.assign(new Error("fallback also failed"), {
+      code: "FALLBACK_FAILED",
+      providerBinding: fallbackErrorBinding,
+      costUsd: 0.5,
+      tokens: 20,
+    });
+  };
+
+  await assert.rejects(
+    () => fx.orchestrator.continue(created.id, { prompt: "run", agentId: "codex-technical" }),
+    { code: "FALLBACK_FAILED" },
+  );
+  const failed = fx.orchestrator.get(created.id);
+  assert.equal(failed.turnAttempts.at(-1).phase, "failed");
+  assert.deepEqual(failed.turnAttempts.at(-1).providerBinding, fallbackErrorBinding);
+  assert.equal(failed.turnAttempts.at(-1).failureCostUsd, 0.75);
+  assert.equal(failed.turnAttempts.at(-1).failureTokens, 30);
+  assert.equal(failed.turnAttempts.at(-1).failureUsages.length, 2);
+  assert.deepEqual(failed.turnAttempts.at(-1).failureUsages.map((usage) => usage.adapterId), [
+    "codex-app-server",
+    "codex-exec-json",
+  ]);
+  assert.equal(failed.costUsdTotal, 0.75);
+  assert.equal(failed.interactionCostUsd, 0.75);
+  const fallbackEvent = fx.events.find((event) => event.type === "adapter.fallback");
+  assert.deepEqual(fallbackEvent?.data.fromProviderBinding, primaryBinding);
+  assert.deepEqual(fallbackEvent?.data.toProviderBinding, fallbackDispatchBinding);
+  assert.equal(fallbackEvent?.data.fromCostUsd, 0.25);
+  const failureEvent = fx.events.find((event) => event.type === "agent.turn_failed");
+  assert.equal(failureEvent?.data.adapterId, "codex-exec-json");
+  assert.deepEqual(failureEvent?.data.providerBinding, fallbackErrorBinding);
+  assert.equal(failureEvent?.data.costUsd, 0.5, "costUsd is the final provider failure increment");
+  assert.equal(failureEvent?.data.tokens, 20, "tokens is the final provider failure increment");
+  assert.equal(failureEvent?.data.usageScope, "provider-failure");
+  assert.equal(failureEvent?.data.attemptFailureCostUsd, 0.75);
+  assert.equal(failureEvent?.data.attemptFailureTokens, 30);
+  assert.equal(failureEvent?.data.attemptFailureUsageCount, 2);
+});
+
+test("legacy accounted failure usage survives restart without duplicate billing", async (t) => {
+  const fx = await fixture();
+  let restarted = null;
+  t.after(async () => {
+    await restarted?.close();
+    await fx.orchestrator.close();
+    await rm(fx.root, { recursive: true, force: true });
+  });
+  const created = await fx.orchestrator.create({ prompt: "legacy route", execute: false, permissionMode: "plan" });
+  const run = fx.orchestrator.get(created.id);
+  const prompt = "resume legacy failure";
+  const attemptId = "legacy-failure-attempt";
+  run.round = 1;
+  run.interactionStep = 1;
+  run.costUsdTotal = 0.25;
+  run.interactionCostUsd = 0.25;
+  run.turnAttempts = [{
+    attemptId,
+    round: 1,
+    interactionId: run.activeInteractionId,
+    interactionSeq: run.activeInteractionSeq,
+    interactionStep: 1,
+    agentId: "codex-technical",
+    phase: "prepared",
+    promptSha256: createHash("sha256").update(prompt).digest("hex"),
+    sessionId: null,
+    tentativeSessionId: null,
+    sessionResumable: null,
+    protocol: null,
+    clientUserMessageId: null,
+    nativeTurnId: null,
+    providerBinding: null,
+    sourceWorkItemId: "legacy-work",
+    sourceBusMessageId: null,
+    failureCostUsd: 0.25,
+    failureTokens: 10,
+    failureUsageAccounted: true,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  }];
+  await fx.orchestrator.save(run);
+  await fx.orchestrator.close();
+
+  const events = [];
+  restarted = await new Orchestrator({
+    router: fx.orchestrator.router,
+    adapters: fx.orchestrator.adapters,
+    eventStore: { emit: async (type, data) => { events.push({ type, data }); } },
+    dataRoot: fx.root,
+    policy: fx.orchestrator.policy,
+    approvalBroker: fx.orchestrator.approvalBroker,
+    capabilities: fx.orchestrator.capabilities,
+    models: fx.orchestrator.models,
+  }).init();
+  const target = restarted.adapters.get("codex-technical");
+  target.send = async () => {
+    throw Object.assign(new Error("same legacy billed failure"), {
+      code: "PROVIDER_DOWN",
+      costUsd: 0.25,
+      tokens: 10,
+    });
+  };
+  const reloaded = restarted.get(created.id);
+  const controller = new AbortController();
+  restarted.controllers.set(created.id, controller);
+  await assert.rejects(
+    () => restarted.turn(reloaded, "codex-technical", prompt, {
+      sourceWorkItemId: "legacy-work",
+      allowAutoRecovery: false,
+    }),
+    { code: "PROVIDER_DOWN" },
+  );
+  restarted.controllers.delete(created.id);
+
+  const failed = restarted.get(created.id);
+  const attempt = failed.turnAttempts.find((item) => item.attemptId === attemptId);
+  assert.equal(failed.costUsdTotal, 0.25);
+  assert.equal(failed.interactionCostUsd, 0.25);
+  assert.equal(attempt.failureCostUsd, 0.25);
+  assert.equal(attempt.failureTokens, 10);
+  assert.equal(attempt.failureUsages.length, 1);
+  assert.equal(attempt.failureUsages[0].legacy, true);
+  assert.equal(events.filter((event) => event.type === "agent.turn_failed").length, 1);
 });
 
 test("save never clobbers concurrent steer mutations; memory and disk converge losslessly", async (t) => {
@@ -2940,6 +3441,146 @@ test("acknowledging recovery clears the inflight turn bookkeeping so the run can
   assert.deepEqual(after.inflightTurns, {}, "确认恢复后 inflight 记账必须清空，否则成员永远显示在跑");
   assert.equal(after.resumeClaim, null);
   assert.ok(after.recoveryAcknowledgedAt, "确认时间戳应落盘");
+});
+
+test("HTTP-style continue returns after admission while the provider turn is still running", async (t) => {
+  const fx = await fixture();
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const created = await fx.orchestrator.create({ prompt: "route only", execute: false, permissionMode: "plan" });
+  const entered = deferred();
+  const release = deferred();
+  const target = fx.orchestrator.adapters.get("codex-technical");
+  target.send = async (input) => {
+    await input.onSessionStarted?.({ sessionId: "async-session", protocol: "mock" });
+    entered.resolve();
+    await release.promise;
+    return { sessionId: "async-session", text: "done", protocol: "mock" };
+  };
+
+  const admitted = await Promise.race([
+    fx.orchestrator.continue(created.id, {
+      prompt: "长任务不要堵死 HTTP",
+      agentId: "codex-technical",
+      waitForTurn: false,
+    }),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("admission timed out")), 3_000)),
+  ]);
+  assert.equal(admitted.status, "running");
+  assert.equal(admitted.recoveryNote, null);
+  const pending = fx.orchestrator.executions.get(`continue:${created.id}`);
+  assert.ok(pending, "turn must keep running in executions after HTTP admission");
+  await entered.promise;
+  assert.ok(["running", "waiting_agent"].includes(fx.orchestrator.get(created.id).status));
+  assert.equal(fx.orchestrator.controllers.has(created.id), true);
+
+  release.resolve();
+  const settled = await pending;
+  assert.equal(settled.status, "succeeded");
+});
+
+test("interrupt withdraws a pending build approval instead of no-op", async (t) => {
+  const fx = await fixture({
+    approvalRequest: () => new Promise(() => {}),
+  });
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const created = await fx.orchestrator.create({
+    prompt: "write files",
+    execute: true,
+    permissionMode: "build",
+    orchestrationMode: "pipeline",
+  });
+  assert.equal(created.status, "waiting_approval");
+
+  const interrupted = await fx.orchestrator.interrupt(created.id);
+  assert.equal(interrupted.status, "interrupted");
+  assert.equal(interrupted.buildApproval.status, "withdrawn");
+  assert.match(interrupted.recoveryNote, /withdrawn/i);
+  assert.equal(fx.calls.length, 0, "撤回审批后不得开跑");
+});
+
+test("a late build approval cannot resurrect a withdrawn run", async (t) => {
+  const hold = deferred();
+  const fx = await fixture({
+    approvalRequest: async () => {
+      await hold.promise;
+      return { decision: "accept", approvalId: "late-accept" };
+    },
+  });
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const creating = fx.orchestrator.create({
+    prompt: "write files",
+    execute: true,
+    permissionMode: "build",
+    orchestrationMode: "pipeline",
+  });
+  let created;
+  for (let i = 0; i < 50; i += 1) {
+    created = [...fx.orchestrator.runs.values()].find((run) => run.status === "waiting_approval");
+    if (created) break;
+    await new Promise((resolveTimer) => setTimeout(resolveTimer, 10));
+  }
+  assert.ok(created, "create must reach waiting_approval before the late accept");
+  const interrupted = await fx.orchestrator.interrupt(created.id);
+  assert.equal(interrupted.status, "interrupted");
+  assert.equal(interrupted.buildApproval.status, "withdrawn");
+  hold.resolve();
+  await creating;
+  const after = fx.orchestrator.get(created.id);
+  assert.equal(after.status, "interrupted");
+  assert.equal(after.buildApproval.status, "withdrawn");
+  assert.equal(fx.calls.length, 0, "迟到的批准不得开跑");
+});
+
+test("interrupt discards the claimed social work so the next message does not revive it", async (t) => {
+  const fx = await fixture();
+  t.after(async () => { await fx.orchestrator.close(); await rm(fx.root, { recursive: true, force: true }); });
+  const created = await fx.orchestrator.create({ prompt: "route only", execute: false, permissionMode: "plan" });
+  const run = fx.orchestrator.get(created.id);
+  run.orchestrationMode = "social";
+  run.teamMembers = ["codex-technical", "claude-fable"];
+  run.coordinatorId = "claude-fable";
+  run.resumeQueue = [{
+    itemId: "claimed-work",
+    to: "codex-technical",
+    kind: "mention",
+    busMessageId: "bus-claimed",
+  }];
+  run.resumeClaim = { itemId: "claimed-work", to: "codex-technical" };
+
+  const entered = deferred();
+  const target = fx.orchestrator.adapters.get("codex-technical");
+  const successfulSend = target.send.bind(target);
+  target.send = async (input) => {
+    fx.calls.push({ id: "codex-technical", ...input });
+    await input.onSessionStarted?.({ sessionId: "social-session", protocol: "mock" });
+    entered.resolve();
+    await new Promise((resolveTurn, rejectTurn) => {
+      const rejectAbort = () => rejectTurn(Object.assign(new Error("turn interrupted"), {
+        code: "ABORTED",
+        interruptConfirmed: true,
+        nativeTurnSettled: true,
+      }));
+      if (input.signal.aborted) rejectAbort();
+      else input.signal.addEventListener("abort", rejectAbort, { once: true });
+    });
+  };
+
+  const active = fx.orchestrator.continue(created.id, {
+    prompt: "先派给 Codex",
+    agentId: "codex-technical",
+  });
+  await entered.promise;
+  const interrupted = await fx.orchestrator.interrupt(created.id);
+  await active;
+  assert.equal(interrupted.status, "interrupted");
+  assert.equal(interrupted.resumeClaim, null);
+  assert.equal((interrupted.resumeQueue || []).some((item) => item.itemId === "claimed-work"), false);
+
+  target.send = successfulSend;
+  await fx.orchestrator.continue(created.id, { prompt: "换个方向", agentId: "claude-fable" });
+  assert.equal(fx.calls.at(-1).prompt, "换个方向");
+  assert.equal(fx.calls.filter((call) => call.prompt === "换个方向").length, 1);
+  assert.equal(fx.orchestrator.get(created.id).resumeClaim, null);
 });
 
 test("an ambiguous attempt phase releases its inflight slot", async (t) => {

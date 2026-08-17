@@ -4,6 +4,7 @@
  * 每个 handler 首行门闸 assert；SSE 流自管 response（不走 json）。
  */
 
+import { resolve } from "node:path";
 import { createPtyService } from "../pty.mjs";
 import { getSshService } from "../ssh/routes.mjs";
 import { expandIdentityPath } from "../ssh/discover.mjs";
@@ -31,7 +32,12 @@ let service = null;
 
 function ensureService(ctx) {
   if (!service) {
-    service = createPtyService({ repoRoot: ctx.state.repoRoot, eventStore: ctx.state.eventStore });
+    service = createPtyService({
+      repoRoot: ctx.state.repoRoot,
+      eventStore: ctx.state.eventStore,
+      // 默认放行仓库的上一级（514claude 工作区），选中的兄弟项目才能在自己的目录开终端
+      extraCwdRoots: () => [resolve(ctx.state.repoRoot, "..")],
+    });
   }
   return service;
 }
@@ -39,6 +45,11 @@ function ensureService(ctx) {
 /** 测试注入用：允许替换服务实例（fake spawn / 独立 registry）。 */
 export function setPtyServiceForTest(instance) {
   service = instance;
+}
+
+/** 供专用路由（run CLI 接续终端）复用同一 PTY 服务实例。 */
+export function getPtyServiceFor(ctx) {
+  return ensureService(ctx);
 }
 
 function gate(ctx) {

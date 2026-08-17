@@ -11,6 +11,7 @@
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { appendFile, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { scrub } from "./redaction.mjs";
 
 const CHANNEL_TYPES = new Set(["telegram", "webhook_out", "webhook_in"]);
 const EVENTS_CAP = 500;
@@ -30,6 +31,19 @@ function secureEqualHex(a, b) {
   return left.length === right.length && left.length > 0 && timingSafeEqual(left, right);
 }
 
+export function normalizeWebhookUrl(value) {
+  let parsed;
+  try {
+    parsed = new URL(String(value || "").trim());
+  } catch {
+    throw channelError("CHANNEL_CONFIG", "出站 Webhook 需要合法的 http(s) URL");
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw channelError("CHANNEL_CONFIG", "出站 Webhook 只接受 http 或 https");
+  }
+  return parsed.toString();
+}
+
 /** 响应白名单：剥离一切密钥面字段。 */
 export function publicChannel(channel) {
   if (!channel) return null;
@@ -42,7 +56,9 @@ export function publicChannel(channel) {
       safeConfig[key] = value;
     }
   }
-  return { ...rest, config: safeConfig };
+  const published = { ...rest, config: safeConfig };
+  if (channel.type === "webhook_in") published.inboundPath = `/api/channels/webhook/${channel.id}`;
+  return published;
 }
 
 export function createChannelService({ dataRoot, eventStore = null, fetchImpl = globalThis.fetch, pollIdleMs = 500 } = {}) {
@@ -55,6 +71,8 @@ export function createChannelService({ dataRoot, eventStore = null, fetchImpl = 
     pollers: new Map(), // channelId → { stopped, promise }
     rateBuckets: new Map(), // channelId → { minute, count }
     events: [],
+    storeStatus: "ready", // ready | unavailable（channels.json 损坏时 fail-closed）
+    initError: null,
   };
 
   function audit(type, detail) {
@@ -80,12 +98,23 @@ export function createChannelService({ dataRoot, eventStore = null, fetchImpl = 
     return state.writeChain;
   }
 
+  /** store 不可用（读盘损坏）时拒绝一切会 persist 的写操作，防止空集合覆盖真源。 */
+  function assertStoreWritable() {
+    if (state.storeStatus !== "ready") {
+      throw channelError("CHANNELS_STORE_UNAVAILABLE", `channels.json 不可读（${state.initError || "未知错误"}），已拒绝写入以防清空渠道配置`, 503);
+    }
+  }
+
   async function init() {
     let parsed = null;
     try {
       parsed = JSON.parse(await readFile(storePath, "utf8"));
     } catch (error) {
-      if (error.code !== "ENOENT") throw error;
+      if (error.code !== "ENOENT") {
+        state.storeStatus = "unavailable";
+        state.initError = error.message;
+        throw error;
+      }
     }
     for (const channel of parsed?.channels ?? []) {
       if (channel?.id && CHANNEL_TYPES.has(channel.type)) state.channels.set(channel.id, channel);
@@ -105,16 +134,19 @@ export function createChannelService({ dataRoot, eventStore = null, fetchImpl = 
   }
 
   async function create({ type, name, config = {}, enabled = false } = {}) {
+    assertStoreWritable();
     if (!CHANNEL_TYPES.has(type)) throw channelError("CHANNEL_BAD_TYPE", `type must be one of ${[...CHANNEL_TYPES].join("/")}`);
     if (type === "telegram" && !config.token) throw channelError("CHANNEL_CONFIG", "telegram channel requires config.token");
     if (type === "webhook_out" && !config.url) throw channelError("CHANNEL_CONFIG", "webhook_out channel requires config.url");
     if (type === "webhook_in" && !config.secret) throw channelError("CHANNEL_CONFIG", "webhook_in channel requires config.secret");
+    const nextConfig = { ...config };
+    if (type === "webhook_out") nextConfig.url = normalizeWebhookUrl(config.url);
     const channel = {
       id: randomUUID().slice(0, 8),
       type,
       name: String(name || type),
       enabled: Boolean(enabled),
-      config: { ...config },
+      config: nextConfig,
       createdAt: new Date().toISOString(),
     };
     state.channels.set(channel.id, channel);
@@ -127,12 +159,21 @@ export function createChannelService({ dataRoot, eventStore = null, fetchImpl = 
   async function update(id, patch = {}) {
     const channel = getRaw(id);
     if (!channel) throw channelError("CHANNEL_NOT_FOUND", `channel not found: ${id}`, 404);
+    assertStoreWritable();
     if (patch.name != null) channel.name = String(patch.name);
-    if (patch.config && typeof patch.config === "object") channel.config = { ...channel.config, ...patch.config };
+    if (patch.config && typeof patch.config === "object") {
+      // publicChannel 会把密钥字段掩码成 "***"；前端整体回传时视为"未修改"，绝不落盘。
+      const merged = { ...channel.config };
+      for (const [key, value] of Object.entries(patch.config)) {
+        if (/token|secret|password|key/i.test(key) && (value === "***" || value === "")) continue;
+        merged[key] = value;
+      }
+      channel.config = merged;
+    }
     if (patch.enabled != null) channel.enabled = Boolean(patch.enabled);
     await persist();
     if (channel.type === "telegram") {
-      stopTelegramPoller(channel.id);
+      await stopTelegramPoller(channel.id);
       if (channel.enabled) startTelegramPoller(channel.id);
     }
     audit("channels.update", { channelId: channel.id, enabled: channel.enabled });
@@ -142,7 +183,8 @@ export function createChannelService({ dataRoot, eventStore = null, fetchImpl = 
   async function remove(id) {
     const channel = getRaw(id);
     if (!channel) return false;
-    stopTelegramPoller(id);
+    assertStoreWritable();
+    await stopTelegramPoller(id);
     state.channels.delete(id);
     await persist();
     audit("channels.delete", { channelId: id, type: channel.type });
@@ -160,13 +202,55 @@ export function createChannelService({ dataRoot, eventStore = null, fetchImpl = 
     return { ok: Boolean(response?.ok), status: response?.status ?? 0 };
   }
 
+  /** 创建前验通：telegram getMe / 出站试投 / 入站 secret 就绪。不落渠道、不写事件。 */
+  async function probe({ type, config = {} } = {}) {
+    if (!CHANNEL_TYPES.has(type)) throw channelError("CHANNEL_BAD_TYPE", `type must be one of ${[...CHANNEL_TYPES].join("/")}`);
+    if (type === "telegram") {
+      if (!config.token) throw channelError("CHANNEL_CONFIG", "telegram channel requires config.token");
+      const response = await fetchImpl(`https://api.telegram.org/bot${config.token}/getMe`);
+      const payload = await response.json().catch(() => ({}));
+      if (!payload?.ok) {
+        throw channelError("CHANNEL_PROBE", payload?.description || "Telegram token 无法通过 getMe", 502);
+      }
+      return {
+        ok: true,
+        type,
+        detail: {
+          username: payload.result?.username || "",
+          name: payload.result?.first_name || "",
+          botId: payload.result?.id ?? null,
+        },
+      };
+    }
+    if (type === "webhook_out") {
+      const url = normalizeWebhookUrl(config.url);
+      const body = JSON.stringify({ type: "514cc.channel.probe", at: new Date().toISOString() });
+      const headers = { "content-type": "application/json" };
+      if (config.secret) headers["x-signature-sha256"] = hmacSha256(config.secret, body);
+      let response;
+      try {
+        response = await fetchImpl(url, { method: "POST", headers, body });
+      } catch (error) {
+        throw channelError("CHANNEL_PROBE", error.message || "出站 Webhook 探测失败", 502);
+      }
+      return { ok: Boolean(response?.ok), type, status: response?.status ?? 0, detail: { url } };
+    }
+    if (!String(config.secret || "").trim()) throw channelError("CHANNEL_CONFIG", "webhook_in channel requires config.secret");
+    if (String(config.secret).trim().length < 8) throw channelError("CHANNEL_CONFIG", "验签 Secret 至少 8 位");
+    return { ok: true, type, detail: { secretReady: true } };
+  }
+
   /** telegram 出站消息。 */
   async function sendTelegram(channel, { chatId, text }) {
+    const target = chatId ?? channel.config.chatId;
+    if (target == null || target === "") {
+      throw channelError("CHANNEL_CONFIG", "telegram send requires chatId（先对 bot 说一句话，或在渠道里填写对话 ID）");
+    }
     const url = `https://api.telegram.org/bot${channel.config.token}/sendMessage`;
     const response = await fetchImpl(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, text: String(text ?? "") }),
+      body: JSON.stringify({ chat_id: target, text: String(text ?? "") }),
     });
     const payload = await response.json().catch(() => ({}));
     await recordEvent({ kind: "outbound", channelId: channel.id, type: "telegram", status: response.status });
@@ -228,13 +312,17 @@ export function createChannelService({ dataRoot, eventStore = null, fetchImpl = 
           for (const update of payload?.result ?? []) {
             const message = update?.message;
             if (message?.text) {
+              if (message.chat?.id != null && channel.config.chatId == null) {
+                channel.config.chatId = message.chat.id;
+              }
               await recordEvent({
                 kind: "inbound",
                 channelId: id,
                 type: "telegram",
                 chatId: message.chat?.id,
                 from: message.from?.username || message.from?.first_name || "",
-                text: String(message.text).slice(0, 500),
+                // 聊天原文可能夹带密钥，入账前过脱敏（与会话 jsonl 同基线）
+                text: scrub(String(message.text)).slice(0, 500),
               });
             }
             channel.config.offset = update.update_id + 1;
@@ -254,10 +342,16 @@ export function createChannelService({ dataRoot, eventStore = null, fetchImpl = 
     state.pollers.set(id, control);
   }
 
-  function stopTelegramPoller(id) {
+  /** 停止并等待轮询循环退出（最多 30s，容忍 in-flight 的 25s 长轮询），防止 update 重启后双轮询。 */
+  async function stopTelegramPoller(id) {
     const poller = state.pollers.get(id);
-    if (poller) poller.stopped = true;
+    if (!poller) return;
+    poller.stopped = true;
     state.pollers.delete(id);
+    await Promise.race([
+      poller.promise?.catch(() => {}),
+      new Promise((resolveStop) => setTimeout(resolveStop, 30_000)),
+    ]);
   }
 
   function recentEvents(limit = 50) {
@@ -265,12 +359,12 @@ export function createChannelService({ dataRoot, eventStore = null, fetchImpl = 
   }
 
   async function close() {
-    for (const id of [...state.pollers.keys()]) stopTelegramPoller(id);
+    await Promise.all([...state.pollers.keys()].map((id) => stopTelegramPoller(id)));
     await state.writeChain;
   }
 
   const service = {
-    init, list, create, update, remove, send, receiveWebhook,
+    init, list, create, update, remove, send, probe, receiveWebhook,
     recentEvents, close, publicChannel,
     _state: state, // 测试观测用
   };

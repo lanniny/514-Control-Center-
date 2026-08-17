@@ -1,7 +1,7 @@
 // v3.7 Automations（codeg 对标核心缺口，proposals/v37-codeg-parity-design.md §2.1）：
 // 把一次 composer 全配置（prompt/团队/起始/权限/模型/effort/cwd）存为命名自动化，
 // 手动触发或按间隔计划 headless 跑——产生的 run 与手动 run 走同一治理链（审批/预算/轮次/事件全继承）。
-// schedule 语法：`manual`（仅手动）| `every:<n>m|h|d`（简化间隔制——不为 v1 自研 cron 边界（月末/DST），
+// schedule 语法：`manual`（仅手动）| `idle`（闲时——控制面空闲时排队自动执行）| `every:<n>m|h|d`（简化间隔制——不为 v1 自研 cron 边界（月末/DST），
 // 间隔制覆盖"每天体检"类主场景，语法可后扩）。
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
@@ -12,6 +12,11 @@ import { extractLegacyRunSources, normalizeRunSources } from "./run-sources.mjs"
 const SCHEDULE_PATTERN = /^every:(\d{1,4})([mhd])$/;
 const UNIT_MS = { m: 60_000, h: 3_600_000, d: 86_400_000 };
 const TERMINAL = new Set(["succeeded", "failed", "cancelled", "complete", "completed"]);
+// 闲时语义（v4.x 接电）：空闲 = 控制面无活跃 run 且最近一条 run 活动已超过静默窗。
+// 每 tick 至多放量一条闲时任务（最久未跑者先跑），单条冷却 idleCooldownMs——
+// 空闲无法证实（orchestrator 无 list）时 fail-closed 不跑，绝不把"不知道"当成"空闲"。
+const IDLE_QUIET_DEFAULT_MS = 10 * 60_000;
+const IDLE_COOLDOWN_DEFAULT_MS = 4 * 3_600_000;
 // v4.0 codeg 对标：run 历史修剪阈值（30 天）——超期条目自动裁剪，防止 automations.json 无限膨胀
 const RUN_HISTORY_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
 const RUN_HISTORY_HARD_CAP = 100; // 即使未超期也不超过 100 条
@@ -70,7 +75,7 @@ export async function seedBuiltinAutomations(store) {
 }
 
 export function scheduleIntervalMs(schedule) {
-  if (schedule === "manual") return null;
+  if (schedule === "manual" || schedule === "idle") return null; // idle 不走间隔制，由空闲排水驱动
   const match = SCHEDULE_PATTERN.exec(String(schedule ?? ""));
   if (!match) return null;
   const amount = Number(match[1]);
@@ -92,8 +97,8 @@ function validateInput(input = {}) {
     throw Object.assign(new Error("automation prompt contains secret-like material"), { code: "SENSITIVE_PROMPT" });
   }
   const schedule = String(input.schedule ?? "manual").trim();
-  if (schedule !== "manual" && !SCHEDULE_PATTERN.test(schedule)) {
-    throw Object.assign(new Error("schedule must be 'manual' or 'every:<n>m|h|d'"), { code: "VALIDATION_FAILED" });
+  if (!["manual", "idle"].includes(schedule) && !SCHEDULE_PATTERN.test(schedule)) {
+    throw Object.assign(new Error("schedule must be 'manual', 'idle' or 'every:<n>m|h|d'"), { code: "VALIDATION_FAILED" });
   }
   return { name, prompt, schedule, sources: normalizedContent.sources };
 }
@@ -134,12 +139,14 @@ function storeStatus({ state, source, path, code = null, message = null, causeCo
 }
 
 export class AutomationStore {
-  constructor({ dataRoot, orchestrator, eventStore, tickMs = 60_000, pulseProvider = null }) {
+  constructor({ dataRoot, orchestrator, eventStore, tickMs = 60_000, pulseProvider = null, idleQuietMs = IDLE_QUIET_DEFAULT_MS, idleCooldownMs = IDLE_COOLDOWN_DEFAULT_MS }) {
     this.file = join(dataRoot, "automations.json");
     this.orchestrator = orchestrator;
     this.eventStore = eventStore;
     this.tickMs = tickMs;
     this.pulseProvider = pulseProvider; // 惰性体检数据源（{{PULSE}} 占位符替换）
+    this.idleQuietMs = idleQuietMs;
+    this.idleCooldownMs = idleCooldownMs;
     this.items = new Map(); // id → automation
     this.chain = Promise.resolve(); // 写盘串行
     this.triggering = new Set(); // 按 automation id 互斥，不阻塞其他自动化
@@ -189,7 +196,11 @@ export class AutomationStore {
   }
 
   status() {
-    return { ...this.storeStatus, schedulerActive: Boolean(this.timer) };
+    return {
+      ...this.storeStatus,
+      schedulerActive: Boolean(this.timer),
+      idle: { quietMs: this.idleQuietMs, cooldownMs: this.idleCooldownMs },
+    };
   }
 
   assertWritable(operation = "modify automations") {
@@ -499,6 +510,21 @@ export class AutomationStore {
     await this.chain.catch(() => {});
   }
 
+  /**
+   * 控制面是否空闲（闲时排水门）：无活跃 run 且最近一条 run 活动已超静默窗。
+   * orchestrator 不支持列举 = 无法证实空闲，fail-closed 返回 false。
+   */
+  #controlPlaneIdle(now) {
+    if (typeof this.orchestrator.list !== "function") return false;
+    let lastActivityMs = 0;
+    for (const run of this.orchestrator.list()) {
+      if (!TERMINAL.has(run.status)) return false;
+      const ms = Date.parse(run.updatedAt ?? run.createdAt ?? "") || 0;
+      if (ms > lastActivityMs) lastActivityMs = ms;
+    }
+    return now - lastActivityMs >= this.idleQuietMs;
+  }
+
   async #tick() {
     if (this.ticking) return; // tick 自身不重入
     this.ticking = true;
@@ -580,6 +606,33 @@ export class AutomationStore {
             });
           }
           await this.#emit("automation.trigger_failed", { id: item.id, name: item.name, message });
+        }
+      }
+
+      // 闲时排水：控制面空闲时，每 tick 至多放量一条闲时任务（最久未跑先跑，冷却未到不跑）。
+      // 与间隔制同一失败账：AUTOMATION_BUSY 跳过，其余失败落 lastError + 事件 + 前移 lastRunAt 防重试风暴。
+      if (this.#controlPlaneIdle(now)) {
+        const next = [...this.items.values()]
+          .filter((item) => item.enabled && item.schedule === "idle")
+          .filter((item) => now - (Date.parse(item.lastRunAt ?? "") || 0) >= this.idleCooldownMs)
+          .sort((a, b) => String(a.lastRunAt ?? "").localeCompare(String(b.lastRunAt ?? "")))[0];
+        if (next) {
+          try {
+            await this.trigger(next.id, { source: "idle" });
+          } catch (error) {
+            if (error.code !== "AUTOMATION_BUSY") {
+              const message = String(error.message ?? error).slice(0, 300);
+              if (this.storeStatus.writable) {
+                await this.#commit("record idle automation failure", () => {
+                  const current = this.get(next.id);
+                  current.lastRunAt = new Date().toISOString();
+                  current.lastError = message;
+                  return current;
+                });
+              }
+              await this.#emit("automation.trigger_failed", { id: next.id, name: next.name, message });
+            }
+          }
         }
       }
     } finally {

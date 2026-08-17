@@ -2,21 +2,26 @@
  * collab-flow.js — 团队协作旗舰视图（view-team）自举模块
  *
  * 挂载点（shell 在 index.html 提供，全部 null-guard，缺任一根即静默跳过该区块）：
+ *   #team-starmap-root 协作星图（当前团队席位 + TaskGraph 连线；不进骨架擦除）
  *   #team-hero-root    英雄统计（活跃席位 / 今日交接 / 平均 DELTA）
  *   #team-roster-root  花名册卡片（复用 team-panel 席位卡）
  *   #team-flow-root    SVG 协作流图（节点=席位，边=真实委派/交接）
  *   #team-delta-root   DELTA 摘要（byScore + 最近条目）
  *   #team-heatmap-root 活跃度热力图（席位 × 近 7 天）
- *   #team-routing-root 路由闸门决策 + 本地启发式建议卡
+ *   #team-routing-root 最近闸门（服务端预览工作台在 #team-router-workbench）
+ *   #team-inbox-root   消息收发局（当前团队 run 的 ask/answer/治理消息）
  *
  * 数据源全部是既有真实端点：/api/teams /api/runs /api/health
  *   /api/observability/delta /api/observability/handoffs /api/observability/routegate
- * 无后端改动；任何端点失败只做区块级降级，不拖垮整页。
+ * 消息收发局复用 run bus 的有界只读投影；任何端点失败只做区块级降级，不拖垮整页。
  */
 import { API, request } from "./api.js";
 import { lucideIcon } from "./lucide.js";
 import { state } from "./state.js";
 import { buildTeamPanelData, teamAgentCardHtml, agentBrandKey, applyLoadMeters, runsForTeam } from "./team-panel.js";
+import { mountTeamStarmap } from "./hero-starmap.js";
+
+let teamStarmap = null;
 
 const DAY_MS = 86_400_000;
 const HEAT_DAYS = 7;
@@ -24,6 +29,7 @@ const HEAT_DAYS = 7;
 const TEAM_KEY = "514cc-selected-team";
 const COLLAB_SOURCE_NAMES = Object.freeze(["teams", "runs", "health", "delta", "handoffs", "routegate"]);
 let refreshVersion = 0;
+let refreshController = null;
 
 export function buildCollabLoadResult(settled = [], data = null, details = {}) {
   // settled 顺序可能不是全集（如 refreshCollabFlow 的快源轨道不含 health），
@@ -70,6 +76,9 @@ export function buildCollabLoadResult(settled = [], data = null, details = {}) {
     版本补载席位状态；探针失败则保持"未核验"，诚实不伪装。 */
 export async function refreshCollabFlow({ teamId = selectedTeamId() } = {}) {
   const version = ++refreshVersion;
+  refreshController?.abort();
+  const controller = new AbortController();
+  refreshController = controller;
   const roots = collectRoots();
   if (!roots) return buildCollabLoadResult([], null, { skipped: true });
   renderSkeletons(roots);
@@ -79,15 +88,15 @@ export async function refreshCollabFlow({ teamId = selectedTeamId() } = {}) {
     new Promise((_, reject) => setTimeout(() => reject(new Error(`${label} 超时`)), ms)),
   ]);
   const FAST_SOURCES = ["teams", "runs", "delta", "handoffs", "routegate"];
-  const healthTrack = withTimeout(request(API.health), "health", 12_000)
+  const healthTrack = withTimeout(request(API.health, { signal: controller.signal }), "health", 12_000)
     .then((value) => ({ status: "fulfilled", value }))
     .catch((reason) => ({ status: "rejected", reason }));
   const settled = await Promise.allSettled([
-    withTimeout(request(API.teams), "teams"),
-    withTimeout(request(API.runs), "runs"),
-    withTimeout(request(API.obsDelta), "delta"),
-    withTimeout(request(API.obsHandoffs), "handoffs"),
-    withTimeout(request(API.obsRouteGate), "routegate"),
+    withTimeout(request(API.teams, { signal: controller.signal }), "teams"),
+    withTimeout(request(API.runs, { signal: controller.signal }), "runs"),
+    withTimeout(request(API.obsDelta, { signal: controller.signal }), "delta"),
+    withTimeout(request(API.obsHandoffs, { signal: controller.signal }), "handoffs"),
+    withTimeout(request(API.obsRouteGate, { signal: controller.signal }), "routegate"),
   ]);
   if (version !== refreshVersion) return buildCollabLoadResult([], null, { stale: true });
   const [teams, runs, delta, handoffs, routegate] = settled;
@@ -104,6 +113,13 @@ export async function refreshCollabFlow({ teamId = selectedTeamId() } = {}) {
 
   const team = pickTeam(data.teams, teamId);
   const teamRuns = team ? runsForTeam(team, data.runs) : [];
+  const inboxSettled = team
+    ? await Promise.allSettled([withTimeout(request(API.teamInbox(team.id), { signal: controller.signal }), "inbox")])
+    : [];
+  if (version !== refreshVersion) return buildCollabLoadResult([], null, { stale: true });
+  const inboxResult = inboxSettled[0];
+  data.inbox = inboxResult?.status === "fulfilled" ? inboxResult.value : null;
+  if (inboxResult?.status === "rejected") data.failed += 1;
   const buildPanel = () => team ? buildTeamPanelData({
     team,
     runs: teamRuns,
@@ -112,23 +128,28 @@ export async function refreshCollabFlow({ teamId = selectedTeamId() } = {}) {
   }) : null;
 
   renderHero(roots.hero, data, buildPanel(), team);
+  renderStarmap(buildPanel());
   renderRoster(roots.roster, buildPanel());
   renderFlow(roots.flow, buildPanel());
   renderDeltaMini(roots.delta, data.delta);
   renderHeatmap(roots.heatmap, buildPanel(), team, teamRuns);
-  renderRouting(roots.routing, data, team, buildPanel());
+  renderRouting(roots.routing, data);
+  renderInbox(roots.inbox, data.inbox, inboxResult?.status === "rejected" ? inboxResult.reason : null);
 
   // 健康补载：只在该次刷新仍是最新时才重算 panel，覆盖健康相关区块
   void healthTrack.then((health) => {
     if (version !== refreshVersion || health.status !== "fulfilled") return;
     data.components = unwrapList(health.value, "items");
     renderHero(roots.hero, data, buildPanel(), team);
+    renderStarmap(buildPanel());
     renderRoster(roots.roster, buildPanel());
     renderFlow(roots.flow, buildPanel());
-    renderRouting(roots.routing, data, team, buildPanel());
+    renderRouting(roots.routing, data);
   });
 
-  return buildCollabLoadResult(settled, data, { teamId: team?.id ?? null, failed: data.failed, sourceNames: FAST_SOURCES });
+  const allSettled = inboxSettled.length ? [...settled, ...inboxSettled] : settled;
+  const sourceNames = inboxSettled.length ? [...FAST_SOURCES, "inbox"] : FAST_SOURCES;
+  return buildCollabLoadResult(allSettled, data, { teamId: team?.id ?? null, failed: data.failed, sourceNames });
 }
 
 function collectRoots() {
@@ -139,6 +160,7 @@ function collectRoots() {
     delta: document.getElementById("team-delta-root"),
     heatmap: document.getElementById("team-heatmap-root"),
     routing: document.getElementById("team-routing-root"),
+    inbox: document.getElementById("team-inbox-root"),
   };
   return Object.values(roots).some(Boolean) ? roots : null;
 }
@@ -151,10 +173,19 @@ function renderSkeletons(roots) {
   if (roots.flow) roots.flow.innerHTML = block(320);
   if (roots.delta) roots.delta.innerHTML = block(120);
   if (roots.heatmap) roots.heatmap.innerHTML = block(180);
-  if (roots.routing) roots.routing.innerHTML = block(220);
+  if (roots.routing) roots.routing.innerHTML = block(140);
+  if (roots.inbox) roots.inbox.innerHTML = block(180);
+  setInboxStatus(roots.inbox, "加载中", "pending");
   for (const root of Object.values(roots)) {
     root?.querySelectorAll(".cf-skeleton[data-h]").forEach((el) => { el.style.minHeight = `${el.dataset.h}px`; });
   }
+}
+
+function renderStarmap(panel) {
+  const root = document.getElementById("team-starmap-root");
+  if (!root) return;
+  teamStarmap ??= mountTeamStarmap(root);
+  teamStarmap.setFromPanel(panel);
 }
 
 // ─── 英雄统计 ────────────────────────────────────────────────
@@ -412,9 +443,76 @@ function renderHeatmap(root, panel, team, runs) {
     </div>`;
 }
 
-// ─── 路由决策 + 本地建议 ─────────────────────────────────────
+// ─── 消息收发局（CCB Message Bureau 的本地只读投影） ─────────────
 
-/** 本地启发式：镜像 src/router.mjs classifyTask 的关键词口径，透明展示命中理由。
+function renderInbox(root, payload, error = null) {
+  if (!root?.isConnected) return;
+  if (error) {
+    setInboxStatus(root, "消息源降级", "error");
+    root.innerHTML = stateCard("inbox", "消息收发局暂不可用", error.message || "当前团队 bus 读取失败", true);
+    wireRetry(root);
+    return;
+  }
+  if (!payload || typeof payload !== "object") {
+    setInboxStatus(root, "等待消息", "neutral");
+    root.innerHTML = stateCard("inbox", "暂无消息收发局数据", "团队就绪后会从关联 run 的有界消息尾部载入");
+    return;
+  }
+  const messages = Array.isArray(payload.messages) ? payload.messages : [];
+  const pending = Array.isArray(payload.pendingAsks) ? payload.pendingAsks : messages.filter((item) => item.needsOperator);
+  const answers = Array.isArray(payload.recentAnswers) ? payload.recentAnswers : messages.filter((item) => item.kind === "answer");
+  const blocked = Array.isArray(payload.blockedRuns) ? payload.blockedRuns : [];
+  const diagnostics = payload.diagnostics || {};
+  const partial = diagnostics.status === "partial";
+  setInboxStatus(
+    root,
+    partial
+      ? `部分可见 · ${diagnostics.runsRead ?? 0}/${diagnostics.runsTotal ?? 0} 个任务`
+      : `${messages.length} 条消息`,
+    partial ? "warning" : "ok",
+  );
+  const summary = [
+    { icon: "message-circle", value: pending.length, label: "待 LO 回答" },
+    { icon: "message-square", value: answers.length, label: "最近答复" },
+    { icon: "triangle-alert", value: blocked.length, label: "需要关注的任务" },
+  ];
+  const kindLabel = { ask: "Ask", answer: "Answer", decide: "决策", steer: "插话", system: "系统" };
+  const rows = messages.slice(0, 8).map((message) => `
+    <article class="team-inbox-row${message.needsOperator ? " is-actionable" : ""}">
+      <div class="team-inbox-row-head">
+        <span class="cf-chip ${message.needsOperator ? "is-primary" : "is-muted"}">${kindLabel[message.kind] || "消息"}</span>
+        <span class="team-inbox-route">${escapeHtml(message.from)} → ${escapeHtml(message.to)}</span>
+        <time class="num" datetime="${escapeHtml(message.ts || "")}">${escapeHtml(formatGateTime(message.ts))}</time>
+      </div>
+      <p class="team-inbox-text">${escapeHtml(message.text)}</p>
+      <div class="team-inbox-row-foot">
+        <span class="team-inbox-run-title">${escapeHtml(truncate(message.runTitle || message.runId, 54))}</span>
+        <button type="button" class="button quiet team-inbox-open" data-run-select="${escapeHtml(message.runId)}" title="打开对应任务">
+          ${lucideIcon("arrow-up-right", "icon lucide")}打开任务
+        </button>
+      </div>
+    </article>`).join("");
+  root.innerHTML = `
+    <div class="team-inbox" data-inbox-schema="${escapeHtml(payload.schema || "")}">
+      <div class="team-inbox-summary">
+        ${summary.map((item) => `<div class="team-inbox-stat"><span class="team-inbox-stat-icon">${lucideIcon(item.icon, "icon lucide")}</span><strong class="num">${item.value}</strong><span>${item.label}</span></div>`).join("")}
+      </div>
+      ${rows ? `<div class="team-inbox-list">${rows}</div>` : `<div class="cf-flow-note">当前团队还没有可展示的 Ask、答复或治理消息。</div>`}
+      ${partial ? `<div class="team-inbox-diagnostic" role="status">${lucideIcon("triangle-alert", "icon lucide")}部分 run 读取失败，以上内容不是完整历史。</div>` : ""}
+    </div>`;
+}
+
+function setInboxStatus(root, text, tone = "neutral") {
+  const section = root?.closest?.(".team-inbox-block, .content-section");
+  const status = section?.querySelector?.("#team-inbox-status");
+  if (!status) return;
+  status.textContent = text;
+  status.className = `status-label is-${tone}`;
+}
+
+// ─── 最近闸门（派工预览已并入 #team-router-workbench） ─────────
+
+/** 本地启发式：镜像 src/router.mjs classifyTask 的关键词口径，供单测与旧探针复用。
     gemini-research 已除名——该 profile 当前禁用（.ai-shared/context.md），不建议不可执行席位。 */
 const SUGGEST_RULES = Object.freeze([
   { type: "current-research", label: "实时情报", re: /最新|当前|今天|实时|搜索|调研|search|news/i, prefer: ["grok-search", "grok-build"], why: "检索/取证能力" },
@@ -427,15 +525,10 @@ const SUGGEST_RULES = Object.freeze([
   { type: "planning", label: "规划架构", re: /规划|方案|架构|设计|plan|architecture/i, prefer: [], why: "当前团队主脑规划" },
 ]);
 
-function renderRouting(root, data, team, panel = null) {
+function renderRouting(root, data) {
   if (!root) return;
   const gate = data.routegate;
-  const members = new Set(Array.isArray(team?.members) ? team.members : []);
-  const seats = new Map((panel?.agents || []).map((agent) => [agent.id, agent]));
-
   const rows = Array.isArray(gate?.recent) ? gate.recent.slice(0, 8) : [];
-  // 健康补载会重渲染本区块：先记住用户已输入的任务描述，渲染后回填，不打断输入。
-  const preservedQuery = root.querySelector?.(".cf-suggest-input")?.value ?? "";
   const table = !gate
     ? stateCard("compass", "闸门数据不可用", "/api/observability/routegate 加载失败", true)
     : rows.length
@@ -452,69 +545,10 @@ function renderRouting(root, data, team, panel = null) {
               </tr>`).join("")}
           </tbody>
         </table></div>`
-      : `<div class="cf-flow-note">近 7 天没有闸门记录</div>`;
+      : `<div class="cf-flow-note">近 7 天没有闸门记录。派工预览用上方任务画像，走服务端 router。</div>`;
 
-  root.innerHTML = `
-    <div class="cf-routing">
-      <div class="cf-route-decisions">
-        <h4 class="cf-block-title">${lucideIcon("compass")} 全局最近闸门决策</h4>
-        ${table}
-      </div>
-      <div class="cf-suggest">
-        <h4 class="cf-block-title">${lucideIcon("lightbulb")} 派工建议 <span class="cf-suggest-tag">本地启发式 · 建议</span></h4>
-        <input type="text" class="cf-suggest-input" placeholder="描述一下任务，例如：评审这个 PR 的安全面" aria-label="任务描述" />
-        <div class="cf-suggest-result" aria-live="polite">
-          <span class="cf-suggest-hint">输入任务描述后给出席位建议（实际路由以服务端 router 为准）</span>
-        </div>
-      </div>
-    </div>`;
-
+  root.innerHTML = `<div class="cf-route-decisions">${table}</div>`;
   if (!gate) wireRetry(root);
-
-  const input = root.querySelector(".cf-suggest-input");
-  const result = root.querySelector(".cf-suggest-result");
-  if (preservedQuery && input) {
-    input.value = preservedQuery;
-    result.innerHTML = suggestMarkup(preservedQuery.trim(), members, team?.coordinator || null, seats);
-  }
-  input?.addEventListener("input", () => {
-    const text = input.value.trim();
-    if (!text) {
-      result.innerHTML = `<span class="cf-suggest-hint">输入任务描述后给出席位建议（实际路由以服务端 router 为准）</span>`;
-      return;
-    }
-    result.innerHTML = suggestMarkup(text, members, team?.coordinator || null, seats);
-  });
-
-  // 建议卡一键采用：经隐藏兼容桥汇入协作台唯一“直接发送目标”状态。
-  const adopt = () => {
-    const pick = result.querySelector(".cf-suggest-pick[data-suggest-agent]");
-    if (!pick) return;
-    const select = document.getElementById("start-agent");
-    const note = (message) => {
-      const hint = document.createElement("span");
-      hint.className = "cf-suggest-hint";
-      hint.textContent = message;
-      pick.appendChild(hint);
-    };
-    if (!select) return note("未找到协作台发送目标桥");
-    if (select.disabled) return note("会话进行中，请在协作台目标标签中切换成员");
-    const option = [...select.options].find((item) => item.value === pick.dataset.suggestAgent);
-    if (!option) return note(`席位 ${pick.dataset.suggestAgent} 不在当前团队发送目标里`);
-    select.value = option.value;
-    select.dispatchEvent(new Event("change", { bubbles: true }));
-    const targetTab = document.querySelector(`[data-composer-target="${CSS.escape(option.value)}"]`);
-    targetTab?.classList.add("cf-adopted-flash");
-    setTimeout(() => targetTab?.classList.remove("cf-adopted-flash"), 900);
-    note(`已切换直接发送目标：${option.textContent.trim()}`);
-  };
-  result?.addEventListener("click", (event) => { if (event.target.closest(".cf-suggest-pick")) adopt(); });
-  result?.addEventListener("keydown", (event) => {
-    if ((event.key === "Enter" || event.key === " ") && event.target.closest(".cf-suggest-pick")) {
-      event.preventDefault();
-      adopt();
-    }
-  });
 }
 
 export function suggestMarkup(text, members, coordinatorId = null, seats = null) {

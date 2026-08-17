@@ -23,13 +23,45 @@ test("configuration topology fuses providers, capabilities and sources into one 
   assert.doesNotMatch(stateSource, /^\s*capabilities:\s*"能力图谱"/m);
   assert.match(stateSource, /config:\s*"配置图谱"/);
 
-  for (const surface of ["providers", "capabilities", "sources"]) {
+  for (const surface of ["providers", "local-runtime", "capabilities", "hooks", "sources"]) {
     assert.match(html, new RegExp(`role="tab"[^>]+aria-controls="config-surface-${surface}"[^>]+data-config-surface="${surface}"`));
     assert.match(html, new RegExp(`id="config-surface-${surface}"[^>]+data-config-surface-panel="${surface}"[^>]+role="tabpanel"`));
   }
   assert.match(html, /id="config-topology-tabs"[^>]+role="tablist"/);
   assert.match(html, /id="config-surface-capabilities"[\s\S]+id="cap-skills-body"[\s\S]+id="cap-mcp-body"/);
-  assert.match(html, /id="config-surface-providers"[\s\S]+id="provider-columns"[\s\S]+id="ccswitch-workbench"/);
+  for (const id of [
+    "cap-overview",
+    "cap-workspace-tabs",
+    "cap-workspace-skills",
+    "cap-workspace-mcp",
+    "cap-mcp-search",
+    "cap-mcp-filters",
+    "cap-stat-skills",
+    "cap-stat-mcp",
+  ]) {
+    assert.match(html, new RegExp(`id="${id}"`), `${id} must remain in the capabilities workspace`);
+  }
+  assert.match(html, /data-cap-active-workspace="skills"/);
+  assert.match(html, /data-cap-workspace="skills"/);
+  assert.match(html, /data-cap-workspace="mcp"/);
+  assert.match(html, /data-cap-jump="skills"/);
+  assert.match(html, /data-cap-jump="mcp"/);
+  assert.match(html, /data-mcp-filter="writable"/);
+  assert.match(html, /data-mcp-filter="disabled"/);
+  assert.match(appSource, /function setCapabilityWorkspace\(/);
+  assert.match(appSource, /#cap-workspace-tabs \[data-cap-workspace\]/);
+  assert.match(appSource, /class="cap-mcp-card/);
+  assert.match(appSource, /data-mcp-toggle=/);
+  assert.match(stateSource, /capabilityWorkspace:\s*"skills"/);
+  assert.doesNotMatch(html, /<tbody id="cap-mcp-body"/, "MCP 已改为卡片网格，不再是表格 tbody");
+  assert.match(html, /id="config-surface-providers"[\s\S]+id="provider-columns"/);
+  assert.match(html, /id="config-surface-local-runtime"[\s\S]+id="ccswitch-workbench"/);
+  assert.doesNotMatch(
+    html.slice(html.indexOf('id="config-surface-providers"'), html.indexOf('id="config-surface-local-runtime"')),
+    /id="ccswitch-workbench"/,
+    "workbench is its own topology surface, not buried under providers",
+  );
+  assert.match(html, /href="\.\/forge\/runtime-workbench\.css"/);
   assert.match(html, /id="config-surface-sources"[\s\S]+class="config-shell"/);
   assert.doesNotMatch(html, /id="config-surface-runtime"/, "runtime seats belong inside the existing sources surface");
 
@@ -82,6 +114,16 @@ test("configuration topology fuses providers, capabilities and sources into one 
   assert.match(appSource, /data-config-remote-provider-source=/);
   assert.match(appSource, /class="provider-deck config-remote-provider-deck"/);
   assert.match(appSource, /class="ccswitch-workbench config-remote-workbench"/);
+  assert.match(appSource, /if \(state\.configSurface === "local-runtime"\) \{\s*return configRemoteGraphBody/);
+  assert.match(appSource, /function openLocalRuntimeWorkbench\(/);
+  assert.match(appSource, /mountHooksPanel\(/);
+  assert.match(html, /href="\.\/forge\/hooks\.css"/);
+  assert.match(appSource, /远端钩子尚未接入/);
+  const remoteProvidersBody = appSource.slice(
+    appSource.indexOf("function configRemoteProvidersBody"),
+    appSource.indexOf("function configRemoteCapabilityName"),
+  );
+  assert.doesNotMatch(remoteProvidersBody, /configRemoteRuntimeWorkbench/, "remote workbench belongs on the local-runtime surface");
   for (const tab of ["env", "proxy", "resources", "sync", "accounts"]) {
     assert.match(appSource, new RegExp(`\\{ id: "${tab}", label:`));
   }
@@ -156,6 +198,43 @@ test("configuration topology fuses providers, capabilities and sources into one 
   assert.match(baseCss, /@media \(max-width: 720px\)[\s\S]+\.config-source-open[\s\S]{0,180}grid-template-columns:\s*16px minmax\(0, 1fr\) auto/);
   assert.match(baseCss, /@media \(max-width: 720px\)[\s\S]+\.config-source-open \.config-source-label,[\s\S]{0,80}\.config-source-open > \.subtle[\s\S]{0,100}grid-column:\s*2 \/ -1/);
   assert.match(css, /#config-surface-capabilities \.cap-matrix th:first-child/);
+  assert.match(css, /#config-surface-capabilities \.cap-matrix \{\s*border-collapse:\s*separate/);
+  assert.match(css, /#config-surface-capabilities \.cap-matrix td\[colspan\]/);
+  assert.match(css, /#config-surface-capabilities table\.cap-matrix/);
+  assert.match(css, /#config-surface-capabilities \.cap-overview/);
+  assert.match(css, /#config-surface-capabilities \.cap-mcp-grid/);
+  assert.match(css, /#config-surface-capabilities \.cap-workspace\[hidden\]/);
+  assert.match(css, /\.cap-wizard-dialog/);
+  assert.match(html, /id="cap-skill-create-button"/);
+  assert.match(html, /id="cap-mcp-create-button"/);
+  assert.match(html, /id="cap-skill-wizard"[\s\S]+id="cap-skill-wizard-form"[\s\S]+id="cap-mcp-wizard"[\s\S]+id="cap-mcp-wizard-form"/);
+  assert.match(html, /写入当前项目[\s\S]+?\.agents\/skills/);
+  assert.match(html, /id="cap-skill-market-button"/);
+  assert.match(html, /id="cap-skills-model-chips"/);
+  assert.match(html, /id="cap-skill-wizard-preview"/);
+  assert.match(html, /id="cap-mcp-wizard-json"/);
+  assert.match(html, /完整 JSON 配置/);
+  const mcpWizard = html.slice(html.indexOf('id="cap-mcp-wizard"'), html.indexOf('id="action-dialog"'));
+  assert.match(mcpWizard, /id="cap-mcp-wizard-json"/);
+  assert.match(mcpWizard, /novalidate/, "JSON 是提交真源，浏览器必填不得拦住完整 JSON");
+  assert.match(mcpWizard, /id="cap-mcp-wizard-apps"/);
+  assert.doesNotMatch(mcpWizard, /id="cap-mcp-wizard-app-claude"|id="cap-mcp-wizard-app-codex"/, "投影目标改为全应用网格，不再写死两家");
+  assert.doesNotMatch(mcpWizard, /id="cap-mcp-wizard-env"/, "env 只走完整 JSON，不另开表单字段");
+  assert.match(appSource, /function renderMcpWizardApps\(/);
+  assert.match(appSource, /MCP_TARGET_META/);
+  assert.match(appSource, /function openCapabilityWizard\(/);
+  assert.match(appSource, /function submitSkillWizard\(/);
+  assert.match(appSource, /function submitMcpWizard\(/);
+  assert.match(appSource, /function parseMcpWizardJson\(/);
+  assert.match(appSource, /openCapabilityWizard[\s\S]{0,400}applyMcpWizardJsonToForm\(/);
+  assert.match(appSource, /\/api\/capabilities\/skills/);
+  assert.match(appSource, /\/api\/ccswitch\/domain\/mcps/);
+  assert.match(appSource, /submitMcpWizard[\s\S]{0,500}parseMcpWizardJson\(/);
+  assert.match(css, /\.cap-wizard-dialog\.cap-wizard-wide/);
+  assert.match(css, /\.cap-wizard-split/);
+  assert.match(css, /\.cap-skill-model-chips/);
+  assert.match(css, /#config-surface-capabilities \.cap-skill-scope/);
+  assert.match(css, /#cap-workspace-skills\[hidden\]/);
   assert.match(css, /#view-config \.config-surface-panel\[hidden\]/);
   assert.match(css, /@media \(max-width: 720px\)[\s\S]+#view-config \.config-topology-track/);
   assert.match(css, /@media \(max-width: 1000px\)[\s\S]+\.runtime-seat-layout[\s\S]+grid-template-columns: minmax\(0, 1fr\)/);
@@ -170,6 +249,8 @@ test("configuration topology fuses providers, capabilities and sources into one 
   assert.match(css, /#view-config \.config-topology-track\s*\{[\s\S]{0,320}overflow-x:\s*auto/);
   assert.match(css, /@media \(max-width: 720px\)[\s\S]+#view-config \.config-toolbar\s*\{[\s\S]{0,140}flex-direction:\s*column/);
   assert.match(css, /@media \(max-width: 560px\)\s*\{[\s\S]{0,220}#view-config \.config-topology-copy span\s*\{\s*display:\s*none/);
+  assert.match(qaSource, /#cap-workspace-mcp-tab/);
+  assert.match(qaSource, /#cap-workspace-mcp:not\(\[hidden\]\)/);
   assert.match(qaSource, /mainContent\.scrollWidth - mainContent\.clientWidth/);
   assert.match(qaSource, /main content horizontal overflow/);
   assert.match(qaSource, /CONTROL_CENTER_TOKEN:\s*qaToken/);

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import { createWorkbenchEnvironmentPanel } from "../public/environment-panel.js";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 
@@ -16,9 +17,12 @@ test("workbench environment dock exposes the five reference tools and explicit r
   for (const id of ["review", "terminal", "browser", "files", "side-chat"]) {
     assert.match(railTools, new RegExp(`id: "${id}"`), `RAIL_TOOLS 缺少工具 ${id}`);
   }
-  // 终端与侧边对话不占标签，必须标 external 交给宿主转发
-  assert.match(railTools, /id: "terminal",[^}]*external: true/);
+  // 侧栏终端占标签；侧边对话仍转发为浮层
+  assert.doesNotMatch(railTools, /id: "terminal",[^}]*external: true/);
   assert.match(railTools, /id: "side-chat",[^}]*external: true/);
+  assert.match(html, /data-tool-panel="terminal"/);
+  assert.match(html, /id="rail-terminal-container"/);
+  assert.match(html, /id="terminal-drawer"/);
   assert.match(html, /id="mission-environment-panel"/);
   assert.match(html, /id="mission-side-chat-title"/);
   assert.match(html, />直接收件人</);
@@ -67,6 +71,45 @@ test("environment panel keeps the reference layout affordances without inventing
   assert.match(panel, /PID \$\{formatCount\(item\.pid\)\}/);
   assert.doesNotMatch(panel, /item\.(?:args|argv|commandLine)/);
   assert.match(registry, /Command arguments and environment values are intentionally never retained/);
+});
+
+test("environment panel coalesces repeated selection while the same run request is pending", async () => {
+  const pending = [];
+  const root = {
+    innerHTML: "",
+    setAttribute() {},
+    addEventListener() {},
+    removeEventListener() {},
+  };
+  const panel = createWorkbenchEnvironmentPanel({
+    root,
+    loadEnvironment(runId, signal) {
+      return new Promise((resolve, reject) => {
+        const request = { runId, signal, resolve, reject };
+        pending.push(request);
+        signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+    },
+  });
+
+  panel.selectRun("run-a");
+  panel.selectRun("run-a");
+  assert.equal(pending.length, 1, "same-run selection must reuse the in-flight environment request");
+
+  panel.selectRun("run-b");
+  assert.equal(pending.length, 2);
+  assert.equal(pending[0].signal.aborted, true, "changing runs must still cancel the stale request");
+  pending[1].resolve({
+    schema: "514cc.workbench.environment/v1",
+    workspace: {},
+    git: {},
+    agents: {},
+    processes: {},
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  panel.selectRun("run-b");
+  assert.equal(pending.length, 2, "loaded same-run selection must stay idempotent");
 });
 
 test("environment routes are authenticated API branches and Git execution is argument-only", async () => {

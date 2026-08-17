@@ -34,6 +34,77 @@ test("team tree is strict about ownership with an unassigned fallback group", as
   assert.ok(!app.includes('class="project-empty">无从属项目'), "旧的「无从属项目」兜底文案仍在渲染路径上");
 });
 
+// 烛侧栏审查 2026-08-16：置顶/归档分区与项目树的互斥与兜底纪律——
+// H1 未归属项目/会话置顶后不得从侧栏消失；M1 pinned+interrupted 只进「正在工作」不双列；
+// M2 置顶会话只进置顶区、树中不重复渲染；M3 团队块折叠由 team-tree-toggle 单管并持久化；
+// L6 折叠按钮不得吞 heading 语义（button 内 h2 → span[role=heading]）。
+test("pinned and archived rail sections share the tree's unassigned fallback discipline", async () => {
+  const [app, chrome, html] = await Promise.all([
+    source("public/app.js"),
+    source("public/workbench-chrome.js"),
+    source("public/index.html"),
+  ]);
+  // M1：interrupted 归「正在工作」区，pinned 的 interrupted 不再双列双计数
+  assert.match(app, /const pinnedRuns = state\.runs\.filter\(\(run\) => !run\.archived && run\.pinned && !ACTIVE_RUN_STATES\.has\(run\.status\) && run\.status !== "interrupted"/);
+  // H1：置顶/归档分区的团队过滤与树「未归属」兜底同律（显式归属命中本团队或未归属 null 都收）
+  assert.match(app, /const inRailTeam = \(explicitTeamId\) => explicitTeamId === railId \|\| explicitTeamId === null;/);
+  assert.match(app, /return pref\.pinned && !pref\.hidden && inRailTeam\(explicitProjectTeamId\(project\)\);/);
+  // M2：置顶会话只进置顶区——树内会话过滤排除 pinned（项目普通组与跨团队 loose 组同律）
+  assert.match(app, /&& !pref\.pinned \/\/ 置顶会话只进置顶区/);
+  assert.match(app, /!pref\.archived && !pref\.pinned\) \{/);
+  // M3：团队块折叠单控件单状态源——chrome 分组折叠不再注入 team 条目；toggle 持久化到同 key
+  assert.ok(!chrome.includes('selector: ".rail-block-team"'), "workbench-chrome 仍在给团队块注入第二套折叠 chevron");
+  assert.match(app, /applyTeamTreeCollapsed/);
+  assert.match(app, /514cc-rail-groups/);
+  // L6：折叠按钮不再吞 heading 语义
+  assert.ok(!html.includes('<h2 id="team-rail-title">'), "team-tree-toggle 内仍是 h2");
+  assert.match(html, /<span class="pane-title" id="team-rail-title" role="heading" aria-level="2">/);
+  assert.match(html, /<span class="pane-title" id="archived-rail-title" role="heading" aria-level="2">/);
+});
+
+// LO 2026-08-16「编辑历史对话返回上一个对话继续编辑」：用户消息 hover 铅笔 → 原文回填 composer →
+// 编辑后发送走既有 /messages 续聊（EventStore/turns append-only、CLI 原生会话不可回滚，不改写历史）。
+// 入口复用 workbench-chrome 行操作钮机制（复制钮同款注入），经 CustomEvent 桥回 app.js（chrome 无 state 通道）。
+// 护栏：priorDraft 取消恢复；文本不全（服务端只给声明长度）不回填残文；切 run/预览自动退出编辑态。
+test("a user message can be edited back into the composer as a follow-up", async () => {
+  const [app, chrome, html, css, forgeCss, state, sprite] = await Promise.all([
+    source("public/app.js"),
+    source("public/workbench-chrome.js"),
+    source("public/index.html"),
+    source("public/styles.css"),
+    source("public/forge/workbench.css"),
+    source("public/state.js"),
+    source("public/lucide-sprite.svg"),
+  ]);
+  // 入口：chrome 行操作注入——复制钮全行、编辑铅笔仅用户行；点击读 data-stream-key 经 CustomEvent 桥给 app.js
+  assert.match(chrome, /if \(row\.classList\.contains\("is-user"\)\) \{/);
+  assert.match(chrome, /editButton\.className = "msg-row-copy msg-row-edit";/);
+  assert.match(chrome, /const streamKey = row\?\.dataset\.streamKey \?\? "";/);
+  assert.match(chrome, /document\.dispatchEvent\(new CustomEvent\("514cc:edit-message", \{ detail: \{ streamKey \} \}\)\)/);
+  assert.match(sprite, /<symbol id="lucide-pencil" /, "铅笔图标未进 lucide sprite");
+  // 桥接与反查：app.js 监听 CustomEvent；反查限协作 run 流（历史预览/无选中 run 不给出），残文不回填
+  assert.match(app, /document\.addEventListener\("514cc:edit-message", \(event\) => startEditMessage\(event\.detail\?\.streamKey\)\)/);
+  assert.ok(!app.includes("data-edit-message"), "旧方案 data-edit-message 委托/属性仍有残留");
+  assert.match(app, /if \(!run \|\| state\.sessionPreview \|\| !streamKey\) return null;/);
+  assert.match(app, /historyMessagesForRun\(run, null, events\) : fallbackRunMessages\(run\)/);
+  assert.match(app, /if \(message\.textLength && message\.textLength > message\.text\.length\) return null;/);
+  // 编辑态生命周期：进入暂存草稿、取消恢复、发送成功终结、切 run/预览收敛
+  assert.match(state, /editingMessage: null,/);
+  assert.match(app, /function startEditMessage\(streamKey\)/);
+  assert.match(app, /priorDraft: captureComposerDraft\(\)/);
+  assert.match(app, /function exitEditMessage\(\{ restore = false \} = \{\}\)/);
+  assert.match(app, /if \(restore\) applyComposerDraft\(editing\.priorDraft\);/);
+  assert.match(app, /exitEditMessage\(\{ restore: false \}\); \/\/ 编辑态随发送成功终结/);
+  assert.match(app, /state\.editingMessage && \(state\.sessionPreview \|\| state\.editingMessage\.runId !== \(run\?\.id \?\? null\)\)/);
+  // Esc 取消（@// 菜单 Esc 优先）+ 取消按钮
+  assert.match(app, /event\.key === "Escape" && !event\.isComposing && state\.editingMessage/);
+  assert.match(app, /elements\["composer-editing-cancel"\]\?\.addEventListener\("click", \(\) => exitEditMessage\(\{ restore: true \}\)\)/);
+  // DOM 与样式：composer 顶条（追加不改写语义）+ 铅笔与复制钮并排定位
+  assert.match(html, /<div class="composer-editing-bar" id="composer-editing-bar" role="status" hidden>/);
+  assert.match(css, /\.composer-editing-bar \{/);
+  assert.match(forgeCss, /\.msg-row-edit \{\s*\n\s*right: 28px;\s*\n\}/);
+});
+
 // LO 2026-08-10：项目树内按逻辑会话聚合——Console run 的 sessions 映射（成员→原生会话 id）
 // 是跨 CLI 唯一硬关联；被引用的原生会话按 run 分组挂在 CLI 分组之前。裸 CLI 会话不猜不并。
 test("project tree aggregates native sessions by collaboration run", async () => {
@@ -84,7 +155,7 @@ test("the rail is a closable tool tab strip with a picker empty state", async ()
   for (const id of ["rail-tabs", "rail-tab-add", "rail-tool-menu", "rail-tool-panels", "rail-tool-picker", "rail-empty-state"]) {
     assert.match(html, new RegExp(`id="${id}"`), `右栏缺少 ${id}`);
   }
-  for (const panel of ["mission", "review", "browser", "files"]) {
+  for (const panel of ["mission", "review", "terminal", "browser", "files"]) {
     assert.match(html, new RegExp(`data-tool-panel="${panel}"`), `缺少工具页 ${panel}`);
   }
   // 任务上下文页必须真的包住环境舱与五页，否则 514cc 的任务上下文会随改版丢失
@@ -102,6 +173,17 @@ test("the rail is a closable tool tab strip with a picker empty state", async ()
   const selectRunCalls = app.match(/missionControlDock\?\.selectRun\([^\n]*\);\n\s*syncRailToActiveRun\(\);/g) ?? [];
   const allSelectRun = app.match(/missionControlDock\?\.selectRun\(/g) ?? [];
   assert.equal(selectRunCalls.length, allSelectRun.length, "有 selectRun 出口没有同步右栏工具页");
+  assert.match(railTools, /aria-controls=\"\$\{panelId\}\"/);
+  assert.match(railTools, /panel\.setAttribute\("aria-labelledby", `rail-tab-\$\{id\}`\)/);
+  assert.match(railTools, /event\.key === "ArrowRight" \|\| event\.key === "ArrowDown"/);
+  assert.match(railTools, /event\.key === "Home"/);
+});
+
+test("terminal drawer reveal cannot reopen after a close wins the race", async () => {
+  const chrome = await source("public/workbench-chrome.js");
+  assert.match(chrome, /let openGeneration = 0;/);
+  assert.match(chrome, /const generation = \+\+openGeneration;/);
+  assert.match(chrome, /if \(generation !== openGeneration \|\| !open\) return;/);
 });
 
 // 抽屉会在启动时恢复上次的打开态并立刻挂载，比 token 自举更早，
@@ -135,7 +217,8 @@ test("terminal input failures surface and focus is restored on reopen", async ()
   assert.match(terminal, /tab\.inputBroken/);
   assert.match(terminal, /paneEl\.addEventListener\("mousedown", \(\) => term\.focus\(\)\)/);
   assert.match(terminal, /function focusActive\(\)/);
-  assert.match(terminal, /return \{ mount, root, focusActive \}/);
+  // 返回面已扩展（沉浸罩层驱动）：dispose + attach/activate/close/activeTabId 供成员条切换
+  assert.match(terminal, /return \{ mount, root, focusActive, dispose, attach: attachSession, activate: activateTab, close: closeTab, activeTabId \}/);
   assert.match(chrome, /panel\.focusActive\?\.\(\)/);
   // Nerd Font 候选：oh-my-posh 字形没有它会显示成方块
   assert.match(terminal, /Nerd Font/);
@@ -261,7 +344,9 @@ test("terminal is a bottom drawer again with no persistent bar", async () => {
   // 抽屉丢掉行号就会被 auto-placement 塞进 recovery-bar 隐藏后的空位、跑到输入框上方。
   const railCss = await source("public/forge/rail-tools.css");
   assert.match(railCss, /\.terminal-drawer \{[^}]*grid-row: -2 \/ -1;/s);
-  assert.match(app, /byId\("global-terminal-toggle"\)\?\.click\(\); \/\/ 终端是底部抽屉/);
+  assert.match(app, /function openBottomTerminal\(/);
+  assert.match(app, /forge:open-bottom-terminal/);
+  assert.match(chrome, /getElementById\("global-terminal-toggle"\)/);
 });
 
 test("removed docks leave no orphan selectors behind", async () => {
@@ -303,6 +388,9 @@ test("recovery bar follows live run status, not the stale post-ack snapshot", as
   assert.match(app, /state\.recoveryAckRunId = null; \/\/ 状态已翻页，确认标记失效/);
   assert.match(app, /const acked = state\.recoveryAckRunId === run\.id;/);
   assert.ok(app.includes("已确认——下次发送将自动继续"), "acked 文案缺失");
+  const recoveryFn = app.slice(app.indexOf("function renderRecoveryBar"), app.indexOf("function acknowledgeRecovery"));
+  assert.match(recoveryFn, /run\.error/, "恢复条必须露出 adapter 真因，不能只画 recoveryNote 套话");
+  assert.match(recoveryFn, /run\.recoveryNote/);
 });
 
 
@@ -338,11 +426,12 @@ test("permission pill mirrors the task-permission select as single source of tru
   assert.match(app, /function syncPermissionPill\(\)/);
   assert.match(app, /function setPermissionMenuOpen\(open\)/);
   assert.match(app, /data-permission-option/);
-  assert.match(app, /select\.value = option\.dataset\.permissionOption;/);
+  assert.match(app, /select\.value = option\.getAttribute\(`data-\$\{optionAttr\}`\)/);
   assert.match(app, /select\.dispatchEvent\(new Event\("change"\)\)/);
-  // select 重渲染后必须回同步 pill，两处（静态/discovery）都要
-  const syncCalls = app.match(/syncPermissionPill\(\);/g) || [];
-  assert.ok(syncCalls.length >= 3, `syncPermissionPill 调用点不足（${syncCalls.length}），静态/discovery 渲染后 pill 会失同步`);
+  // select 重渲染后必须回同步 pill：统一走 syncComposerPickSurfaces（静态/discovery + change）
+  assert.match(app, /function syncComposerPickSurfaces\(\)/);
+  const syncCalls = app.match(/syncComposerPickSurfaces\(\);/g) || [];
+  assert.ok(syncCalls.length >= 3, `syncComposerPickSurfaces 调用点不足（${syncCalls.length}），静态/discovery 渲染后 pill 会失同步`);
   // 样式：pill 是圆角 ghost 按钮，菜单上弹
   assert.match(css, /\.permission-pill \{/);
   assert.match(css, /\.permission-menu \{[^}]*bottom: calc\(100% \+ 6px\);/s);

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -56,6 +56,8 @@ test("snapshot is structured for Configure/Security UI", () => {
   const snap = remoteGateSnapshot();
   assert.equal(snap.policy, "fail-closed");
   assert.equal(snap.schema, "514cc.remote-gates/v2");
+  assert.equal(snap.revocationSemantics.mode, "block-future-dispatches");
+  assert.equal(snap.revocationSemantics.activeRemoteExecutions, "not-automatically-cancelled");
   assert.ok(Array.isArray(snap.gates));
 });
 
@@ -98,4 +100,91 @@ test("grant of unknown gate is rejected", async (t) => {
   t.after(() => rm(dir, { recursive: true, force: true }));
   const service = await createRemoteGateService({ dataRoot: dir }).init();
   await assert.rejects(() => service.grant("nope"), { code: "REMOTE_GATE_UNKNOWN" });
+});
+
+test("grant persistence failure stays blocked and the mutation queue can retry", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "514cc-gates-failure-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  let failRename = true;
+  const storage = {
+    mkdir,
+    readFile,
+    writeFile,
+    rename: async (...args) => {
+      if (failRename) throw Object.assign(new Error("rename failed"), { code: "EIO" });
+      return rename(...args);
+    },
+  };
+  const service = await createRemoteGateService({ dataRoot: dir, storage }).init();
+  service.registerImplementation("ssh");
+  await assert.rejects(
+    () => service.grant("ssh"),
+    (error) => error.code === "REMOTE_GATE_PERSISTENCE_FAILED" && error.httpStatus === 503 && error.causeCode === "EIO",
+  );
+  assert.equal(service.list().find((gate) => gate.id === "ssh").status, "blocked");
+  assert.throws(() => service.assert("ssh"), { code: "REMOTE_GATE_BLOCKED" });
+
+  failRename = false;
+  await service.grant("ssh");
+  assert.equal(service.list().find((gate) => gate.id === "ssh").status, "open");
+  assert.doesNotThrow(() => service.assert("ssh"));
+});
+
+test("failed revoke blocks immediately and remains retryable until the ledger is closed", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "514cc-gates-revoke-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  let failRename = false;
+  const storage = {
+    mkdir,
+    readFile,
+    writeFile,
+    rename: async (...args) => {
+      if (failRename) throw Object.assign(new Error("rename failed"), { code: "EIO" });
+      return rename(...args);
+    },
+  };
+  const service = await createRemoteGateService({ dataRoot: dir, storage }).init();
+  service.registerImplementation("ssh");
+  await service.grant("ssh");
+  failRename = true;
+  await assert.rejects(
+    () => service.revoke("ssh"),
+    (error) => error.code === "REMOTE_GATE_PERSISTENCE_FAILED" && error.httpStatus === 503 && error.causeCode === "EIO",
+  );
+  assert.equal(service.list().find((gate) => gate.id === "ssh").status, "blocked");
+  assert.throws(() => service.assert("ssh"), { code: "REMOTE_GATE_BLOCKED" });
+  const staleLedger = JSON.parse(await readFile(join(dir, "remote-gates.grants.json"), "utf8"));
+  assert.equal(staleLedger.grants.some((entry) => entry.gate === "ssh"), true, "fixture must prove disk write really failed");
+
+  // 关键重启边界：revoke 的 rename 失败留下 tombstone 临时文件时，新实例也不能从旧 grant 回生。
+  const revivedWhileRevokePending = await createRemoteGateService({ dataRoot: dir }).init();
+  revivedWhileRevokePending.registerImplementation("ssh");
+  assert.equal(revivedWhileRevokePending.list().find((gate) => gate.id === "ssh").status, "blocked");
+  assert.throws(() => revivedWhileRevokePending.assert("ssh"), { code: "REMOTE_GATE_BLOCKED" });
+
+  failRename = false;
+  await service.revoke("ssh");
+  const closedLedger = JSON.parse(await readFile(join(dir, "remote-gates.grants.json"), "utf8"));
+  assert.equal(closedLedger.grants.some((entry) => entry.gate === "ssh"), false);
+  const revocationLedger = JSON.parse(await readFile(join(dir, "remote-gates.revocations.json"), "utf8"));
+  assert.equal(revocationLedger.revocations.some((entry) => entry.gate === "ssh"), true);
+  assert.equal(service.list().find((gate) => gate.id === "ssh").status, "blocked");
+});
+
+test("explicit grant clears a durable revoke only after the grant snapshot is written", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "514cc-gates-reauthorize-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const service = await createRemoteGateService({ dataRoot: dir }).init();
+  service.registerImplementation("ssh");
+  await service.grant("ssh");
+  await service.revoke("ssh");
+
+  await service.grant("ssh", { source: "explicit reauthorization" });
+  const tombstones = JSON.parse(await readFile(join(dir, "remote-gates.revocations.json"), "utf8"));
+  assert.equal(tombstones.revocations.some((entry) => entry.gate === "ssh"), false);
+  assert.equal(service.list().find((gate) => gate.id === "ssh").status, "open");
+
+  const revived = await createRemoteGateService({ dataRoot: dir }).init();
+  revived.registerImplementation("ssh");
+  assert.equal(revived.list().find((gate) => gate.id === "ssh").status, "open");
 });

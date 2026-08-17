@@ -58,6 +58,13 @@ test("Grok 上游失败但原生 session 已保留时优先允许继续当前会
   assert.match(clickHandler.slice(0, 400), /selectComposerTarget\(failedSession\.dataset\.focusFailedSession, \{ focusInput: true \}\)/);
 });
 
+test("HTTP 续聊强制 waitForTurn=false，客户端不能把同步等待塞回来", async () => {
+  const server = await readFile(resolve(publicRoot, "../server.mjs"), "utf8");
+  const handler = server.slice(server.indexOf("/(cancel|interrupt|messages)"));
+  assert.match(handler, /delete input\.waitForTurn/);
+  assert.match(handler, /waitForTurn: false/);
+});
+
 test("侧边聊天在提交在途时明确告知并清空草稿，不留下诱导重发的旧文本", async () => {
   const app = await readFile(resolve(publicRoot, "app.js"), "utf8");
   const handler = app.slice(app.indexOf('byId("mission-side-chat-form")?.addEventListener("submit"'));

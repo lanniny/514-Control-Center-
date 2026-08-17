@@ -168,18 +168,25 @@ export function createRemoteRunner({ getService, gates = null } = {}) {
     return { hostId, path };
   }
 
-  /** 建 run 准入：ssh 门闸 + 主机存在/启用 + 远端 `test -d` 探针（仅此一次，失败 422 如实）。 */
-  async function assertRunnable(hostId, path) {
+  /** 每次远程派工准入：重新核验 gate 与主机启用态，不重复执行远端路径探针。 */
+  function assertDispatchable(hostId, path) {
+    const normalized = validateRemote({ hostId, path });
     gates?.assert?.("ssh"); // 未授权 501 REMOTE_GATE_BLOCKED（路由面同款语义）
     const ssh = serviceOrThrow();
-    const host = ssh.list().find((item) => item.id === hostId);
-    if (!host) throw remoteRunError("REMOTE_HOST_NOT_FOUND", `host not found: ${hostId}`, 404);
+    const host = ssh.list().find((item) => item.id === normalized.hostId);
+    if (!host) throw remoteRunError("REMOTE_HOST_NOT_FOUND", `host not found: ${normalized.hostId}`, 404);
     if (host.enabled === false) throw remoteRunError("REMOTE_HOST_DISABLED", `host is disabled: ${host.host}`, 409);
-    const probe = await ssh.exec(hostId, { command: `test -d ${shQuote(path)} && printf ok`, timeoutMs: 15_000 });
+    return { ssh, host, ...normalized };
+  }
+
+  /** 建 run 准入：每次派工防线 + 远端 `test -d` 探针（仅此一次，失败 422 如实）。 */
+  async function assertRunnable(hostId, path) {
+    const dispatch = assertDispatchable(hostId, path);
+    const probe = await dispatch.ssh.exec(dispatch.hostId, { command: `test -d ${shQuote(dispatch.path)} && printf ok`, timeoutMs: 15_000 });
     if (probe.code !== 0 || !probe.stdout.includes("ok")) {
-      throw remoteRunError("INVALID_REMOTE_PATH", `remote path is not a directory on ${host.name || hostId}: ${path}`, 422);
+      throw remoteRunError("INVALID_REMOTE_PATH", `remote path is not a directory on ${dispatch.host.name || dispatch.hostId}: ${dispatch.path}`, 422);
     }
-    return { host, path };
+    return { host: dispatch.host, path: dispatch.path };
   }
 
   /** 审批哈希口径（§3.3）：远程工作区用规范化串，绝不进本机 resolve()/git。 */
@@ -189,9 +196,15 @@ export function createRemoteRunner({ getService, gates = null } = {}) {
 
   /** 常驻型 adapter 注入（codex app-server / pi-rpc）：(command, args, options) => child，同步返回。 */
   function spawnImpl(hostId, path) {
-    return (command, args = [], _options = {}) =>
+    return (command, args = [], _options = {}) => {
+      const dispatch = assertDispatchable(hostId, path);
       // options.cwd/env 是本地语义，刻意丢弃——远端 cwd 用台账 path，env 用远端 CLI 各自登录态（§3.4）
-      createRemoteChild({ ssh: serviceOrThrow(), hostId, commandLine: buildRemoteCommandLine({ cwd: path, command, args }) });
+      return createRemoteChild({
+        ssh: dispatch.ssh,
+        hostId: dispatch.hostId,
+        commandLine: buildRemoteCommandLine({ cwd: dispatch.path, command, args }),
+      });
+    };
   }
 
   /** spawn 型 adapter 注入（runProcessImpl 契约）：复用 runProcess 的超时/信号/封顶/解码器，只换 spawn 替身。 */
@@ -205,5 +218,5 @@ export function createRemoteRunner({ getService, gates = null } = {}) {
     });
   }
 
-  return { validateRemote, assertRunnable, workspaceLabel, spawnImpl, runProcessImpl };
+  return { validateRemote, assertDispatchable, assertRunnable, workspaceLabel, spawnImpl, runProcessImpl };
 }

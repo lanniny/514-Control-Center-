@@ -576,7 +576,13 @@ test("loopback API enforces bearer auth and supports the operator workflow", { t
   const routed = await route.json();
   assert.equal(route.status, 200);
   assert.equal(routed.selected.id, "codex-technical");
-  assert.equal(routed.independent.id, "claude-fable");
+  assert.equal(routed.independentRequired, true);
+  assert.notEqual(routed.independent.id, routed.selected.id);
+  const selectedProfile = bootstrap.providers.find((profile) => profile.id === routed.selected.id);
+  const independentProfile = bootstrap.providers.find((profile) => profile.id === routed.independent.id);
+  assert.ok(selectedProfile, `missing selected profile ${routed.selected.id}`);
+  assert.ok(independentProfile, `missing independent profile ${routed.independent.id}`);
+  assert.notEqual(independentProfile.provider, selectedProfile.provider, "independent route must use a different runtime provider");
 
   const dryRun = await fetch(`${origin}/api/runs`, {
     method: "POST",

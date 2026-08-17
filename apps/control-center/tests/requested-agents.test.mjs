@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import {
   MAX_REQUESTED_AGENTS,
   addRequestedAgentId,
+  composerDraftMatches,
+  emptyComposerDraft,
   pruneRequestedAgentIds,
   removeRequestedAgentMention,
 } from "../public/state.js";
@@ -32,4 +34,14 @@ test("removing a collaborator chip removes only its complete visible mention tok
     removeRequestedAgentMention("请 @Codex 复核，保留 @CodexPlus 和 Codex 正文", "Codex"),
     "请 复核，保留 @CodexPlus 和 Codex 正文",
   );
+});
+
+test("composer draft ownership compares text and collaborators without sharing mutable state", () => {
+  const submitted = { text: "  修复竞态  ", requestedAgentIds: ["codex", "grok"] };
+  assert.equal(composerDraftMatches({ text: "修复竞态", requestedAgentIds: ["codex", "grok"] }, submitted), true);
+  assert.equal(composerDraftMatches({ text: "修复竞态", requestedAgentIds: ["grok", "codex"] }, submitted), false);
+  assert.equal(composerDraftMatches({ text: "修复竞态", requestedAgentIds: ["codex"] }, submitted), false);
+  const empty = emptyComposerDraft();
+  empty.requestedAgentIds.push("later");
+  assert.deepEqual(emptyComposerDraft(), { text: "", requestedAgentIds: [] });
 });

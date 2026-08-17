@@ -145,9 +145,7 @@
 }
 
 .boot-option:hover {
-  transform: translateY(-2px);
   border-color: var(--border-strong, color-mix(in oklab, var(--foreground, #888) 28%, transparent));
-  box-shadow: var(--shadow-sm, 0 2px 8px rgba(0, 0, 0, 0.08));
 }
 
 .boot-option:active {
@@ -260,7 +258,6 @@
 }
 
 .boot-theme:hover {
-  transform: translateY(-2px);
   border-color: var(--border-strong, color-mix(in oklab, var(--foreground, #888) 28%, transparent));
 }
 
@@ -916,4 +913,301 @@
 /* 上一步钉在页脚左侧（页脚整体右对齐） */
 .boot-prev {
   margin-right: auto;
+}
+
+.boot-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 12px;
+  padding: 10px 12px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-lg, 10px);
+  background: var(--muted, var(--surface-muted));
+}
+
+.boot-summary-name {
+  font-size: 13px;
+  font-weight: 640;
+  color: var(--foreground, var(--text-strong));
+}
+
+.boot-summary-meta {
+  font-size: 11px;
+  color: var(--muted-foreground, var(--text-muted));
+}
+
+.boot-summary code {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--foreground, var(--text));
+  word-break: break-all;
+}
+
+/* —— 诚实向导（2026-08-15）：步骤条 / 诚实条 / 风味预览 / 占用目录 —— */
+.boot-steps {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.boot-step {
+  font-size: 11px;
+  font-weight: 640;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted-foreground, var(--text-muted));
+}
+
+.boot-step.is-current {
+  color: var(--foreground, var(--text-strong));
+}
+
+.boot-step.is-done {
+  color: var(--primary, var(--rose));
+}
+
+.boot-step-rule {
+  flex: 0 0 28px;
+  height: 1px;
+  background: var(--border);
+}
+
+.boot-honest {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in oklab, var(--primary, var(--rose)) 22%, transparent);
+  border-radius: var(--radius-lg, 10px);
+  background: color-mix(in oklab, var(--primary, var(--rose)) 7%, transparent);
+}
+
+.boot-honest .icon {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 auto;
+  margin-top: 2px;
+  color: var(--primary, var(--rose));
+}
+
+.boot-honest p {
+  margin: 0;
+  font-size: var(--text-sm, 12.5px);
+  color: var(--foreground, var(--text));
+  line-height: 1.5;
+}
+
+.boot-honest code {
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--muted, var(--surface-muted));
+}
+
+.boot-flavors {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+@media (max-width: 720px) {
+  .boot-flavors {
+    grid-template-columns: 1fr;
+  }
+}
+
+.boot-advanced {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg, 10px);
+  background: var(--card, var(--surface));
+  padding: 0;
+}
+
+.boot-advanced > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  cursor: pointer;
+  list-style: none;
+  font-size: var(--text-sm, 12.5px);
+  font-weight: 600;
+  color: var(--foreground, var(--text-strong));
+}
+
+.boot-advanced > summary::-webkit-details-marker {
+  display: none;
+}
+
+.boot-advanced > summary .icon {
+  width: 14px;
+  height: 14px;
+  color: var(--muted-foreground, var(--text-muted));
+  transition: transform 120ms ease;
+}
+
+.boot-advanced[open] > summary .icon {
+  transform: rotate(90deg);
+}
+
+.boot-advanced-meta {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--muted-foreground, var(--text-muted));
+}
+
+.boot-advanced-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 0 12px 14px;
+}
+
+.boot-force {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--text-sm, 12.5px);
+  color: var(--foreground, var(--text));
+}
+
+.boot-copy {
+  margin-left: auto;
+}
+
+.boot-scaffold-dir {
+  flex-wrap: wrap;
+}
+
+.boot-preview-files {
+  margin: 12px 0 0;
+  padding: 8px 10px;
+  list-style: none;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-md, 8px);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.7;
+  color: var(--muted-foreground, var(--text-muted));
+}
+
+.boot-preview-cardish,
+.boot-preview-dash section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 8px);
+  background: color-mix(in oklab, var(--card, var(--surface)) 88%, transparent);
+}
+
+.boot-preview-cardish strong,
+.boot-preview-dash strong {
+  font-size: 13px;
+}
+
+.boot-preview-cardish em,
+.boot-preview-dash em {
+  font-style: normal;
+  font-size: 11px;
+  color: var(--muted-foreground, var(--text-muted));
+}
+
+.boot-preview-btn {
+  align-self: flex-start;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: var(--primary, var(--rose));
+  color: var(--primary-foreground, #fff);
+  font-size: 11px;
+}
+
+.boot-preview-dash {
+  display: grid;
+  grid-template-columns: 72px 1fr;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.boot-preview-dash aside {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.boot-preview-dash aside span {
+  padding: 4px 6px;
+  border-radius: 6px;
+  font-size: 11px;
+  color: var(--muted-foreground, var(--text-muted));
+}
+
+.boot-preview-dash aside span.is-on {
+  background: var(--card, var(--surface));
+  border: 1px solid var(--border);
+  color: var(--foreground, var(--text));
+}
+
+.boot-preview-card[data-theme-preview="dark"] {
+  background: oklch(0.19 0 0);
+  color: oklch(0.96 0 0);
+}
+
+.boot-preview-card[data-theme-preview="dark"] .boot-preview-topbar,
+.boot-preview-card[data-theme-preview="dark"] .boot-preview-url {
+  background: oklch(0.16 0 0);
+  color: oklch(0.78 0 0);
+}
+
+.boot-preview-card[data-style-preview="paper"] {
+  background: oklch(0.99 0.006 80);
+  color: oklch(0.24 0.02 50);
+}
+
+.boot-preview-card[data-style-preview="paper"][data-theme-preview="dark"] {
+  background: oklch(0.24 0.018 50);
+  color: oklch(0.95 0.01 75);
+}
+
+.boot-preview-card[data-style-preview="ink"] {
+  background: oklch(1 0 0);
+  color: oklch(0.08 0 0);
+  border-color: oklch(0.16 0 0);
+}
+
+.boot-preview-card[data-style-preview="ink"][data-theme-preview="dark"] {
+  background: oklch(0.08 0 0);
+  color: oklch(0.98 0 0);
+}
+
+.boot-preview-card[data-font-preview="mono"] {
+  font-family: ui-monospace, "SF Mono", "Cascadia Code", Consolas, monospace;
+}
+
+.boot-remote-host {
+  width: 100%;
+  cursor: pointer;
+}
+
+.boot-section .remote-path-row {
+  margin-top: 6px;
+}
+
+.boot-section .remote-browser {
+  margin-top: 8px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .boot-advanced > summary .icon {
+    transition: none;
+  }
 }

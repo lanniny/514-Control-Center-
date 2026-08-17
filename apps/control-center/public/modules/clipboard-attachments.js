@@ -93,6 +93,23 @@ export function ensureAttachmentContext(contexts, key) {
   return contexts.get(key);
 }
 
+/**
+ * 只消费本次请求已经快照并提交的附件；请求在途期间新加入的附件/上传不得被迟到响应抹掉。
+ * 返回 true 表示上下文已经没有任何待提交内容，调用方可以安全删除 Map 项。
+ */
+export function consumeSubmittedAttachments(context, submittedPaths = []) {
+  if (!context || !Array.isArray(context.attachments) || !Array.isArray(context.uploads)) {
+    throw new TypeError("context must contain attachment and upload arrays");
+  }
+  const submitted = new Set((submittedPaths || []).map(String));
+  if (submitted.size) {
+    for (let index = context.attachments.length - 1; index >= 0; index -= 1) {
+      if (submitted.has(String(context.attachments[index]))) context.attachments.splice(index, 1);
+    }
+  }
+  return context.attachments.length === 0 && context.uploads.length === 0;
+}
+
 export function composerDraftHasActivity({ text = "", context = null } = {}) {
   return Boolean(
     String(text).trim()
@@ -117,7 +134,10 @@ export async function queueClipboardImageUploads({
   if (typeof upload !== "function") throw new TypeError("upload must be a function");
   if (claim !== null && typeof claim !== "function") throw new TypeError("claim must be a function");
   const requested = Array.from(files || []);
-  const capacity = Math.max(0, maxAttachments - context.attachments.length - context.uploads.length);
+  // 失败的上传仍以 chip 展示（可重试/手动清除），但不再占配额——
+  // 否则 8 个配额被失败项耗尽后新粘贴全部被拒
+  const blockingUploads = context.uploads.filter((item) => item?.status !== "error").length;
+  const capacity = Math.max(0, maxAttachments - context.attachments.length - blockingUploads);
   const acceptedFiles = requested.slice(0, capacity);
   const uploads = acceptedFiles.map((file, index) => ({
     id: id(index),
@@ -256,6 +276,13 @@ export function bindClipboardImagePaste(input, onImages) {
     const files = clipboardImageFiles(event.clipboardData);
     if (!files.length) return;
     event.preventDefault();
+    // 图文混贴：图片走上传，文本按原生行为插回输入框——两者都不丢
+    const text = event.clipboardData?.getData?.("text/plain") || "";
+    if (text && typeof input.setRangeText === "function") {
+      const start = input.selectionStart ?? input.value.length;
+      input.setRangeText(text, start, input.selectionEnd ?? start, "end");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }
     void onImages(files);
   };
   input.addEventListener("paste", handlePaste);

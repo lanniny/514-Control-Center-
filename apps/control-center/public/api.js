@@ -15,6 +15,9 @@ const API = Object.freeze({
   approvals: "/api/approvals",
   leases: "/api/leases",
   runtimeReload: "/api/runtime/reload",
+  remoteGates: "/api/security/remote-gates",
+  remoteGateGrant: "/api/security/remote-gates/grant",
+  remoteGateRevoke: "/api/security/remote-gates/revoke",
   obsSummary: "/api/observability/summary",
   obsRouteGate: "/api/observability/routegate",
   obsDelta: "/api/observability/delta",
@@ -23,7 +26,9 @@ const API = Object.freeze({
   sessions: "/api/sessions",
   sessionProjects: "/api/sessions/projects",
   capabilities: "/api/capabilities",
+  hooks: "/api/hooks",
   teams: "/api/teams",
+  teamInbox: (teamId) => `/api/teams/${encodeURIComponent(teamId)}/inbox`,
   teamMembers: "/api/team-members",
   adapterTemplates: "/api/adapter-templates",
   runtimeSeats: "/api/runtime-seats",
@@ -55,10 +60,14 @@ const API = Object.freeze({
   providerUsage: (id) => `/api/providers/${encodeURIComponent(id)}/usage`,
   ccswitchDomain: "/api/ccswitch/domain",
   ccswitchProxy: "/api/ccswitch/proxy",
+  ccswitchProxyUsageOverview: "/api/ccswitch/proxy/usage/overview",
   ccswitchAuth: "/api/ccswitch/auth",
   workbenchEnvironment: "/api/workbench/environment",
   workbenchGitPlan: "/api/workbench/git/plan",
   workbenchGitExecute: "/api/workbench/git/execute",
+  operatorProfile: "/api/operator-profile",
+  operatorAvatar: "/api/avatars/operator",
+  memberAvatar: (id) => `/api/avatars/members/${encodeURIComponent(id)}`,
 });
 
 const TOKEN_KEY = "514cc-control-token";
@@ -157,6 +166,32 @@ export async function request(path, options = {}) {
     throw new ApiError(detail ? String(detail) : `${method} ${safePath} 返回 HTTP ${response.status}`, response.status, payload);
   }
   return payload;
+}
+
+export async function requestBlob(path, options = {}) {
+  const safePath = sameOriginApiPath(path);
+  const method = options.method ?? "GET";
+  const headers = new Headers(options.headers ?? {});
+  if (accessToken) headers.set("Authorization", `Bearer ${accessToken}`);
+  let response;
+  try {
+    response = await fetch(safePath, { method, headers, signal: options.signal });
+  } catch (error) {
+    if (error?.name === "AbortError") throw error;
+    throw new ApiError(`网络请求失败：${error?.message ?? error}`, 0, null);
+  }
+  if (!response.ok) {
+    const contentType = response.headers.get("content-type") ?? "";
+    const payload = contentType.includes("application/json")
+      ? await response.json().catch(() => null)
+      : await response.text().catch(() => null);
+    const errorPayload = payload && typeof payload === "object" ? payload.error ?? payload : null;
+    const detail = errorPayload && typeof errorPayload === "object"
+      ? errorPayload.message ?? errorPayload.detail ?? errorPayload.code
+      : errorPayload ?? (typeof payload === "string" ? payload : null);
+    throw new ApiError(detail ? String(detail) : `${method} ${safePath} 返回 HTTP ${response.status}`, response.status, payload);
+  }
+  return response.blob();
 }
 
 /**

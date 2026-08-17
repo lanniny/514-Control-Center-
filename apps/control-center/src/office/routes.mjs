@@ -54,4 +54,16 @@ export function registerOfficeRoutes(router, ctx) {
   router.get("/api/office/templates", guarded(async (request, response) => {
     ctx.json(response, 200, { ok: true, templates: office.templates() });
   }));
+
+  router.get("/api/office/download", guarded(async (request, response, url) => {
+    const file = await office.readDocument(url.searchParams.get("path") || "");
+    const encoded = encodeURIComponent(file.fileName).replace(/['()]/g, escape);
+    response.writeHead(200, {
+      "content-type": file.contentType,
+      "content-disposition": `attachment; filename*=UTF-8''${encoded}`,
+      "content-length": file.bytes.length,
+      "cache-control": "no-store",
+    });
+    response.end(file.bytes);
+  }));
 }

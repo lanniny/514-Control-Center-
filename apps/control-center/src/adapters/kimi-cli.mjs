@@ -104,7 +104,16 @@ export class KimiCliAdapter {
       collector.end();
     }
     const persistence = await pendingTasks.drain();
-    if (processError) throw processError;
+    if (processError) {
+      // 进程级失败（超时/中断/spawn）：进程已终止或从未启动，原生轮不可能仍在运行
+      if (processError.code === "PROCESS_TIMEOUT" || processError.name === "AbortError" || processError.code === "ENOENT") {
+        processError.nativeTurnSettled = true;
+        processError.interruptConfirmed = true;
+      }
+      processError.sessionId = sessionId || null;
+      processError.sessionResumable = Boolean(sessionId);
+      throw processError;
+    }
     if (persistence.timedOut || persistence.pending || persistence.dropped || persistence.errors.length) {
       const error = persistence.errors[0] || new Error("Kimi event persistence did not settle within its bounded drain window");
       if (!error.code) error.code = "EVENT_PERSISTENCE_INCOMPLETE";
@@ -117,6 +126,12 @@ export class KimiCliAdapter {
       }
       const error = new Error(message);
       error.code = "KIMI_FAILED";
+      // headless 进程已退出，原生轮必然已死（与 grok 适配器同语义）：
+      // 编排器据此允许超时族错误自动续跑，而不是一律落 recovery_required 人工闸
+      error.nativeTurnSettled = true;
+      error.interruptConfirmed = true;
+      error.sessionId = sessionId || null;
+      error.sessionResumable = Boolean(sessionId);
       throw error;
     }
     return { sessionId: resolvedSessionId, text: textParts.join("\n\n"), nativePersistence: true, protocol: "kimi-headless-resume" };

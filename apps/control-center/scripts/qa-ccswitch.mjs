@@ -60,6 +60,7 @@ async function openPage(viewport, theme) {
     : page.locator('.topbar-nav [data-view="config"]');
   await configNav.waitFor({ state: "visible" });
   await configNav.click();
+  await page.locator('[data-config-surface="local-runtime"]').click();
   const root = page.locator("#ccswitch-workbench");
   await root.waitFor({ state: "visible" });
   await root.locator(".ccs-tabs").waitFor();

@@ -43,40 +43,110 @@ function assertAdapterKeySpace(profiles) {
   }
 }
 
-const PROVIDER_EXECUTION_CHAINS = new WeakMap();
+async function withProviderProjection(providerStore, app, providerIdOrResolver, operation) {
+  if (typeof providerStore?.withProviderProjection !== "function") {
+    throw manifestError("provider store does not implement serialized execution projection");
+  }
+  return providerStore.withProviderProjection(app, providerIdOrResolver, operation);
+}
 
-async function withProviderProjection(providerStore, app, providerId, operation) {
-  let chains = PROVIDER_EXECUTION_CHAINS.get(providerStore);
-  if (!chains) {
-    chains = new Map();
-    PROVIDER_EXECUTION_CHAINS.set(providerStore, chains);
-  }
-  const previous = chains.get(app) ?? Promise.resolve();
-  let release;
-  const gate = new Promise((resolveGate) => { release = resolveGate; });
-  const queued = previous.catch(() => {}).then(() => gate);
-  chains.set(app, queued);
-  await previous.catch(() => {});
-  try {
-    if (providerStore.current?.[app] !== providerId) await providerStore.switchTo(app, providerId);
-    return await operation();
-  } finally {
-    release();
-    if (chains.get(app) === queued) chains.delete(app);
-  }
+function providerBindingDescriptor(profile, adapterTemplate, providerStore) {
+  const requestedProviderId = profile.providerId == null ? null : String(profile.providerId).trim() || null;
+  const resolved = resolveProviderBinding(profile, adapterTemplate, providerStore);
+  const providerApp = adapterTemplate.providerApp || null;
+  const proxyTakeover = Boolean(
+    resolved.providerId
+    && providerApp
+    && providerStore?.proxyRuntime?.takeover?.has?.(providerApp),
+  );
+  const routeMode = resolved.providerId
+    ? (proxyTakeover ? "local-proxy" : "direct-projection")
+    : "adapter-managed";
+  return Object.freeze({
+    requestedProviderId,
+    effectiveProviderId: resolved.providerId,
+    mode: resolved.providerId ? "bound" : "adapter-managed",
+    degradedReason: resolved.degraded?.reason || null,
+    degradedDetail: resolved.degraded
+      ? Object.freeze({ ...resolved.degraded })
+      : null,
+    providerApp,
+    adapterId: adapterTemplate.id,
+    routeMode,
+    bindingScope: resolved.providerId ? (proxyTakeover ? "dispatch" : "upstream") : "adapter",
+    upstreamProviderId: resolved.providerId && !proxyTakeover ? resolved.providerId : null,
+    upstreamAttribution: resolved.providerId
+      ? (proxyTakeover ? "proxy-request-unlinked" : "exact")
+      : "unavailable",
+  });
+}
+
+function attachProviderBindingResolver(adapter, resolver) {
+  Object.defineProperty(adapter, "getProviderBinding", {
+    configurable: false,
+    enumerable: false,
+    value: resolver,
+    writable: false,
+  });
+  return adapter;
 }
 
 function bindProvider(adapter, profile, adapterTemplate, providerStore) {
-  const providerId = String(profile.providerId ?? "").trim();
-  if (!providerId) return adapter;
-  // provider 当前环境解析不到 → 不挂投影，席位按 Adapter 管理降级运行
-  //（启动期 createTeamCatalog 已发出降级告警，这里静默跟随同一语义）。
-  if (!resolveProviderBinding(profile, adapterTemplate, providerStore).providerId) return adapter;
+  const requestedProviderId = String(profile.providerId ?? "").trim();
+  const getBinding = () => providerBindingDescriptor(profile, adapterTemplate, providerStore);
+  attachProviderBindingResolver(adapter, getBinding);
+  if (!requestedProviderId) return adapter;
+  // Provider 状态可能在运行期间恢复或失效；每次 send 动态重解析，避免启动期快照
+  // 把 continuation 永久锁在旧的 adapter-managed/bound 语义。
   const app = adapterTemplate.providerApp;
   return new Proxy(adapter, {
     get(target, property) {
+      if (property === "getProviderBinding") return getBinding;
       if (property === "send") {
-        return (input) => withProviderProjection(providerStore, app, providerId, () => target.send(input));
+        return async (input) => {
+          let binding = null;
+          let operationStarted = false;
+          try {
+            const response = await withProviderProjection(
+              providerStore,
+              app,
+              () => {
+                binding = getBinding();
+                return binding.mode === "bound" ? binding.effectiveProviderId : null;
+              },
+              () => {
+                operationStarted = true;
+                return target.send(input);
+              },
+            );
+            binding ??= getBinding();
+            return { ...response, providerBinding: binding };
+          } catch (error) {
+            const currentBinding = getBinding();
+            // ProviderStore 解析出 id 后，更新/删除仍可能在切换 live 投影前提交。
+            // 只有确认投影尚未开始且绑定已明确降级时，才允许沿用 LO 裁决的
+            // adapter-managed 语义重试；不能把真实 adapter.send 错误吞成降级。
+            if (
+              !operationStarted
+              && currentBinding.mode === "adapter-managed"
+              && (error?.code === "SOURCE_NOT_FOUND" || error?.code === "VALIDATION_FAILED")
+            ) {
+              binding = currentBinding;
+              try {
+                const response = await target.send(input);
+                return { ...response, providerBinding: binding };
+              } catch (retryError) {
+                if (retryError && typeof retryError === "object" && !retryError.providerBinding) {
+                  retryError.providerBinding = binding;
+                }
+                throw retryError;
+              }
+            }
+            binding ??= currentBinding;
+            if (error && typeof error === "object" && !error.providerBinding) error.providerBinding = binding;
+            throw error;
+          }
+        };
       }
       const value = Reflect.get(target, property, target);
       return typeof value === "function" ? value.bind(target) : value;

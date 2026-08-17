@@ -4,7 +4,10 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
   buildTeamPanelData,
+  layoutTeamTopology,
+  nodeInitial,
   normalizeRunSessions,
+  renderTeamTopologyMarkup,
   PROFILE_META,
   resolveCatalogBrand,
   runsForTeam,
@@ -74,6 +77,15 @@ test("team panel prefers the live catalog label, role and provider over static p
   assert.equal(snapshot.agents[0].role, "custom · ui · coordinator");
   assert.equal(snapshot.agents[0].provider, "custom-moonshot");
   assert.equal(snapshot.agents[0].layer, "leader");
+  assert.equal(snapshot.agents[0].avatar, "");
+});
+
+test("team panel projects a custom avatar flag from the member catalog", () => {
+  const snapshot = buildTeamPanelData({
+    team: { id: "customized", name: "自定义", coordinator: "kimi-frontend", members: ["kimi-frontend"] },
+    catalog: [{ id: "kimi-frontend", label: "月之主脑", provider: "moonshot", avatar: "custom" }],
+  });
+  assert.equal(snapshot.agents[0].avatar, "custom");
 });
 
 test("catalog provider branding overrides a known agent's static provider", () => {
@@ -260,4 +272,30 @@ test("disabled gemini seat is never suggested for long-context tasks", () => {
   const markup = suggestMarkup("读一下这篇论文全文", new Set(["gemini-research", "grok-search"]), null);
   assert.match(markup, /data-suggest-agent="grok-search"/);
   assert.doesNotMatch(markup, /gemini-research/);
+});
+
+test("three-seat topology spreads into a triangle instead of a vertical line", () => {
+  const { width, height, positions } = layoutTeamTopology([
+    { id: "a", name: "金色瞬间" },
+    { id: "b", name: "Codex 技术并行" },
+    { id: "c", name: "初音未来·极速电子歌姬" },
+  ], "b");
+  const xs = positions.map((item) => item.x);
+  const ys = positions.map((item) => item.y);
+  assert.equal(positions.length, 3);
+  assert.ok(width >= 600);
+  assert.ok(height >= 240);
+  assert.ok(Math.max(...xs) - Math.min(...xs) > 120, "nodes must occupy horizontal space");
+  assert.ok(new Set(xs.map((value) => Math.round(value))).size >= 3, "three seats must not share one x");
+  assert.ok(Math.max(...ys) - Math.min(...ys) > 40);
+  assert.equal(nodeInitial("金色瞬间"), "金");
+  assert.equal(nodeInitial("Codex"), "CO");
+  const markup = renderTeamTopologyMarkup([
+    { id: "a", name: "金色瞬间", provider: "xai", brand: "grok", avatar: "custom" },
+    { id: "b", name: "Codex 技术并行", provider: "openai", brand: "codex" },
+    { id: "c", name: "初音未来·极速电子歌姬", provider: "tokenrhythm", brand: "other" },
+  ], { coordinatorId: "b" });
+  assert.match(markup, /tp-topo-face/);
+  assert.match(markup, /cli-logo tp-topo-icon|avatar-photo tp-topo-photo/);
+  assert.doesNotMatch(markup, /tp-topo-initial/);
 });

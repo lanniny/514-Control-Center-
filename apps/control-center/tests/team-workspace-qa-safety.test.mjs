@@ -10,6 +10,7 @@ import {
   createIsolatedQaRepo,
   diagnosticsWatcher,
   httpFailureDiagnostic,
+  isAllowedRequestAbort,
   parseQaArgs,
   withDisposableQaRoot,
 } from "../scripts/qa-team-workspace.mjs";
@@ -80,11 +81,14 @@ test("team QA only allows explicit read-only remote gate 501 responses", () => {
   assert.deepEqual([...ALLOWED_GATE_BLOCKS].sort(), [
     "GET /api/channels",
     "GET /api/channels/events",
+    "GET /api/market/catalog",
     "GET /api/market/installed",
+    "GET /api/market/repos",
     "GET /api/market/skills",
     "GET /api/office/templates",
     "GET /api/pty",
     "GET /api/ssh/hosts",
+    "GET /api/ssh/hosts/recoveries",
   ]);
   assert.equal(httpFailureDiagnostic({
     method: "GET",
@@ -108,6 +112,39 @@ test("team QA only allows explicit read-only remote gate 501 responses", () => {
   assert.match(httpFailureDiagnostic({ method: "GET", pathname: "/api/teams", status: 422 }), /HTTP 422/);
   assert.match(httpFailureDiagnostic({ method: "GET", pathname: "/api/teams", status: 500 }), /HTTP 500/);
   assert.equal(httpFailureDiagnostic({ method: "GET", pathname: "/api/teams", status: 200 }), null);
+});
+
+test("team QA classifies only owned latest-wins GET aborts as expected browser diagnostics", () => {
+  assert.equal(isAllowedRequestAbort({
+    method: "GET",
+    pathname: "/api/workbench/environment",
+    errorText: "net::ERR_ABORTED",
+  }), true);
+  assert.equal(isAllowedRequestAbort({
+    method: "GET",
+    pathname: "/api/runs/run-1/mission",
+    errorText: "net::ERR_ABORTED",
+  }), true);
+  assert.equal(isAllowedRequestAbort({
+    method: "GET",
+    pathname: "/api/runs/run-1/diff",
+    errorText: "net::ERR_ABORTED",
+  }), true);
+  assert.equal(isAllowedRequestAbort({
+    method: "POST",
+    pathname: "/api/workbench/environment",
+    errorText: "net::ERR_ABORTED",
+  }), false);
+  assert.equal(isAllowedRequestAbort({
+    method: "POST",
+    pathname: "/api/runs/run-1/diff",
+    errorText: "net::ERR_ABORTED",
+  }), false);
+  assert.equal(isAllowedRequestAbort({
+    method: "GET",
+    pathname: "/api/workbench/environment",
+    errorText: "net::ERR_FAILED",
+  }), false);
 });
 
 test("team QA recursive cleanup guard only accepts its own temp prefix", () => {

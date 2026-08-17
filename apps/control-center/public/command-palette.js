@@ -29,19 +29,35 @@ const NAV_ICON_BY_VIEW = {
   observability: "activity",
   sessions: "history",
   team: "users",
+  hero: "orbit",
   bootstrapper: "rocket",
+  office: "file-type",
+  automations: "timer",
+  appearance: "palette",
+  browser: "globe",
+  market: "puzzle",
+  hosts: "server",
+  channels: "satellite-dish",
 };
 
 const NAV_KEYWORDS_BY_VIEW = {
   workbench: "collaboration workbench 协作 任务",
   overview: "overview 总览 dashboard 健康",
-  config: "config 配置 settings 源 capabilities 能力 skills 技能 MCP 图谱 provider 供应商",
-  router: "router 路由 model 模型",
-  security: "security 安全 shield 诊断",
+  config: "config 配置 settings 设置 源 capabilities 能力 skills 技能 MCP 图谱 provider 供应商",
+  router: "router 路由 model 模型 设置 派工 团队",
+  security: "security 安全 shield 诊断 设置",
   observability: "observability 观测 pulse delta handoff 交接 记忆 memory",
   sessions: "sessions 会话 conversation 历史",
-  team: "team 团队 协作 roster agent 成员",
+  team: "team 团队 协作 roster agent 成员 星图 constellation 路由 派工",
+  hero: "hero constellation 星图 协作星图 orbit 团队",
   bootstrapper: "bootstrapper 项目 创建 new project scaffold 脚手架",
+  office: "office 文档 工坊 docx ppt",
+  automations: "automation 自动化 定时 闲时 cron schedule 计划",
+  appearance: "appearance theme 外观 主题 字号 深色 亮色",
+  browser: "browser 浏览器 内置浏览",
+  market: "market plugin 市场 插件 skill mcp",
+  hosts: "hosts ssh 远程主机",
+  channels: "channels 渠道",
 };
 
 const QUICK_ACTIONS = [
@@ -410,6 +426,7 @@ async function runGlobalSearch(query) {
 function onKeydown(e) {
   if (e.key === "ArrowDown") {
     e.preventDefault();
+    if (!_filteredItems.length) return; // 空列表时保持 0，避免索引变 -1 破坏 aria 与 Enter 行为
     _selectedIndex = Math.min(_selectedIndex + 1, _filteredItems.length - 1);
     updateSelection();
   } else if (e.key === "ArrowUp") {
@@ -429,9 +446,10 @@ function highlightMatch(text, query) {
   if (!words.length) return safe;
   const lower = safe.toLowerCase();
   for (const word of words) {
-    const idx = lower.indexOf(escapeHtml(word));
+    const needle = escapeHtml(word); // 在转义后文本里切片，长度必须按转义后实体算（`<`→`&lt;`，否则 <mark> 切断实体出乱码）
+    const idx = lower.indexOf(needle);
     if (idx >= 0) {
-      return `${safe.slice(0, idx)}<mark>${safe.slice(idx, idx + word.length)}</mark>${safe.slice(idx + word.length)}`;
+      return `${safe.slice(0, idx)}<mark>${safe.slice(idx, idx + needle.length)}</mark>${safe.slice(idx + needle.length)}`;
     }
   }
   return safe;

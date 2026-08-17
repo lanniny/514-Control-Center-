@@ -1,0 +1,432 @@
+/* forge/hooks.css — 配置图谱「钩子」面，对标生命周期钩子管理页 */
+
+#config-surface-hooks,
+#config-surface-hooks .hooks-workbench,
+#config-surface-hooks .hooks-chrome,
+#config-surface-hooks .hooks-groups,
+#config-surface-hooks .hooks-group {
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+#config-surface-hooks .hooks-chrome,
+#config-surface-hooks .hooks-groups,
+#config-surface-hooks .hooks-group {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  justify-items: stretch;
+}
+
+#config-surface-hooks .hooks-chrome {
+  gap: 16px;
+}
+
+#config-surface-hooks .hooks-heading,
+#config-surface-hooks .hooks-heading-actions,
+#config-surface-hooks .hooks-toolbar,
+#config-surface-hooks .hooks-card,
+#config-surface-hooks .hooks-card-title,
+#config-surface-hooks .hooks-card-actions,
+#config-surface-hooks .hooks-form-actions {
+  display: flex;
+  align-items: center;
+}
+
+#config-surface-hooks .hooks-heading {
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+#config-surface-hooks .hooks-heading h2 {
+  margin: 4px 0 6px;
+}
+
+#config-surface-hooks .hooks-heading p:last-child {
+  margin: 0;
+  color: var(--muted-foreground, var(--text-muted));
+}
+
+#config-surface-hooks .hooks-heading-actions {
+  gap: 6px;
+}
+
+#config-surface-hooks .hooks-search {
+  width: 100%;
+  max-width: none;
+  margin-left: 0;
+  margin-right: 0;
+}
+
+#config-surface-hooks .hooks-toolbar {
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+#config-surface-hooks .hooks-scope {
+  display: flex;
+  gap: 6px;
+}
+
+#config-surface-hooks .hooks-scope-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted-foreground, var(--text-muted));
+  cursor: pointer;
+}
+
+#config-surface-hooks .hooks-scope-chip.is-active {
+  background: color-mix(in srgb, var(--primary) 14%, var(--card));
+  color: var(--foreground, var(--text));
+}
+
+#config-surface-hooks .hooks-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--muted-foreground, var(--text-muted));
+  font-size: 12.5px;
+}
+
+#config-surface-hooks .hooks-group {
+  gap: 10px;
+  margin-bottom: 22px;
+}
+
+#config-surface-hooks .hooks-group h3 {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0;
+  font-size: 14px;
+}
+
+#config-surface-hooks .hooks-group h3 em {
+  font-style: normal;
+  color: var(--muted-foreground, var(--text-muted));
+  font-size: 12px;
+}
+
+#config-surface-hooks .hooks-card {
+  display: flex;
+  width: 100%;
+  max-width: none;
+  box-sizing: border-box;
+  justify-self: stretch;
+  gap: 14px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--card);
+}
+
+#config-surface-hooks .hooks-card-icon {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
+  color: var(--primary);
+  flex: 0 0 auto;
+}
+
+#config-surface-hooks .hooks-card-copy {
+  min-width: 0;
+  flex: 1;
+}
+
+#config-surface-hooks .hooks-card-title {
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+#config-surface-hooks .hooks-tag {
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--muted, var(--surface-muted));
+  color: var(--muted-foreground, var(--text-muted));
+  font-size: 11px;
+}
+
+#config-surface-hooks .hooks-tag.is-warn {
+  background: color-mix(in srgb, var(--warning) 18%, transparent);
+  color: var(--warning);
+}
+
+#config-surface-hooks .hooks-command {
+  display: block;
+  overflow: hidden;
+  color: var(--foreground, var(--text));
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 12.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#config-surface-hooks .hooks-path {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted-foreground, var(--text-muted));
+}
+
+#config-surface-hooks .hooks-card-actions {
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+#config-surface-hooks .hooks-chrome.is-form {
+  min-height: min(72vh, 820px);
+}
+
+#config-surface-hooks .hooks-form {
+  display: flex;
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  min-height: min(72vh, 820px);
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 8px);
+  background: var(--card);
+  box-shadow: var(--shadow-sm, var(--shadow-low));
+}
+
+#config-surface-hooks .hooks-form-bar {
+  display: flex;
+  flex-shrink: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--card, var(--surface)) 94%, var(--muted, var(--surface-muted)));
+}
+
+#config-surface-hooks .hooks-form-bar-copy {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 14px;
+}
+
+#config-surface-hooks .hooks-form-bar-copy h3 {
+  margin: 2px 0 4px;
+  font-size: 16px;
+  font-weight: 650;
+}
+
+#config-surface-hooks .hooks-form-bar-copy .eyebrow {
+  margin: 0;
+}
+
+#config-surface-hooks .hooks-form-body {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 0;
+  overflow: auto;
+  padding: 4px 18px 24px;
+}
+
+#config-surface-hooks .hooks-form-section {
+  display: grid;
+  gap: 14px;
+  padding: 18px 0;
+  border-top: 1px solid var(--border);
+}
+
+#config-surface-hooks .hooks-form-section:first-of-type {
+  border-top: 0;
+}
+
+#config-surface-hooks .hooks-form-section h4 {
+  margin: 0;
+  color: var(--foreground, var(--text));
+  font-size: 13px;
+  font-weight: 650;
+}
+
+#config-surface-hooks .hooks-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px 20px;
+  align-items: start;
+}
+
+#config-surface-hooks .hooks-form .field {
+  display: grid;
+  grid-template-rows: auto 38px auto;
+  align-content: start;
+  min-width: 0;
+}
+
+#config-surface-hooks .hooks-form .field.field-block,
+#config-surface-hooks .hooks-form .field.checkbox {
+  grid-template-rows: auto auto auto;
+}
+
+#config-surface-hooks .hooks-form .field > input:not([type="checkbox"]),
+#config-surface-hooks .hooks-form .field > select,
+#config-surface-hooks .hooks-form .field > textarea {
+  width: 100%;
+  min-width: 0;
+  min-height: 38px;
+  padding: 8px 10px;
+  box-sizing: border-box;
+}
+
+#config-surface-hooks .hooks-form .field > textarea {
+  min-height: 112px;
+  resize: vertical;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 12.5px;
+}
+
+#config-surface-hooks .hooks-form .field > small,
+#config-surface-hooks .hooks-form .field .subtle,
+#config-surface-hooks .hooks-store-path {
+  min-height: 16px;
+  line-height: 1.35;
+}
+
+#config-surface-hooks .hooks-form .field.checkbox {
+  display: inline-flex;
+  width: max-content;
+  max-width: 100%;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  white-space: nowrap;
+}
+
+#config-surface-hooks .hooks-form .field.checkbox input {
+  width: 16px;
+  height: 16px;
+  min-width: 16px;
+  min-height: 16px;
+  margin: 0;
+  padding: 0;
+  flex: 0 0 16px;
+  accent-color: var(--primary, var(--rose));
+}
+
+#config-surface-hooks .hooks-form-actions {
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+#config-surface-hooks .hooks-empty {
+  display: grid;
+  gap: 8px;
+  justify-items: center;
+  padding: 28px 16px;
+  color: var(--muted-foreground, var(--text-muted));
+  text-align: center;
+}
+
+#config-surface-hooks .hooks-empty.is-error {
+  color: var(--foreground, var(--text));
+}
+
+#config-surface-hooks .hooks-empty small {
+  max-width: 42em;
+}
+
+#config-surface-hooks .hooks-stores {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+#config-surface-hooks .hooks-store-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--card);
+  font-size: 12px;
+}
+
+#config-surface-hooks .hooks-store-chip em {
+  font-style: normal;
+  color: var(--muted-foreground, var(--text-muted));
+}
+
+#config-surface-hooks .hooks-store-chip.is-error {
+  border-color: color-mix(in srgb, var(--danger, #f87171) 40%, var(--border));
+}
+
+#config-surface-hooks .hooks-store-chip.is-muted {
+  opacity: 0.7;
+}
+
+#config-surface-hooks .hooks-back {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  align-self: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted-foreground, var(--text-muted));
+  cursor: pointer;
+}
+
+#config-surface-hooks .hooks-store-path {
+  margin: 0;
+  color: var(--muted-foreground, var(--text-muted));
+  font-size: 12px;
+  word-break: break-all;
+}
+
+#config-surface-hooks .hooks-form .is-hidden {
+  display: none;
+}
+
+#config-surface-hooks .hooks-readonly-note {
+  margin: 0;
+  color: var(--warning, #c4a35a);
+  font-size: 12.5px;
+}
+
+#config-surface-remote .config-remote-hooks {
+  padding: 18px;
+  border: 1px dashed var(--border);
+  border-radius: 12px;
+}
+
+@media (max-width: 820px) {
+  #config-surface-hooks .hooks-card,
+  #config-surface-hooks .hooks-heading,
+  #config-surface-hooks .hooks-form-bar,
+  #config-surface-hooks .hooks-form-bar-copy {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  #config-surface-hooks .hooks-form-grid,
+  #config-surface-hooks .hooks-form-grid-2 {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  #config-surface-hooks .hooks-form-actions {
+    justify-content: flex-end;
+  }
+}

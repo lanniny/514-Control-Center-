@@ -1,10 +1,13 @@
 /**
  * project-bootstrapper.js — 项目启动器
  *
- * 可视化配置新项目：选择框架、样式、主题、图标库、字体，实时预览，
- * 并通过后端脚手架（POST /api/bootstrap/scaffold）真实落盘创建。
+ * 可视化配置静态 starter：选风味 / 色板 / 主题，dryRun 出计划，确认后落盘。
+ * 后端只写 5 个静态文件（index.html + styles.css + app.js + README.md + 514.json），
+ * 零 npm、零构建。向导选项必须与 src/bootstrap.mjs 的 allowlist 对齐——
+ * 不准再展示 Next / Vite / Laravel 这种不会真正生成的框架。
  *
- * 流程：配置 -> dryRun 计划 -> 确认 -> 创建 -> 成功/失败面板。
+ * 流程：类型 -> 配置 -> dryRun 计划 -> 确认 -> 创建 -> 成功/失败/占用目录。
+ * 远程：读 /api/ssh/hosts，有主机就走 SFTP 写同样 5 个文件；没主机如实说，不挂假「暂未接入」。
  * 后端不可用（404/网络错误）时回退为 onCreate(config, null) 通知（工作台预填）。
  *
  * 约定：
@@ -18,19 +21,15 @@ import { lucideIcon } from "./lucide.js";
 import { request } from "./api.js";
 
 const FRAMEWORKS = [
-  { id: "nextjs", name: "Next.js", desc: "全栈 React 框架，SSR/SSG 支持", icon: "zap", popular: true },
-  { id: "vite", name: "Vite + React", desc: "极速构建，轻量级 SPA", icon: "flame", popular: true },
-  { id: "react-router", name: "React Router", desc: "客户端路由，SPA 首选", icon: "compass" },
-  { id: "astro", name: "Astro", desc: "内容优先，零 JS 默认", icon: "rocket" },
-  { id: "laravel", name: "Laravel", desc: "PHP 全栈框架", icon: "package" },
-  { id: "none", name: "纯 Node.js", desc: "无框架，纯脚本", icon: "terminal" },
+  { id: "vanilla", name: "Vanilla", desc: "一张卡片 + 按钮，打开就能点", icon: "code", popular: true },
+  { id: "react", name: "组件化", desc: "函数组件结构，无 JSX、无构建", icon: "boxes" },
+  { id: "dashboard", name: "Dashboard", desc: "侧栏 + 卡片网格骨架", icon: "layout-dashboard" },
 ];
 
 const STYLES = [
-  { id: "tailwind", name: "Tailwind CSS", desc: "原子化 CSS，快速开发", icon: "palette", popular: true },
-  { id: "css-modules", name: "CSS Modules", desc: "局部作用域 CSS", icon: "puzzle" },
-  { id: "styled-components", name: "Styled Components", desc: "CSS-in-JS", icon: "brush" },
-  { id: "vanilla", name: "原生 CSS", desc: "无依赖，完全控制", icon: "file-text" },
+  { id: "paper", name: "暖纸", desc: "铜橙令牌，贴近 Console", icon: "palette", popular: true },
+  { id: "minimal", name: "极简", desc: "冷灰底，少装饰", icon: "file-text" },
+  { id: "ink", name: "墨色", desc: "高对比，近黑白", icon: "type" },
 ];
 
 const THEMES = [
@@ -40,25 +39,26 @@ const THEMES = [
 ];
 
 const ICON_LIBS = [
-  { id: "lucide", name: "Lucide", desc: "轻量级图标集", icon: "sparkles" },
-  { id: "heroicons", name: "Heroicons", desc: "Tailwind 官方图标", icon: "shield-check" },
-  { id: "phosphor", name: "Phosphor", desc: "灵活的图标系统", icon: "puzzle" },
-  { id: "none", name: "无图标库", desc: "不使用图标", icon: "x" },
+  { id: "lucide", name: "Lucide", desc: "写进 514.json 的约定，不装包", icon: "sparkles" },
+  { id: "none", name: "无约定", desc: "不写图标库指纹", icon: "x" },
 ];
 
 const FONTS = [
-  { id: "inter", name: "Inter", desc: "现代无衬线，UI 首选", icon: "type", sample: "The quick brown fox" },
-  { id: "system", name: "系统字体", desc: "使用系统默认字体", icon: "type", sample: "The quick brown fox" },
-  { id: "mono", name: "等宽字体", desc: "代码编辑器风格", icon: "terminal", sample: "const x = 42;" },
+  { id: "system", name: "系统字体", desc: "system-ui，零依赖", icon: "type", sample: "The quick brown fox" },
+  { id: "inter", name: "Inter 优先", desc: "本机有 Inter 才生效，不拉 CDN", icon: "type", sample: "The quick brown fox" },
+  { id: "mono", name: "等宽", desc: "代码编辑器风格", icon: "terminal", sample: "const x = 42;" },
 ];
 
+const PLANNED_FILES = ["index.html", "styles.css", "app.js", "README.md", "514.json"];
 const SCAFFOLD_API = "/api/bootstrap/scaffold";
+const MAX_NAME = 60;
+const MAX_DESCRIPTION = 200;
 const DEFAULTS = Object.freeze({
-  framework: "vite",
-  style: "tailwind",
+  framework: "vanilla",
+  style: "paper",
   theme: "auto",
   icons: "lucide",
-  font: "inter",
+  font: "system",
   name: "",
   dir: "",
   description: "",
@@ -67,26 +67,34 @@ const DEFAULTS = Object.freeze({
 let _containerEl = null;
 let _config = { ...DEFAULTS };
 let _onCreate = null;
-// 脚手架阶段：idle | planning | plan | creating | done | error | fallback
+let _onOpenWorkbench = null;
+let _onOpenHosts = null;
+// 脚手架阶段：idle | planning | plan | creating | done | error | fallback | occupied
 let _stage = "idle";
-let _plan = null; // dryRun 结果 { filesPlanned, targetDir, log }
-let _result = null; // 真实创建结果 { filesWritten, targetDir, log }
-let _error = ""; // 失败信息
+let _plan = null;
+let _result = null;
+let _error = "";
+let _force = false;
+let _advancedOpen = false;
 
-// Codex 式两步向导（LO 2026-08-11）：第一步选项目类型（大卡片 + 单选圈），第二步填名称/目录/高级配置。
-// 远程占位但禁用——远程主机接入是独立特性，不假装可用。
 const PROJECT_TYPES = [
   { id: "local", name: "本地", desc: "在你的电脑上编辑、运行和测试文件", icon: "terminal" },
-  { id: "remote", name: "远程", desc: "选择已连接计算机上的文件夹", icon: "globe", disabled: true, badge: "暂未接入" },
+  { id: "remote", name: "远程", desc: "在已登记主机上写入同样的 5 个静态文件", icon: "globe" },
 ];
-let _step = "type"; // type | config
+let _step = "type";
 let _type = "local";
+let _hosts = [];
+let _hostsStatus = "loading"; // loading | ready | gate | error
+let _remoteHostId = "";
+let _remoteBrowse = { key: "", items: [], loading: false, error: null };
 
 /**
  * 初始化项目启动器
  * @param {HTMLElement} container - 容器（允许为 null，安全自守护）
  * @param {Object} opts
  * @param {Function} opts.onCreate - (config, result) => void，仅通知回调
+ * @param {Function} [opts.onOpenWorkbench] - (targetDir) => void，成功后带到协作台
+ * @param {Function} [opts.onOpenHosts] - () => void，去登记远程主机
  */
 export function initProjectBootstrapper(container, opts = {}) {
   if (!container) {
@@ -95,39 +103,123 @@ export function initProjectBootstrapper(container, opts = {}) {
   }
   _containerEl = container;
   _onCreate = typeof opts.onCreate === "function" ? opts.onCreate : () => {};
+  _onOpenWorkbench = typeof opts.onOpenWorkbench === "function" ? opts.onOpenWorkbench : null;
+  _onOpenHosts = typeof opts.onOpenHosts === "function" ? opts.onOpenHosts : null;
   render();
+  void loadRemoteHosts();
+}
+
+function isFocusStage() {
+  return ["planning", "plan", "creating", "done", "occupied"].includes(_stage);
 }
 
 function render() {
   if (!_containerEl) return;
   const busy = _stage === "planning" || _stage === "creating";
+  const focused = _step === "config" && isFocusStage();
   _containerEl.innerHTML = `
     <div class="bootstrapper">
       <div class="bootstrapper-header">
+        <div class="boot-steps" aria-label="向导进度">
+          <span class="boot-step${_step === "type" ? " is-current" : " is-done"}">1 类型</span>
+          <span class="boot-step-rule" aria-hidden="true"></span>
+          <span class="boot-step${_step === "config" && !focused ? " is-current" : _step === "config" ? " is-done" : ""}">2 配置</span>
+          <span class="boot-step-rule" aria-hidden="true"></span>
+          <span class="boot-step${focused ? " is-current" : ""}">3 写入</span>
+        </div>
         <h3 class="bootstrapper-title">
           <span class="bootstrapper-icon">${lucideIcon("rocket", "icon lucide")}</span>
           项目启动器
         </h3>
-        <p class="bootstrapper-desc">${_step === "type" ? "第一步 · 选择项目类型" : "第二步 · 配置项目信息，先生成创建计划，确认后落盘"}</p>
+        <p class="bootstrapper-desc">${typeStepCopy(focused)}</p>
       </div>
 
-      ${_step === "type" ? renderTypeStep(busy) : renderConfigStep(busy)}
-
       ${renderScaffoldPanel()}
+      ${focused ? renderFocusSummary() : _step === "type" ? renderTypeStep(busy) : renderConfigStep(busy)}
     </div>
   `;
 
   bindEvents();
+  if (_step === "config" && _type === "remote" && selectedHost()) void loadBootRemoteBrowser();
+  const panel = _containerEl.querySelector("#boot-scaffold");
+  if (panel) panel.scrollIntoView({ block: "nearest", behavior: "smooth" });
 }
 
-// 第一步（Codex「创建项目」形态）：项目类型大卡片——图标左上、单选圈右上、名称 + 一行说明
+function isRemote() {
+  return _type === "remote";
+}
+
+function selectedHost() {
+  return _hosts.find((host) => host.id === _remoteHostId) ?? null;
+}
+
+function typeCards() {
+  return PROJECT_TYPES.map((type) => {
+    if (type.id !== "remote") return { ...type, disabled: false, badge: "" };
+    if (_hostsStatus === "loading") return { ...type, disabled: false, badge: "加载中" };
+    if (_hostsStatus === "gate") {
+      return { ...type, disabled: true, badge: "门闸未开", desc: "SSH/SFTP 门闸未开放，打开后才能写到远程。" };
+    }
+    if (_hostsStatus === "error") {
+      return { ...type, disabled: true, badge: "加载失败", desc: "主机台账读不到。可先用本地，或去远程主机页重试。" };
+    }
+    if (!_hosts.length) {
+      return { ...type, disabled: false, badge: "先登记主机", desc: "还没有可用主机。下一步会带你去登记。" };
+    }
+    return { ...type, disabled: false, badge: `${_hosts.length} 台主机` };
+  });
+}
+
+function typeStepCopy(focused) {
+  if (focused) return "确认计划后才会落盘。取消就回到配置。";
+  if (_step !== "type") {
+    return isRemote()
+      ? "远程写入同一套 5 个静态文件。选主机和目录，确认后走 SFTP。"
+      : "静态 starter：5 个文件，无 npm、无构建。选什么，磁盘就长什么样。";
+  }
+  if (_hostsStatus === "loading") return "先选落在哪。正在看有没有可用的远程主机。";
+  if (_hostsStatus === "gate") return "先选落在哪。远程写盘要先开 SSH/SFTP 门闸。";
+  if (_hostsStatus === "error") return "先选落在哪。远程主机台账这次没读到。";
+  if (!_hosts.length) return "先选落在哪。远程要先在「远程主机」里登记一台。";
+  return "先选落在哪。本地写本机，远程写到已登记主机。";
+}
+
+async function loadRemoteHosts() {
+  _hostsStatus = "loading";
+  try {
+    const data = await request("/api/ssh/hosts");
+    _hosts = (data?.hosts ?? []).filter((host) => host.enabled !== false);
+    _hostsStatus = "ready";
+    if (!_remoteHostId || !_hosts.some((host) => host.id === _remoteHostId)) {
+      _remoteHostId = _hosts[0]?.id || "";
+    }
+  } catch (error) {
+    _hosts = [];
+    _remoteHostId = "";
+    _hostsStatus = /REMOTE_GATE/.test(error?.message || "") ? "gate" : "error";
+    if (_type === "remote") _type = "local";
+  }
+  render();
+}
+
+function renderFocusSummary() {
+  return `
+    <div class="boot-summary">
+      <span class="boot-summary-name">${escapeHtml(projectName() || "未命名")}</span>
+      <span class="boot-summary-meta">${getFrameworkName()} · ${getStyleName()} · ${getThemeName()}</span>
+      <code>${escapeHtml(targetDir())}</code>
+    </div>
+  `;
+}
+
 function renderTypeStep(busy) {
-  const selectedType = PROJECT_TYPES.find((t) => t.id === _type);
+  const cards = typeCards();
+  const selectedType = cards.find((t) => t.id === _type);
   return `
     <div class="boot-wizard forge-enter">
       <div class="boot-step-label">项目类型</div>
       <div class="boot-type-grid">
-        ${PROJECT_TYPES.map((t) => {
+        ${cards.map((t) => {
           const selected = t.id === _type;
           return `
             <button class="boot-type-card${selected ? " is-selected" : ""}" data-type-id="${t.id}" type="button"
@@ -150,20 +242,9 @@ function renderTypeStep(busy) {
   `;
 }
 
-// 第二步：项目信息（名称 + 目标目录选择区）+ 脚手架高级配置 + 实时预览
-function renderConfigStep(busy) {
-  return `
-    <div class="boot-wizard forge-enter">
-      <div class="bootstrapper-body">
-        <div class="bootstrapper-config">
-          <!-- 项目信息 -->
-          <div class="boot-section">
-            <label class="boot-label" for="boot-name">项目名称</label>
-            <div class="boot-input-affix">
-              ${lucideIcon("folder", "icon lucide")}
-              <input class="boot-input" type="text" id="boot-name" placeholder="my-awesome-project" value="${escapeAttr(_config.name)}" />
-            </div>
-          </div>
+function renderDestinationSection() {
+  if (!isRemote()) {
+    return `
           <div class="boot-section">
             <label class="boot-label">目标目录</label>
             <div class="boot-dirpick${_config.dir ? " has-dir" : ""}">
@@ -173,30 +254,79 @@ function renderConfigStep(busy) {
               </button>
               ${_config.dir ? `<button class="boot-dirpick-clear" id="boot-dir-clear" type="button" title="清除目录，回到默认" aria-label="清除目录">${lucideIcon("x", "icon lucide")}</button>` : ""}
             </div>
-            <span class="boot-hint" id="boot-dir-hint">${_config.dir ? "" : `留空则使用默认目录 ${escapeHtml(defaultDir())}`}</span>
+            <span class="boot-hint" id="boot-dir-hint">${_config.dir ? "目录须在家目录或仓库父目录内" : `留空则使用默认目录 ${escapeHtml(defaultDir())}`}</span>
+          </div>`;
+  }
+  if (!_hosts.length) {
+    return `
+          <div class="boot-section">
+            <div class="boot-honest">
+              ${lucideIcon("server", "icon lucide")}
+              <p>还没有可用主机。先去「远程主机」登记一台，再回到这里写盘。</p>
+            </div>
+            ${_onOpenHosts ? `<button class="button secondary" id="boot-go-hosts" type="button">${lucideIcon("arrow-right", "icon lucide")}<span>去登记主机</span></button>` : ""}
+          </div>`;
+  }
+  const host = selectedHost();
+  return `
+          <div class="boot-section">
+            <label class="boot-label" for="boot-remote-host">远程主机</label>
+            <select class="boot-input boot-remote-host" id="boot-remote-host">
+              ${_hosts.map((entry) => `<option value="${escapeAttr(entry.id)}"${entry.id === _remoteHostId ? " selected" : ""}>${escapeHtml(entry.name)} · ${escapeHtml(`${entry.user}@${entry.host}:${entry.port}`)}</option>`).join("")}
+            </select>
           </div>
           <div class="boot-section">
-            <label class="boot-label" for="boot-desc">项目描述</label>
-            <input class="boot-input" type="text" id="boot-desc" placeholder="一个很棒的项目" value="${escapeAttr(_config.description)}" />
+            <label class="boot-label" for="boot-remote-path">远程目录</label>
+            <div class="remote-path-row">
+              <button class="icon-button remote-path-up" id="boot-remote-up" type="button" title="上级目录" aria-label="上级目录">
+                ${lucideIcon("arrow-up", "icon lucide")}
+              </button>
+              <input class="boot-input" id="boot-remote-path" autocomplete="off" placeholder="${escapeAttr(defaultDir())}" value="${escapeAttr(_config.dir)}" />
+            </div>
+            <div class="remote-browser" id="boot-remote-browser" aria-live="polite"></div>
+            <span class="boot-hint" id="boot-dir-hint">${_config.dir ? `${escapeHtml(host?.name || "远程")} · 路径须在该主机 SFTP 允许根内` : `留空则使用 ${escapeHtml(defaultDir())}`}</span>
+          </div>`;
+}
+
+function renderConfigStep(busy) {
+  const nameOk = Boolean(_config.name.trim());
+  const nameLen = _config.name.trim().length;
+  return `
+    <div class="boot-wizard forge-enter">
+      <div class="boot-honest">
+        ${lucideIcon("info", "icon lucide")}
+        <p>会写入 <strong>5 个静态文件</strong>。不是 Next / Vite / Laravel，打开 <code>index.html</code> 就能跑。</p>
+      </div>
+      <div class="bootstrapper-body">
+        <div class="bootstrapper-config">
+          <div class="boot-section">
+            <label class="boot-label" for="boot-name">项目名称</label>
+            <div class="boot-input-affix">
+              ${lucideIcon("folder", "icon lucide")}
+              <input class="boot-input" type="text" id="boot-name" maxlength="${MAX_NAME}" placeholder="my-awesome-project" value="${escapeAttr(_config.name)}" autocomplete="off" />
+            </div>
+            <span class="boot-hint" id="boot-name-hint">${nameOk ? `${nameLen} / ${MAX_NAME}` : "必填，会写进标题和 README"}</span>
+          </div>
+          ${renderDestinationSection()}
+          <div class="boot-section">
+            <label class="boot-label" for="boot-desc">一句话描述</label>
+            <input class="boot-input" type="text" id="boot-desc" maxlength="${MAX_DESCRIPTION}" placeholder="可选，写进页面和 README" value="${escapeAttr(_config.description)}" />
           </div>
 
-          <!-- 框架选择 -->
           <div class="boot-section">
-            <label class="boot-label">框架</label>
-            <div class="boot-options">
+            <label class="boot-label">骨架风味</label>
+            <div class="boot-options boot-flavors">
               ${FRAMEWORKS.map((f) => optionCard("framework", f, _config.framework)).join("")}
             </div>
           </div>
 
-          <!-- 样式选择 -->
           <div class="boot-section">
-            <label class="boot-label">样式系统</label>
+            <label class="boot-label">色板</label>
             <div class="boot-options">
               ${STYLES.map((s) => optionCard("style", s, _config.style)).join("")}
             </div>
           </div>
 
-          <!-- 主题选择 -->
           <div class="boot-section">
             <label class="boot-label">主题</label>
             <div class="boot-themes">
@@ -211,28 +341,34 @@ function renderConfigStep(busy) {
             </div>
           </div>
 
-          <!-- 图标库 -->
-          <div class="boot-section">
-            <label class="boot-label">图标库</label>
-            <div class="boot-options boot-options-small">
-              ${ICON_LIBS.map((i) => optionCard("icons", i, _config.icons, { compact: true })).join("")}
+          <details class="boot-advanced" id="boot-advanced" ${_advancedOpen ? "open" : ""}>
+            <summary>
+              ${lucideIcon("chevron-right", "icon lucide")}
+              <span>更多约定</span>
+              <span class="boot-advanced-meta">${getFontName()} · ${getIconName()}</span>
+            </summary>
+            <div class="boot-advanced-body">
+              <div class="boot-section">
+                <label class="boot-label">字体栈</label>
+                <div class="boot-options boot-options-small">
+                  ${FONTS.map((f) => optionCard("font", f, _config.font, { sample: f.sample })).join("")}
+                </div>
+              </div>
+              <div class="boot-section">
+                <label class="boot-label">图标约定</label>
+                <div class="boot-options boot-options-small">
+                  ${ICON_LIBS.map((i) => optionCard("icons", i, _config.icons, { compact: true })).join("")}
+                </div>
+                <span class="boot-hint">只写进 514.json，不会下载图标包。</span>
+              </div>
             </div>
-          </div>
-
-          <!-- 字体 -->
-          <div class="boot-section">
-            <label class="boot-label">字体</label>
-            <div class="boot-options boot-options-small">
-              ${FONTS.map((f) => optionCard("font", f, _config.font, { sample: f.sample })).join("")}
-            </div>
-          </div>
+          </details>
         </div>
 
-        <!-- 实时预览 -->
         <div class="bootstrapper-preview">
           <div class="boot-preview-header">
-            <span class="boot-preview-title">实时预览</span>
-            <span class="boot-preview-badge">${getFrameworkName()} + ${getStyleName()}</span>
+            <span class="boot-preview-title">将得到</span>
+            <span class="boot-preview-badge">${getFrameworkName()} · ${getStyleName()}</span>
           </div>
           <div class="boot-preview-content" id="boot-preview">
             ${renderPreview()}
@@ -249,8 +385,8 @@ function renderConfigStep(busy) {
           ${lucideIcon("refresh-cw", "icon lucide")}
           <span>重置</span>
         </button>
-        <button class="button primary" id="boot-create" type="button" ${busy ? "disabled" : ""}>
-          <span>${busy ? "处理中" : "创建项目"}</span>
+        <button class="button primary" id="boot-create" type="button" ${busy || !nameOk || (isRemote() && !selectedHost()) ? "disabled" : ""} title="${!nameOk ? "先填项目名称" : isRemote() && !selectedHost() ? "先选一台远程主机" : "先出创建计划，确认后再落盘"}">
+          <span>${busy ? "处理中" : "查看创建计划"}</span>
           ${lucideIcon(busy ? "loader-circle" : "arrow-right", busy ? "icon lucide boot-spin" : "icon lucide")}
         </button>
       </div>
@@ -281,8 +417,9 @@ function bindEvents() {
   });
 
   _containerEl.querySelector("#boot-next")?.addEventListener("click", () => {
-    if (PROJECT_TYPES.find((t) => t.id === _type)?.disabled) return;
+    if (typeCards().find((t) => t.id === _type)?.disabled) return;
     _step = "config";
+    if (isRemote() && looksLikeLocalPath(_config.dir)) _config.dir = "";
     render();
   });
 
@@ -291,7 +428,10 @@ function bindEvents() {
     render();
   });
 
-  // 目标目录选择区：服务端原生目录选择框拿绝对路径（与会话对话框同一接口）
+  _containerEl.querySelector("#boot-advanced")?.addEventListener("toggle", (event) => {
+    _advancedOpen = event.currentTarget.open;
+  });
+
   _containerEl.querySelector("#boot-dirpick")?.addEventListener("click", async (event) => {
     const button = event.currentTarget;
     button.disabled = true;
@@ -302,7 +442,7 @@ function bindEvents() {
         render();
       }
     } catch (error) {
-      console.warn("目录选择失败：", error?.message || error); // 用户取消/后端缺失都如实留在控制台，不假装成功
+      console.warn("目录选择失败：", error?.message || error);
     } finally {
       button.disabled = false;
     }
@@ -310,6 +450,43 @@ function bindEvents() {
 
   _containerEl.querySelector("#boot-dir-clear")?.addEventListener("click", () => {
     _config.dir = "";
+    render();
+  });
+
+  _containerEl.querySelector("#boot-go-hosts")?.addEventListener("click", () => {
+    _onOpenHosts?.();
+  });
+
+  _containerEl.querySelector("#boot-remote-host")?.addEventListener("change", (event) => {
+    _remoteHostId = event.currentTarget.value;
+    if (!_config.dir.trim() || looksLikeDefaultRemote(_config.dir)) _config.dir = "";
+    _remoteBrowse = { key: "", items: [], loading: false, error: null };
+    render();
+  });
+
+  _containerEl.querySelector("#boot-remote-path")?.addEventListener("input", (event) => {
+    _config.dir = event.currentTarget.value;
+    const hint = _containerEl.querySelector("#boot-dir-hint");
+    if (hint) {
+      hint.textContent = _config.dir.trim()
+        ? `${selectedHost()?.name || "远程"} · 路径须在该主机 SFTP 允许根内`
+        : `留空则使用 ${defaultDir()}`;
+    }
+  });
+
+  _containerEl.querySelector("#boot-remote-path")?.addEventListener("change", () => {
+    void loadBootRemoteBrowser({ force: true });
+  });
+
+  _containerEl.querySelector("#boot-remote-up")?.addEventListener("click", () => {
+    _config.dir = remotePathParent(targetDir());
+    render();
+  });
+
+  _containerEl.querySelector("#boot-remote-browser")?.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-remote-cd]");
+    if (!button) return;
+    _config.dir = remotePathJoin(targetDir(), button.dataset.remoteCd);
     render();
   });
 
@@ -330,10 +507,21 @@ function bindEvents() {
     });
   });
 
+  _containerEl.querySelector("#boot-name")?.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    e.preventDefault();
+    void startPlan();
+  });
+
   _containerEl.querySelector("#boot-name")?.addEventListener("input", (e) => {
     _config.name = e.target.value;
-    const hint = _containerEl.querySelector("#boot-dir-hint");
-    if (hint && !_config.dir) hint.textContent = `留空则使用默认目录 ${defaultDir()}`;
+    const hint = _containerEl.querySelector("#boot-name-hint");
+    const trimmed = _config.name.trim();
+    if (hint) hint.textContent = trimmed ? `${trimmed.length} / ${MAX_NAME}` : "必填，会写进标题和 README";
+    const dirHint = _containerEl.querySelector("#boot-dir-hint");
+    if (dirHint && !_config.dir) dirHint.textContent = `留空则使用默认目录 ${defaultDir()}`;
+    const create = _containerEl.querySelector("#boot-create");
+    if (create) create.disabled = _stage === "planning" || _stage === "creating" || !trimmed;
     updatePreview();
   });
 
@@ -345,7 +533,9 @@ function bindEvents() {
   _containerEl.querySelector("#boot-reset")?.addEventListener("click", () => {
     _config = { ...DEFAULTS };
     _type = "local";
-    _step = "type"; // 重置=回到向导起点
+    _step = "type";
+    _force = false;
+    _advancedOpen = false;
     resetFlow();
     render();
   });
@@ -372,6 +562,53 @@ function bindEvents() {
     resetFlow();
     void startPlan();
   });
+
+  _containerEl.querySelector("#boot-force")?.addEventListener("change", (event) => {
+    _force = event.currentTarget.checked;
+    const planBtn = _containerEl.querySelector("#boot-force-plan");
+    if (planBtn) planBtn.disabled = !_force;
+  });
+
+  _containerEl.querySelector("#boot-force-plan")?.addEventListener("click", () => {
+    if (!_force) return;
+    void startPlan();
+  });
+
+  _containerEl.querySelector("#boot-copy-dir")?.addEventListener("click", () => {
+    const dir = String(_result?.targetDir || _plan?.targetDir || targetDir());
+    if (!dir || !navigator.clipboard?.writeText) return;
+    void navigator.clipboard.writeText(dir).catch((error) => {
+      console.warn("复制目录失败：", error?.message || error);
+    });
+  });
+
+  _containerEl.querySelector("#boot-again")?.addEventListener("click", () => {
+    _config = { ...DEFAULTS };
+    _step = "type";
+    _force = false;
+    resetFlow();
+    render();
+  });
+
+  _containerEl.querySelector("#boot-reveal")?.addEventListener("click", async () => {
+    const dir = String(_result?.targetDir || "");
+    if (!dir) return;
+    try {
+      await request("/api/system/reveal", { method: "POST", body: { path: dir } });
+    } catch (error) {
+      console.warn("打开目录失败：", error?.message || error);
+    }
+  });
+
+  _containerEl.querySelector("#boot-workbench")?.addEventListener("click", () => {
+    const dir = String(_result?.targetDir || "");
+    if (!dir || !_onOpenWorkbench) return;
+    _onOpenWorkbench(dir);
+  });
+
+  _containerEl.querySelector("#boot-open-hosts")?.addEventListener("click", () => {
+    _onOpenHosts?.();
+  });
 }
 
 function resetFlow() {
@@ -382,33 +619,126 @@ function resetFlow() {
 }
 
 function projectName() {
-  return _config.name.trim() || "my-project";
+  return _config.name.trim();
 }
 
 function defaultDir() {
-  return `~/514-projects/${projectName()}`;
+  const slug = projectName() || "my-project";
+  if (isRemote()) {
+    const user = selectedHost()?.user || "you";
+    return `/home/${user}/514-projects/${slug}`;
+  }
+  return `~/514-projects/${slug}`;
 }
 
 function targetDir() {
   return _config.dir.trim() || defaultDir();
 }
 
+function looksLikeLocalPath(value) {
+  return /^[A-Za-z]:[\\/]/.test(String(value || "")) || String(value || "").includes("\\");
+}
+
+function looksLikeDefaultRemote(value) {
+  return /\/514-projects\//.test(String(value || ""));
+}
+
+function remotePathJoin(base, name) {
+  return `${String(base || "/").replace(/\/+$/, "")}/${name}`;
+}
+
+function remotePathParent(path) {
+  const trimmed = String(path || "/").replace(/\/+$/, "");
+  const index = trimmed.lastIndexOf("/");
+  return index <= 0 ? "/" : trimmed.slice(0, index);
+}
+
+async function loadBootRemoteBrowser({ force = false } = {}) {
+  const host = selectedHost();
+  const browser = _containerEl?.querySelector("#boot-remote-browser");
+  if (!host || !browser) return;
+  const path = targetDir();
+  const key = `${host.id}:${path}`;
+  if (!force && _remoteBrowse.key === key && (_remoteBrowse.loading || _remoteBrowse.error || _remoteBrowse.items.length)) {
+    renderBootRemoteBrowser();
+    return;
+  }
+  _remoteBrowse = { key, items: [], loading: true, error: null };
+  renderBootRemoteBrowser();
+  try {
+    const result = await request(`/api/ssh/hosts/${encodeURIComponent(host.id)}/sftp/list?path=${encodeURIComponent(path)}`);
+    if (_remoteBrowse.key !== key) return;
+    _remoteBrowse.items = (result?.items ?? [])
+      .filter((item) => item.isDirectory)
+      .sort((a, b) => a.name.localeCompare(b.name));
+    _remoteBrowse.error = null;
+  } catch (error) {
+    if (_remoteBrowse.key !== key) return;
+    _remoteBrowse.items = [];
+    _remoteBrowse.error = /REMOTE_GATE/.test(error?.message || "")
+      ? "SFTP 门闸未开放，目录浏览不可用——可手动输入路径。"
+      : /no such file|ENOENT|not exist/i.test(error?.message || "")
+        ? "这个目录还不存在，确认写入时会创建。"
+        : `列目录失败：${error.message}（可手动输入路径）`;
+  } finally {
+    if (_remoteBrowse.key === key) {
+      _remoteBrowse.loading = false;
+      renderBootRemoteBrowser();
+    }
+  }
+}
+
+function renderBootRemoteBrowser() {
+  const browser = _containerEl?.querySelector("#boot-remote-browser");
+  if (!browser) return;
+  if (_remoteBrowse.loading) {
+    browser.innerHTML = `<p class="remote-browser-tip">正在列目录…</p>`;
+    return;
+  }
+  if (_remoteBrowse.error) {
+    browser.innerHTML = `<p class="remote-browser-tip is-error">${escapeHtml(_remoteBrowse.error)}</p>`;
+    return;
+  }
+  browser.innerHTML = _remoteBrowse.items.length
+    ? _remoteBrowse.items.map((item) => `<button type="button" class="remote-browser-item" data-remote-cd="${escapeAttr(item.name)}">${lucideIcon("folder", "icon lucide")}<span>${escapeHtml(item.name)}</span></button>`).join("")
+    : `<p class="remote-browser-tip">该目录下没有子目录——可直接用当前路径。</p>`;
+}
+
 function scaffoldPayload(dryRun) {
-  return {
+  const payload = {
     framework: _config.framework,
     style: _config.style,
     theme: _config.theme,
     iconLibrary: _config.icons,
     font: _config.font,
     name: projectName(),
-    dir: targetDir(),
+    description: _config.description.trim(),
+    dir: _config.dir.trim(),
     dryRun,
+    force: _force,
   };
+  if (isRemote()) payload.hostId = _remoteHostId;
+  return payload;
 }
 
-/** 第一步：dryRun 生成创建计划 */
+function isOccupiedError(error) {
+  return /not empty/i.test(String(error?.message || ""));
+}
+
 async function startPlan() {
   if (_stage === "planning" || _stage === "creating") return;
+  if (!projectName()) {
+    _stage = "error";
+    _error = "先填项目名称。";
+    render();
+    return;
+  }
+  if (isRemote() && !selectedHost()) {
+    _stage = "error";
+    _error = "先选一台远程主机，或先去「远程主机」登记。";
+    render();
+    return;
+  }
   _stage = "planning";
   _error = "";
   render();
@@ -422,7 +752,6 @@ async function startPlan() {
   render();
 }
 
-/** 第二步：确认后真实创建 */
 async function confirmCreate() {
   if (_stage !== "plan") return;
   _stage = "creating";
@@ -431,25 +760,57 @@ async function confirmCreate() {
   try {
     const data = await request(SCAFFOLD_API, { method: "POST", body: scaffoldPayload(false) });
     _result = data && typeof data === "object" ? data : {};
+    if (isRemote() && _result.ok && _remoteHostId && _result.targetDir) {
+      try {
+        await request("/api/remote-projects", {
+          method: "POST",
+          body: { name: projectName(), hostId: _remoteHostId, path: _result.targetDir },
+        });
+        _result.registered = true;
+      } catch (error) {
+        if (/already registered|REMOTE_PROJECT_EXISTS/i.test(String(error?.message || error?.code || ""))) {
+          _result.registered = true;
+        } else {
+          _result.registerError = String(error?.message || error);
+        }
+      }
+    }
     _stage = "done";
-    _onCreate({ ..._config }, _result);
+    _onCreate({ ..._config, type: _type, hostId: isRemote() ? _remoteHostId : undefined }, _result);
   } catch (error) {
     handleApiFailure(error);
   }
   render();
 }
 
-/** 后端不可用（404/网络错误）-> 回退通知；其余错误 -> 错误面板 */
 function handleApiFailure(error) {
   const status = Number(error?.status ?? -1);
-  if (status === 404 || status === 0) {
+  const code = error?.code || error?.payload?.code || error?.payload?.error?.code;
+  if (status === 0 || (status === 404 && (!code || code === "NOT_FOUND"))) {
     _stage = "fallback";
     _error = "";
     _onCreate({ ..._config }, null);
     return;
   }
+  if (isOccupiedError(error)) {
+    _stage = "occupied";
+    _error = String(error?.message || error || "目标目录不是空的");
+    return;
+  }
   _stage = "error";
   _error = String(error?.message || error || "未知错误");
+}
+
+function fileNamesFrom(result) {
+  const relative = normalizeList(result?.files);
+  if (relative.length) return relative;
+  const planned = normalizeList(result?.filesPlanned);
+  if (planned.length) return planned.map((path) => String(path).split(/[/\\]/).pop());
+  const written = normalizeList(result?.filesWritten);
+  if (written.length) return written.map((path) => String(path).split(/[/\\]/).pop());
+  if (typeof result?.filesWritten === "number") return PLANNED_FILES.slice(0, result.filesWritten);
+  if (typeof result?.fileCount === "number" && result.fileCount > 0) return PLANNED_FILES.slice(0, result.fileCount);
+  return [];
 }
 
 function renderScaffoldPanel() {
@@ -460,14 +821,14 @@ function renderScaffoldPanel() {
       <div class="boot-scaffold forge-enter" id="boot-scaffold">
         <div class="boot-scaffold-status">
           ${lucideIcon("loader-circle", "icon lucide boot-spin")}
-          <span>${_stage === "planning" ? "正在生成创建计划…" : "正在创建项目…"}</span>
+          <span>${_stage === "planning" ? "正在生成创建计划…" : isRemote() ? "正在经 SFTP 写入 5 个文件…" : "正在写入 5 个文件…"}</span>
         </div>
       </div>
     `;
   }
 
   if (_stage === "plan") {
-    const files = normalizeList(_plan?.filesPlanned);
+    const files = fileNamesFrom(_plan);
     const log = normalizeList(_plan?.log);
     const dir = String(_plan?.targetDir || targetDir());
     return `
@@ -475,11 +836,11 @@ function renderScaffoldPanel() {
         <div class="boot-scaffold-head">
           ${lucideIcon("file-text", "icon lucide")}
           <span class="boot-scaffold-title">创建计划</span>
-          <span class="boot-scaffold-count num">${files.length} 个文件</span>
+          <span class="boot-scaffold-count num">${files.length || _plan?.fileCount || 0} 个文件</span>
         </div>
         <div class="boot-scaffold-dir">
           ${lucideIcon("folder", "icon lucide")}
-          <code>${escapeHtml(dir)}</code>
+          <code>${escapeHtml(_plan?.placement === "remote" && _plan?.hostName ? `${_plan.hostName}:${dir}` : dir)}</code>
         </div>
         ${files.length ? `<ul class="boot-file-list">${files.map((f) => `<li>${escapeHtml(f)}</li>`).join("")}</ul>` : '<p class="boot-scaffold-empty">后端未返回文件清单</p>'}
         ${log.length ? `<div class="boot-log">${log.map((l) => `<div class="boot-log-line">${escapeHtml(l)}</div>`).join("")}</div>` : ""}
@@ -489,7 +850,7 @@ function renderScaffoldPanel() {
             <span>取消</span>
           </button>
           <button class="button primary" id="boot-confirm" type="button">
-            <span>确认创建</span>
+            <span>确认写入</span>
             ${lucideIcon("check", "icon lucide")}
           </button>
         </div>
@@ -497,34 +858,84 @@ function renderScaffoldPanel() {
     `;
   }
 
+  if (_stage === "occupied") {
+    return `
+      <div class="boot-scaffold is-error forge-enter" id="boot-scaffold">
+        <div class="boot-scaffold-head">
+          <span class="boot-scaffold-mark is-bad">${lucideIcon("circle-alert", "icon lucide")}</span>
+          <span class="boot-scaffold-title">目录不是空的</span>
+        </div>
+        <p class="boot-scaffold-note">${escapeHtml(_error)}</p>
+        <p class="boot-scaffold-note">勾选后会把 5 个 starter 文件写进去，<strong>已有文件不会被删</strong>，同名文件会被覆盖。</p>
+        <label class="boot-force">
+          <input type="checkbox" id="boot-force" ${_force ? "checked" : ""} />
+          <span>我知道，强制写入</span>
+        </label>
+        <div class="boot-scaffold-actions">
+          <button class="button secondary" id="boot-dismiss" type="button">
+            <span>换个目录</span>
+          </button>
+          <button class="button primary" id="boot-force-plan" type="button" ${_force ? "" : "disabled"}>
+            <span>查看写入计划</span>
+            ${lucideIcon("arrow-right", "icon lucide")}
+          </button>
+        </div>
+      </div>
+    `;
+  }
+
   if (_stage === "done") {
-    const files = normalizeList(_result?.filesWritten);
+    const files = fileNamesFrom(_result);
     const log = normalizeList(_result?.log);
     const dir = String(_result?.targetDir || targetDir());
+    const hints = normalizeList(_result?.runHint);
+    const remote = _result?.placement === "remote" || isRemote();
+    const where = remote && _result?.hostName ? `${_result.hostName}:${dir}` : dir;
     return `
       <div class="boot-scaffold is-done forge-enter" id="boot-scaffold">
         <div class="boot-scaffold-head">
           <span class="boot-scaffold-mark is-ok">${lucideIcon("circle-check", "icon lucide")}</span>
-          <span class="boot-scaffold-title">项目已创建</span>
-          <span class="boot-scaffold-count num">${files.length} 个文件</span>
+          <span class="boot-scaffold-title">${remote ? "静态 starter 已写到远程" : "静态 starter 已落盘"}</span>
+          <span class="boot-scaffold-count num">${files.length || _result?.fileCount || 0} 个文件</span>
         </div>
         <div class="boot-scaffold-dir">
           ${lucideIcon("folder", "icon lucide")}
-          <code>${escapeHtml(dir)}</code>
+          <code>${escapeHtml(where)}</code>
+          <button class="button secondary boot-copy" id="boot-copy-dir" type="button" title="复制路径">
+            ${lucideIcon("copy", "icon lucide")}
+            <span>复制路径</span>
+          </button>
         </div>
+        ${remote && _result?.registered ? `<p class="boot-scaffold-note">已登记为远程项目。</p>` : ""}
+        ${remote && _result?.registerError ? `<p class="boot-scaffold-note">文件已写入，登记台账失败：${escapeHtml(_result.registerError)}</p>` : ""}
+        ${files.length ? `<ul class="boot-file-list">${files.map((f) => `<li>${escapeHtml(f)}</li>`).join("")}</ul>` : ""}
         <div class="boot-next">
-          <div class="boot-next-title">${lucideIcon("lightbulb", "icon lucide")}<span>下一步</span></div>
+          <div class="boot-next-title">${lucideIcon("lightbulb", "icon lucide")}<span>${remote ? "在那台主机上打开" : "打开它"}</span></div>
           <ul class="boot-next-list">
             <li><code>cd ${escapeHtml(dir)}</code></li>
-            <li><code>npm install</code> 安装依赖</li>
-            <li><code>npm run dev</code> 启动开发服务器</li>
+            ${(hints.length ? hints : ["python -m http.server 8080", "npx --yes serve ."]).map((line) => `<li><code>${escapeHtml(line)}</code></li>`).join("")}
+            <li>浏览器打开 <code>http://127.0.0.1:8080</code></li>
           </ul>
         </div>
         ${log.length ? `<div class="boot-log">${log.map((l) => `<div class="boot-log-line">${escapeHtml(l)}</div>`).join("")}</div>` : ""}
         <div class="boot-scaffold-actions">
-          <button class="button secondary" id="boot-dismiss" type="button">
-            <span>完成</span>
+          <button class="button secondary" id="boot-again" type="button">
+            <span>再创建一个</span>
           </button>
+          ${remote ? (_onOpenHosts ? `<button class="button primary" id="boot-open-hosts" type="button">
+            ${lucideIcon("server", "icon lucide")}
+            <span>去远程主机</span>
+          </button>` : `<button class="button primary" id="boot-dismiss" type="button"><span>完成</span></button>`) : `
+          <button class="button secondary" id="boot-reveal" type="button">
+            ${lucideIcon("folder-open", "icon lucide")}
+            <span>打开文件夹</span>
+          </button>
+          ${_onOpenWorkbench ? `<button class="button primary" id="boot-workbench" type="button">
+            ${lucideIcon("messages-square", "icon lucide")}
+            <span>带到协作台</span>
+          </button>` : `<button class="button primary" id="boot-dismiss" type="button">
+            <span>完成</span>
+          </button>`}`}
         </div>
       </div>
     `;
@@ -547,7 +958,6 @@ function renderScaffoldPanel() {
     `;
   }
 
-  // error
   return `
     <div class="boot-scaffold is-error forge-enter" id="boot-scaffold">
       <div class="boot-scaffold-head">
@@ -579,35 +989,68 @@ function updatePreview() {
 }
 
 function renderPreview() {
-  const name = projectName();
+  const name = projectName() || "未命名项目";
+  const desc = _config.description.trim() || "由 514cc 脚手架生成的静态 starter";
   return `
-    <div class="boot-preview-card boot-preview-anim" data-theme-preview="${escapeAttr(_config.theme)}">
+    <div class="boot-preview-card boot-preview-anim" data-theme-preview="${escapeAttr(_config.theme)}" data-style-preview="${escapeAttr(_config.style)}" data-font-preview="${escapeAttr(_config.font)}">
       <div class="boot-preview-topbar">
         <div class="boot-preview-dots">
           <span class="dot-r"></span>
           <span class="dot-y"></span>
           <span class="dot-g"></span>
         </div>
-        <span class="boot-preview-url">${escapeHtml(name)}.local:3000</span>
+        <span class="boot-preview-url">index.html</span>
       </div>
       <div class="boot-preview-body">
         <div class="boot-preview-hero">
           <span class="boot-preview-hero-icon">${lucideIcon(currentOptionIcon(), "icon lucide")}</span>
           <h1 class="boot-preview-name">${escapeHtml(name)}</h1>
         </div>
-        <p class="boot-preview-desc">${escapeHtml(_config.description || "欢迎使用 514cc 项目启动器")}</p>
-        <div class="boot-preview-lines">
-          <span class="boot-preview-line is-long"></span>
-          <span class="boot-preview-line is-mid"></span>
-          <span class="boot-preview-line is-short"></span>
-        </div>
+        <p class="boot-preview-desc">${escapeHtml(desc)}</p>
+        ${renderFlavorPreview()}
         <div class="boot-preview-stack">
           <span class="boot-preview-tag">${getFrameworkName()}</span>
           <span class="boot-preview-tag">${getStyleName()}</span>
-          <span class="boot-preview-tag">${getIconName()}</span>
           <span class="boot-preview-tag">${getThemeName()}</span>
+          <span class="boot-preview-tag">${getFontName()}</span>
         </div>
+        <ul class="boot-preview-files">
+          ${PLANNED_FILES.map((file) => `<li>${escapeHtml(file)}</li>`).join("")}
+        </ul>
       </div>
+    </div>
+  `;
+}
+
+function renderFlavorPreview() {
+  if (_config.framework === "dashboard") {
+    return `
+      <div class="boot-preview-dash">
+        <aside>
+          <span class="is-on">概览</span>
+          <span>指标</span>
+          <span>设置</span>
+        </aside>
+        <section>
+          <strong>概览</strong>
+          <em>在这里填充 overview 视图的内容。</em>
+        </section>
+      </div>
+    `;
+  }
+  if (_config.framework === "react") {
+    return `
+      <div class="boot-preview-cardish">
+        <strong>就绪</strong>
+        <em>createCard() · 无 JSX</em>
+      </div>
+    `;
+  }
+  return `
+    <div class="boot-preview-cardish">
+      <strong>就绪</strong>
+      <em>编辑 app.js 开始搭建你的界面。</em>
+      <span class="boot-preview-btn">点我</span>
     </div>
   `;
 }
@@ -626,6 +1069,10 @@ function getStyleName() {
 
 function getIconName() {
   return ICON_LIBS.find((i) => i.id === _config.icons)?.name || _config.icons;
+}
+
+function getFontName() {
+  return FONTS.find((f) => f.id === _config.font)?.name || _config.font;
 }
 
 function getThemeName() {

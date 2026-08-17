@@ -8,6 +8,157 @@
   --agent-other: oklch(0.6 0.02 260);
 }
 
+/* ─── 消息收发局：bounded bus 投影，不把 run 详情塞进第二套卡片层 ─── */
+
+.team-inbox-block {
+  min-width: 0;
+}
+
+.team-inbox-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.team-inbox-heading h3 {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.team-inbox-heading .team-starmap-lead {
+  margin-bottom: 0;
+}
+
+.team-inbox-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.team-inbox-stat {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  column-gap: 8px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: color-mix(in oklab, var(--card) 92%, var(--muted));
+}
+
+.team-inbox-stat-icon {
+  grid-row: span 2;
+  color: var(--primary);
+}
+
+.team-inbox-stat strong {
+  color: var(--foreground);
+  font-size: 18px;
+  line-height: 1;
+}
+
+.team-inbox-stat > span:last-child {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.team-inbox-list {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.team-inbox-row {
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--card);
+}
+
+.team-inbox-row.is-actionable {
+  border-color: color-mix(in oklab, var(--primary) 48%, var(--border));
+  background: color-mix(in oklab, var(--primary) 5%, var(--card));
+}
+
+.team-inbox-row-head,
+.team-inbox-row-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.team-inbox-row-head time {
+  margin-left: auto;
+  color: var(--muted-foreground);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.team-inbox-route,
+.team-inbox-run-title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.team-inbox-text {
+  margin: 8px 0;
+  color: var(--foreground);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.team-inbox-run-title {
+  flex: 1 1 auto;
+}
+
+.team-inbox-open {
+  flex: 0 0 auto;
+  min-height: 28px;
+  padding: 4px 8px;
+  font-size: 11px;
+}
+
+.team-inbox-diagnostic {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  color: var(--warning, var(--primary));
+  font-size: 11px;
+}
+
+@media (max-width: 640px) {
+  .team-inbox-heading {
+    flex-direction: column;
+  }
+
+  .team-inbox-summary {
+    grid-template-columns: 1fr;
+  }
+
+  .team-inbox-row-head {
+    flex-wrap: wrap;
+  }
+
+  .team-inbox-row-head time {
+    margin-left: 0;
+  }
+}
+
 /* ─── 品牌色映射（data-brand → --agent-accent） ─────────────── */
 
 .tp-card[data-brand="claude"], [data-brand="claude"] { --agent-accent: var(--agent-claude); }
@@ -37,16 +188,27 @@
   padding: 0 20px 28px;
 }
 
+.team-command-deck {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  background:
+    linear-gradient(180deg, color-mix(in oklab, var(--primary) 6%, var(--card)) 0%, var(--card) 38%),
+    var(--card);
+  box-shadow: var(--shadow-sm);
+}
+
 .team-control-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 14px 16px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-xl);
-  background: var(--card);
-  box-shadow: var(--shadow-sm);
+  gap: 12px;
+  padding: 14px 16px 12px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
 }
 
 .team-control-heading,
@@ -74,45 +236,127 @@
 
 .team-control-actions {
   display: flex;
-  align-items: flex-end;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.team-identity,
+.team-control-tools,
+.team-presence,
+.team-tool-group {
+  display: flex;
+  align-items: center;
   gap: 8px;
   min-width: 0;
+}
+
+.team-identity {
+  flex: 1 1 280px;
+  gap: 12px;
+}
+
+.team-control-tools {
   flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.team-presence {
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.team-tool-group {
+  gap: 6px;
+}
+
+.team-tool-group + .team-tool-group {
+  padding-left: 10px;
+  border-left: 1px solid color-mix(in oklab, var(--border) 80%, transparent);
 }
 
 .team-switch-field {
   display: grid;
-  gap: 4px;
-  min-width: 180px;
+  gap: 5px;
+  min-width: min(320px, 42vw);
 }
 
 .team-switch-field > span {
   color: var(--muted-foreground);
-  font-size: var(--text-xs);
-  font-weight: 600;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .team-switch-field .team-switch-select {
   width: 100%;
   max-width: none;
-  min-height: 34px;
+  min-height: 38px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--background) 86%, var(--card));
+  font-size: 13px;
+  font-weight: 650;
 }
 
-.team-control-actions .status-label,
+.team-preset-field {
+  min-width: 156px;
+}
+
+.team-preset-field .team-switch-select {
+  min-height: 34px;
+  font-size: 12px;
+  font-weight: 550;
+}
+
+.team-control-actions .status-label {
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+}
+
 .team-control-actions .button {
   min-height: 34px;
+  border-radius: 999px;
+}
+
+.team-control-tools .button.secondary {
+  background: color-mix(in oklab, var(--card) 72%, var(--muted));
+}
+
+#team-activate-button.is-current {
+  opacity: 1;
+  cursor: default;
+  border-color: color-mix(in oklab, var(--primary) 34%, var(--border));
+  background: color-mix(in oklab, var(--primary) 12%, var(--card));
+  color: var(--primary);
+  box-shadow: none;
+}
+
+#team-activate-button:disabled:not(.is-current) {
+  opacity: 0.78;
+  border-color: var(--border);
+  background: var(--muted);
+  color: var(--muted-foreground);
+  box-shadow: none;
 }
 
 .team-surface-switcher {
-  display: inline-grid;
-  grid-template-columns: repeat(2, minmax(136px, 1fr));
-  align-self: flex-start;
-  gap: 3px;
-  padding: 3px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  background: var(--muted);
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-self: stretch;
+  gap: 4px;
+  margin: 0;
+  padding: 5px;
+  border: 0;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+  background: color-mix(in oklab, var(--muted) 68%, var(--card));
 }
 
 .team-surface-tab {
@@ -120,10 +364,10 @@
   align-items: center;
   justify-content: center;
   gap: 7px;
-  min-height: 34px;
+  min-height: 36px;
   padding: 6px 14px;
   border: 0;
-  border-radius: var(--radius-md);
+  border-radius: calc(var(--radius-md) + 2px);
   background: transparent;
   color: var(--muted-foreground);
   font: inherit;
@@ -157,21 +401,34 @@
   display: none;
 }
 
-#team-surface-orchestration {
+#team-surface-orchestration,
+#team-surface-settings {
   display: flex;
   flex-direction: column;
   gap: 16px;
 }
 
+#team-surface-orchestration[hidden],
+#team-surface-settings[hidden] {
+  display: none;
+}
+
 .team-unified-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.6fr) minmax(380px, 0.92fr);
+  grid-template-columns: minmax(0, 1fr);
   align-items: start;
   gap: 16px;
 }
 
+.team-settings-surface {
+  min-height: max(520px, calc(100dvh - 220px));
+}
+
 .team-settings-form {
+  display: flex;
   min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: var(--radius-xl);
@@ -190,10 +447,18 @@
 }
 
 .team-settings-form .team-form-body {
-  max-height: min(70vh, 760px);
+  display: grid;
+  flex: 1 1 auto;
+  max-height: none;
   gap: 14px;
   padding: 16px;
   scrollbar-gutter: stable;
+}
+
+.team-identity-fields {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.72fr) minmax(0, 1.28fr);
+  gap: 14px;
 }
 
 .team-settings-form .team-members-list {
@@ -284,6 +549,9 @@
   padding: 12px 16px;
   border-top: 1px solid var(--border);
   background: color-mix(in oklab, var(--card) 94%, var(--muted));
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
 }
 
 .team-runtime-overview {
@@ -291,16 +559,38 @@
   min-width: 0;
   flex-direction: column;
   gap: 14px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  background: var(--card);
+  box-shadow: var(--shadow-sm);
 }
 
 .team-runtime-heading {
   border: 0;
   border-bottom: 1px solid var(--border);
-  padding: 2px 0 10px;
+  padding: 0 0 12px;
 }
 
 .team-runtime-overview .cf-hero {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.team-runtime-overview .cf-stat,
+.team-runtime-overview .team-runtime-block {
+  box-shadow: none;
+}
+
+.team-runtime-overview .cf-stat:hover {
+  transform: none;
+  box-shadow: none;
+}
+
+.team-runtime-overview .team-runtime-block {
+  padding: 4px 0 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
 }
 
 .team-runtime-block {
@@ -329,6 +619,15 @@
   color: var(--primary);
 }
 
+.team-starmap-block {
+  margin-bottom: 16px;
+}
+
+.tp-card.is-starmap-hot {
+  outline: 2px solid color-mix(in oklab, var(--primary) 70%, transparent);
+  outline-offset: 2px;
+}
+
 .team-runtime-overview .cf-grid {
   grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
 }
@@ -344,6 +643,276 @@
   grid-column: 1 / -1;
 }
 
+#team-router-workbench.team-runtime-block {
+  display: grid;
+  gap: 16px;
+  padding: 18px 18px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  background:
+    linear-gradient(180deg, color-mix(in oklab, var(--primary) 5%, var(--card)) 0%, var(--card) 42%),
+    var(--card);
+  box-shadow: var(--shadow-sm);
+}
+
+#team-router-workbench.is-focus-pulse {
+  animation: team-starmap-focus 1.2s var(--ease-out, ease);
+}
+
+.team-router-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.team-router-head h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: var(--text-lg, 16px);
+}
+
+.team-router-lead,
+.team-router-team,
+.team-router-meta,
+.team-router-hint {
+  margin: 6px 0 0;
+  color: var(--muted-foreground);
+  font-size: var(--text-xs);
+  line-height: 1.55;
+}
+
+.team-router-team {
+  color: color-mix(in oklab, var(--primary) 72%, var(--foreground));
+  font-weight: 600;
+}
+
+.team-router-section-label {
+  margin-bottom: 8px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.team-router-layout {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.9fr) minmax(0, 1.1fr);
+  gap: 16px;
+}
+
+.team-router-layout .router-form,
+.team-router-layout .route-result {
+  min-width: 0;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  background: color-mix(in oklab, var(--card) 88%, var(--muted));
+}
+
+.team-router-layout .router-form textarea {
+  width: 100%;
+  min-height: 96px;
+  max-height: 220px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--card);
+  color: var(--foreground);
+  line-height: 1.55;
+  resize: vertical;
+}
+
+.team-router-layout .router-form textarea:focus,
+.team-router-fields select:focus {
+  border-color: var(--ring, var(--primary));
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--primary) 16%, transparent);
+  outline: none;
+}
+
+.team-router-kinds {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 10px 0 0;
+}
+
+.team-router-kind {
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--card);
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.team-router-kind.is-active {
+  border-color: color-mix(in oklab, var(--primary) 45%, var(--border));
+  background: color-mix(in oklab, var(--primary) 12%, var(--card));
+  color: var(--foreground);
+}
+
+.team-router-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.team-router-fields label {
+  display: grid;
+  gap: 6px;
+}
+
+.team-router-fields span {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.team-router-fields select {
+  width: 100%;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--card);
+  color: var(--foreground);
+}
+
+.team-router-layout .decision-primary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 4px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  background: var(--card);
+}
+
+.team-router-layout .decision-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 10px 14px;
+  margin: 12px 0 0;
+}
+
+.team-router-layout .decision-facts dt {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.team-router-layout .decision-facts dd {
+  margin: 3px 0 0;
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.team-router-candidate-grid,
+.team-router-model-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+}
+
+.team-router-candidate,
+.team-router-model {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 12px 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  background: var(--card);
+}
+
+.team-router-candidate.is-selected {
+  border-color: color-mix(in oklab, var(--primary) 42%, var(--border));
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--primary) 18%, transparent);
+}
+
+.team-router-candidate.is-excluded,
+.team-router-model.is-outside {
+  opacity: 0.72;
+}
+
+.team-router-candidate header,
+.team-router-model footer {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.team-router-candidate header strong,
+.team-router-model strong {
+  display: block;
+}
+
+.team-router-score {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
+
+.team-router-score-track {
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--muted) 70%, transparent);
+}
+
+.team-router-score-track i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--primary);
+}
+
+.team-router-candidate footer,
+.team-router-model footer {
+  align-items: center;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.team-router-candidate footer p,
+.team-router-model p {
+  margin: 0;
+  line-height: 1.45;
+}
+
+.team-router-empty {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 18px 12px;
+  color: var(--muted-foreground);
+  font-size: var(--text-sm);
+  text-align: center;
+}
+
+.team-route-gate .cf-route-decisions {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+@media (max-width: 900px) {
+  .team-router-layout,
+  .team-router-fields {
+    grid-template-columns: 1fr;
+  }
+}
+
 .team-runtime-block .cf-flow-wrap,
 .team-runtime-block .cf-heat,
 .team-runtime-block .cf-route-decisions,
@@ -356,7 +925,7 @@
 .member-library {
   display: grid;
   grid-template-columns: minmax(250px, 300px) minmax(0, 1fr);
-  min-height: 620px;
+  min-height: max(520px, calc(100dvh - 220px));
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: var(--radius-xl);
@@ -503,6 +1072,70 @@
   color: var(--agent-accent, var(--foreground));
   font-size: var(--text-xs);
   font-weight: 700;
+}
+
+.member-library-avatar img,
+.member-avatar-preview img,
+.tp-avatar img,
+.tm-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.member-avatar-field {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--card);
+}
+
+.member-avatar-preview {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 56px;
+  overflow: hidden;
+  border: 1px solid color-mix(in oklab, var(--agent-accent, var(--border)) 38%, var(--border));
+  border-radius: 50%;
+  background: color-mix(in oklab, var(--agent-accent, var(--muted)) 9%, var(--card));
+  color: var(--agent-accent, var(--foreground));
+}
+
+.member-avatar-preview .cli-logo,
+.member-avatar-preview .icon.lucide {
+  width: 28px;
+  height: 28px;
+}
+
+.member-avatar-copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.member-avatar-copy > span {
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.member-avatar-copy p {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: var(--text-xs);
+  line-height: 1.45;
+}
+
+.member-avatar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
 }
 
 .member-library-copy {
@@ -1022,6 +1655,14 @@
     grid-template-columns: minmax(0, 1fr);
   }
 
+  .team-runtime-overview .cf-hero {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .team-identity-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
   .team-settings-form .team-form-body {
     max-height: none;
   }
@@ -1073,19 +1714,40 @@
     flex-direction: column;
   }
 
-  .team-control-actions {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    justify-content: stretch;
+  .team-control-actions,
+  .team-identity,
+  .team-control-tools,
+  .team-presence,
+  .team-tool-group {
+    display: flex;
+    flex-wrap: wrap;
+    width: 100%;
   }
 
-  .team-switch-field,
-  .team-control-actions .status-label {
-    grid-column: 1 / -1;
+  .team-control-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .team-switch-field {
+    min-width: 0;
+    flex: 1 1 100%;
+  }
+
+  .team-tool-group + .team-tool-group {
+    padding-left: 0;
+    padding-top: 8px;
+    border-left: 0;
+    border-top: 1px solid var(--border);
   }
 
   .team-control-actions .button {
-    width: 100%;
+    flex: 1 1 auto;
+  }
+
+  .team-settings-surface,
+  .member-library {
+    min-height: 0;
   }
 
   .team-settings-form .team-members-list,
@@ -1124,6 +1786,7 @@
 
   .team-surface-switcher {
     width: 100%;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .member-library {
@@ -1270,6 +1933,7 @@
   width: 40px;
   height: 40px;
   flex: none;
+  overflow: hidden;
   border-radius: var(--radius-xl);
   border: 1.5px solid var(--agent-accent);
   background: color-mix(in oklab, var(--agent-accent) 12%, transparent);
@@ -1439,19 +2103,93 @@
 
 .tp-flow-count { color: var(--muted-foreground); font-size: var(--text-xs); }
 
-.tp-topology-svg {
+.tp-topology {
+  position: relative;
+  overflow: hidden;
   border: 1px solid var(--border);
   border-radius: var(--radius-2xl);
-  background: var(--card);
+  background:
+    radial-gradient(circle at 50% 42%, color-mix(in oklab, var(--primary) 7%, transparent), transparent 42%),
+    var(--card);
 }
 
-.tp-topo-ring {
-  fill: color-mix(in oklab, var(--card) 88%, transparent);
-  stroke-width: 1.5;
+.tp-topology-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  min-height: 220px;
+  aspect-ratio: 720 / 300;
 }
 
-.tp-topo-node { transition: opacity var(--dur-med) var(--ease-out); }
-.tp-topo-node:not(.is-connected) { opacity: 0.75; }
+.tp-topo-pins {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.tp-topo-pin {
+  position: absolute;
+  display: flex;
+  width: 92px;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  transform: translate(-50%, -50%);
+}
+
+.tp-topo-pin.is-label-above {
+  flex-direction: column-reverse;
+}
+
+.tp-topo-face {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  overflow: hidden;
+  border-radius: 50%;
+  border: 1.5px solid var(--agent-accent, var(--border));
+  background: color-mix(in oklab, var(--agent-accent, var(--muted)) 14%, var(--card));
+  color: var(--agent-accent, var(--foreground));
+  box-shadow: 0 0 0 4px color-mix(in oklab, var(--card) 80%, transparent);
+}
+
+.tp-topo-pin.is-hub .tp-topo-face {
+  width: 52px;
+  height: 52px;
+  border-width: 2px;
+}
+
+.tp-topo-photo,
+.tp-topo-face img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.tp-topo-icon {
+  width: 22px;
+  height: 22px;
+}
+
+.tp-topo-pin.is-hub .tp-topo-icon {
+  width: 26px;
+  height: 26px;
+}
+
+.tp-topo-name {
+  max-width: 92px;
+  color: var(--foreground);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  text-align: center;
+}
+
+.tp-topo-pin:not(.is-connected) {
+  opacity: 0.82;
+}
 
 /* ─── delta-timeline v2（.dt-*） ───────────────────────────── */
 
@@ -2460,5 +3198,17 @@
 @media (min-width: 681px) and (max-width: 1120px) {
   .tm-group-body {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1121px) {
+  #team-surface-settings .tm-group-body {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1440px) {
+  #team-surface-settings .tm-group-body {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }

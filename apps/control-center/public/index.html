@@ -26,6 +26,13 @@
     <link rel="stylesheet" href="./vendor/xterm/xterm.css" />
     <link rel="stylesheet" href="./forge/codex-desktop.css" />
     <link rel="stylesheet" href="./forge/rail-tools.css" />
+    <link rel="stylesheet" href="./forge/overview.css" />
+    <link rel="stylesheet" href="./forge/runtime-workbench.css" />
+    <link rel="stylesheet" href="./forge/hooks.css" />
+    <link rel="stylesheet" href="./forge/automations.css" />
+    <link rel="stylesheet" href="./forge/experience-polish.css" />
+    <!-- 控制台形态收敛层（参考桌面 agent 台形态：扁平时间线行 + 紧凑栏 + pill 底栏）——最后加载 -->
+    <link rel="stylesheet" href="./forge/console-form.css" />
   </head>
   <body class="atelier">
     <div class="atelier-stage" aria-hidden="true">
@@ -77,7 +84,7 @@
 
     <div class="app-shell">
       <div class="nav-backdrop" id="nav-backdrop" hidden></div>
-      <aside class="sidebar" id="sidebar" aria-label="导航抽屉">
+      <aside class="sidebar" id="sidebar" aria-label="主导航">
         <div class="brand">
           <div class="brand-mark" aria-hidden="true"><svg class="icon lucide"><use href="#lucide-flame"></use></svg></div>
           <div class="brand-copy">
@@ -113,10 +120,6 @@
               <svg class="icon lucide"><use href="#lucide-file-type"></use></svg>
               <span>文档工坊</span>
             </button>
-            <button class="nav-item" type="button" data-view="terminal" data-tooltip="终端" title="终端" aria-label="终端">
-              <svg class="icon lucide"><use href="#lucide-square-terminal"></use></svg>
-              <span>终端</span>
-            </button>
           </div>
 
           <div class="nav-group" role="group" aria-labelledby="nav-group-observe">
@@ -133,10 +136,6 @@
               <svg class="icon lucide"><use href="#lucide-message-circle"></use></svg>
               <span>会话聚合</span>
             </button>
-            <button class="nav-item" type="button" data-view="hero" data-tooltip="协作星图" title="协作星图" aria-label="协作星图">
-              <svg class="icon lucide"><use href="#lucide-orbit"></use></svg>
-              <span>协作星图</span>
-            </button>
           </div>
 
           <div class="nav-group" role="group" aria-labelledby="nav-group-resources">
@@ -151,37 +150,123 @@
             </button>
           </div>
 
-          <div class="nav-group" role="group" aria-labelledby="nav-group-system">
-            <p class="nav-group-label" id="nav-group-system">系统</p>
-            <button class="nav-item" type="button" data-view="config" data-tooltip="配置图谱" title="配置图谱" aria-label="配置图谱">
-              <svg class="icon lucide"><use href="#lucide-settings"></use></svg>
-              <span>配置图谱</span>
-            </button>
-            <button class="nav-item" type="button" data-view="router" data-tooltip="模型路由" title="模型路由" aria-label="模型路由">
-              <svg class="icon lucide"><use href="#lucide-route"></use></svg>
-              <span>模型路由</span>
-            </button>
-            <button class="nav-item" type="button" data-view="security" data-tooltip="安全诊断" title="安全诊断" aria-label="安全诊断">
-              <svg class="icon lucide"><use href="#lucide-shield"></use></svg>
-              <span>安全诊断</span>
-            </button>
-          </div>
         </nav>
+      </aside>
 
-        <div class="sidebar-footer">
-          <div class="runtime-indicator">
-            <span class="status-dot is-pending" id="sidebar-status-dot"></span>
-            <div>
-              <strong id="sidebar-status-label">正在连接</strong>
-              <span id="sidebar-version">514cc runtime</span>
-            </div>
-          </div>
+      <aside class="settings-rail" id="settings-rail" hidden aria-label="设置">
+        <div class="settings-rail-toolbar">
+          <button class="settings-rail-item settings-rail-back" type="button" data-view="workbench" title="返回协作台" aria-label="返回协作台">
+            <svg class="icon lucide"><use href="#lucide-arrow-left"></use></svg>
+            <span>返回协作台</span>
+          </button>
+          <label class="settings-rail-search">
+            <svg class="icon lucide" aria-hidden="true"><use href="#lucide-search"></use></svg>
+            <input type="search" id="settings-rail-query" placeholder="搜索设置…" autocomplete="off" spellcheck="false" />
+          </label>
+        </div>
+        <nav class="settings-rail-nav" aria-label="设置导航">
+          <p class="settings-rail-label">基础设置</p>
+          <button class="settings-rail-item" type="button" data-view="appearance" title="外观" aria-label="外观">
+            <svg class="icon lucide"><use href="#lucide-palette"></use></svg>
+            <span>外观</span>
+          </button>
+          <button class="settings-rail-item" type="button" data-view="config" data-config-surface-jump="providers" title="模型设置" aria-label="模型设置">
+            <svg class="icon lucide"><use href="#lucide-layers"></use></svg>
+            <span>模型设置</span>
+          </button>
+          <button class="settings-rail-item" type="button" data-view="browser" title="浏览器" aria-label="浏览器">
+            <svg class="icon lucide"><use href="#lucide-globe"></use></svg>
+            <span>浏览器</span>
+          </button>
+
+          <p class="settings-rail-label">Agent 能力</p>
+          <button class="settings-rail-item" type="button" data-view="observability" data-settings-focus="memory" title="记忆" aria-label="记忆">
+            <svg class="icon lucide"><use href="#lucide-brain"></use></svg>
+            <span>记忆</span>
+          </button>
+          <button class="settings-rail-item" type="button" data-view="market" title="插件" aria-label="插件">
+            <svg class="icon lucide"><use href="#lucide-puzzle"></use></svg>
+            <span>插件</span>
+          </button>
+          <button class="settings-rail-item" type="button" data-view="config" data-config-surface-jump="capabilities" data-cap-workspace="skills" title="技能" aria-label="技能">
+            <svg class="icon lucide"><use href="#lucide-wand-sparkles"></use></svg>
+            <span>技能</span>
+          </button>
+          <button class="settings-rail-item" type="button" data-view="team" title="团队协作" aria-label="团队协作">
+            <svg class="icon lucide"><use href="#lucide-users"></use></svg>
+            <span>团队协作</span>
+          </button>
+          <button class="settings-rail-item" type="button" data-view="config" data-config-surface-jump="capabilities" data-cap-workspace="mcp" title="MCP 服务器" aria-label="MCP 服务器">
+            <svg class="icon lucide"><use href="#lucide-plug-zap"></use></svg>
+            <span>MCP 服务器</span>
+          </button>
+          <button class="settings-rail-item" type="button" data-view="config" data-config-surface-jump="hooks" title="钩子" aria-label="钩子">
+            <svg class="icon lucide"><use href="#lucide-webhook"></use></svg>
+            <span>钩子</span>
+          </button>
+
+          <p class="settings-rail-label">协作</p>
+          <button class="settings-rail-item" type="button" data-view="channels" title="渠道" aria-label="渠道">
+            <svg class="icon lucide"><use href="#lucide-satellite-dish"></use></svg>
+            <span>渠道</span>
+          </button>
+
+          <p class="settings-rail-label">创建</p>
+          <button class="settings-rail-item" type="button" data-view="bootstrapper" title="项目启动器" aria-label="项目启动器">
+            <svg class="icon lucide"><use href="#lucide-rocket"></use></svg>
+            <span>项目启动器</span>
+          </button>
+          <button class="settings-rail-item" type="button" data-view="office" title="文档工坊" aria-label="文档工坊">
+            <svg class="icon lucide"><use href="#lucide-file-type"></use></svg>
+            <span>文档工坊</span>
+          </button>
+
+          <p class="settings-rail-label">数据与统计</p>
+          <button class="settings-rail-item" type="button" data-view="overview" title="使用统计" aria-label="使用统计">
+            <svg class="icon lucide"><use href="#lucide-chart-column"></use></svg>
+            <span>使用统计</span>
+          </button>
+          <button class="settings-rail-item" type="button" data-view="observability" title="体系观测" aria-label="体系观测">
+            <svg class="icon lucide"><use href="#lucide-activity"></use></svg>
+            <span>体系观测</span>
+          </button>
+          <button class="settings-rail-item" type="button" data-view="sessions" title="会话聚合" aria-label="会话聚合">
+            <svg class="icon lucide"><use href="#lucide-message-circle"></use></svg>
+            <span>会话聚合</span>
+          </button>
+
+          <p class="settings-rail-label">进阶</p>
+          <button class="settings-rail-item" type="button" data-view="config" data-config-surface-jump="local-runtime" title="本机运行时" aria-label="本机运行时">
+            <svg class="icon lucide"><use href="#lucide-terminal"></use></svg>
+            <span>本机运行时</span>
+          </button>
+          <button class="settings-rail-item" type="button" data-view="config" data-config-surface-jump="sources" title="运行席位" aria-label="运行席位">
+            <svg class="icon lucide"><use href="#lucide-file-text"></use></svg>
+            <span>运行席位</span>
+          </button>
+          <button class="settings-rail-item" type="button" data-view="hosts" title="远程主机" aria-label="远程主机">
+            <svg class="icon lucide"><use href="#lucide-server"></use></svg>
+            <span>远程主机</span>
+          </button>
+          <button class="settings-rail-item" type="button" data-view="security" title="安全诊断" aria-label="安全诊断">
+            <svg class="icon lucide"><use href="#lucide-shield"></use></svg>
+            <span>安全诊断</span>
+          </button>
+        </nav>
+        <div class="settings-rail-account">
+          <button class="settings-avatar-button" id="settings-avatar-button" type="button" title="更换头像（Shift+点击恢复默认）" aria-label="更换头像">
+            <span class="settings-avatar-preview" id="settings-avatar-preview" aria-hidden="true"></span>
+            <span class="settings-avatar-copy">
+              <strong id="settings-operator-label">AEMEATH</strong>
+              <span>更换头像</span>
+            </span>
+          </button>
         </div>
       </aside>
 
       <header class="topbar">
         <button class="icon-button mobile-menu-button" id="mobile-menu-button" type="button" title="打开导航" aria-label="打开导航" aria-expanded="false" aria-controls="sidebar">
-          <svg class="icon lucide"><use href="#lucide-panel-right"></use></svg>
+          <svg class="icon lucide"><use href="#lucide-list"></use></svg>
         </button>
         <div class="topbar-brand">
           <div class="brand-mark brand-mark-sm" aria-hidden="true"><svg class="icon lucide"><use href="#lucide-flame"></use></svg></div>
@@ -207,9 +292,6 @@
           <button class="topnav-item" type="button" data-view="office" title="文档工坊" aria-label="文档工坊">
             <svg class="icon lucide"><use href="#lucide-file-type"></use></svg><span>文档</span>
           </button>
-          <button class="topnav-item" type="button" data-view="terminal" title="终端" aria-label="终端">
-            <svg class="icon lucide"><use href="#lucide-square-terminal"></use></svg><span>终端</span>
-          </button>
           <span class="topnav-divider" aria-hidden="true"></span>
           <button class="topnav-item" type="button" data-view="overview" title="系统总览" aria-label="系统总览">
             <svg class="icon lucide"><use href="#lucide-layout-dashboard"></use></svg><span>总览</span>
@@ -220,9 +302,6 @@
           <button class="topnav-item" type="button" data-view="sessions" title="会话聚合" aria-label="会话聚合">
             <svg class="icon lucide"><use href="#lucide-message-circle"></use></svg><span>会话</span>
           </button>
-          <button class="topnav-item" type="button" data-view="hero" title="协作星图" aria-label="协作星图">
-            <svg class="icon lucide"><use href="#lucide-orbit"></use></svg><span>星图</span>
-          </button>
           <span class="topnav-divider" aria-hidden="true"></span>
           <button class="topnav-item" type="button" data-view="market" title="市场" aria-label="市场">
             <svg class="icon lucide"><use href="#lucide-store"></use></svg><span>市场</span>
@@ -230,17 +309,28 @@
           <button class="topnav-item" type="button" data-view="hosts" title="远程主机" aria-label="远程主机">
             <svg class="icon lucide"><use href="#lucide-server"></use></svg><span>主机</span>
           </button>
-          <span class="topnav-divider" aria-hidden="true"></span>
-          <button class="topnav-item" type="button" data-view="config" title="配置图谱" aria-label="配置图谱">
-            <svg class="icon lucide"><use href="#lucide-settings"></use></svg><span>配置</span>
-          </button>
-          <button class="topnav-item" type="button" data-view="router" title="模型路由" aria-label="模型路由">
-            <svg class="icon lucide"><use href="#lucide-route"></use></svg><span>路由</span>
-          </button>
-          <button class="topnav-item" type="button" data-view="security" title="安全诊断" aria-label="安全诊断">
-            <svg class="icon lucide"><use href="#lucide-shield"></use></svg><span>安全</span>
-          </button>
         </nav>
+        <div class="chrome-menus" id="chrome-menus">
+          <!-- 应用菜单列（控制台形态第九轮）：frameless 后补回原生菜单栏的功能入口，Codex 式布局 -->
+          <button class="chrome-icon-button" id="chrome-rail-toggle" type="button" title="收起/展开左栏" aria-label="收起或展开左栏" aria-pressed="false">
+            <svg class="icon lucide chrome-rail-glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect class="chrome-rail-glyph-frame" width="18" height="18" x="3" y="3" rx="2"></rect>
+              <path class="chrome-rail-glyph-bar" d="M9 3v18"></path>
+              <path class="chrome-rail-glyph-hint" d="M14 10l3 2-3 2"></path>
+            </svg>
+          </button>
+          <button class="chrome-icon-button" id="chrome-nav-back" type="button" title="后退（上一视图）" aria-label="后退到上一视图" disabled>
+            <svg class="icon lucide"><use href="#lucide-arrow-left"></use></svg>
+          </button>
+          <button class="chrome-icon-button" id="chrome-nav-forward" type="button" title="前进（下一视图）" aria-label="前进到下一视图" disabled>
+            <svg class="icon lucide"><use href="#lucide-arrow-right"></use></svg>
+          </button>
+          <span class="chrome-menu-divider" aria-hidden="true"></span>
+          <button class="chrome-menu-label" id="chrome-menu-file" type="button" aria-haspopup="menu">文件</button>
+          <button class="chrome-menu-label" id="chrome-menu-edit" type="button" aria-haspopup="menu">编辑</button>
+          <button class="chrome-menu-label" id="chrome-menu-view" type="button" aria-haspopup="menu">视图</button>
+          <button class="chrome-menu-label" id="chrome-menu-help" type="button" aria-haspopup="menu">帮助</button>
+        </div>
         <div class="topbar-title" aria-live="polite">
           <span class="topbar-crumb-group" id="current-view-group">协作</span>
           <span class="topbar-separator" aria-hidden="true">/</span>
@@ -263,12 +353,24 @@
             <svg class="icon lucide"><use href="#lucide-refresh-cw"></use></svg>
           </button>
           <!-- codeg RightEdgeChrome 式角位开关：右栏终端标签 + 右侧 Mission Control，统一右上角 -->
-          <button class="icon-button" id="global-terminal-toggle" type="button" title="打开/收起终端标签（协作台右栏，Ctrl+`）" aria-label="打开或收起终端标签" aria-pressed="false">
+          <button class="icon-button" id="global-terminal-toggle" type="button" title="打开/收起底部终端（Ctrl+`）" aria-label="打开或收起底部终端" aria-pressed="false">
             <svg class="icon lucide"><use href="#lucide-square-terminal"></use></svg>
           </button>
           <button class="icon-button" id="global-mc-toggle" type="button" title="打开/关闭环境信息" aria-label="打开或关闭环境信息" aria-pressed="false">
             <svg class="icon lucide"><use href="#lucide-panel-right"></use></svg>
           </button>
+          <!-- 桌面壳窗口控制（控制台形态第七轮）：仅 Tauri 壳内显示，浏览器模式保持 hidden -->
+          <span class="window-controls" id="window-controls" hidden>
+            <button class="window-control-button" id="window-minimize" type="button" title="最小化" aria-label="最小化窗口">
+              <svg class="icon lucide"><use href="#lucide-minus"></use></svg>
+            </button>
+            <button class="window-control-button" id="window-maximize" type="button" title="最大化 / 还原" aria-label="最大化或还原窗口">
+              <svg class="icon lucide"><use href="#lucide-square"></use></svg>
+            </button>
+            <button class="window-control-button is-close" id="window-close" type="button" title="关闭" aria-label="关闭窗口">
+              <svg class="icon lucide"><use href="#lucide-x"></use></svg>
+            </button>
+          </span>
         </div>
       </header>
 
@@ -292,31 +394,80 @@
             </div>
           </div>
 
+          <section class="overview-usage" id="overview-usage" aria-labelledby="overview-usage-title">
+            <header class="overview-usage-header">
+              <div>
+                <p class="eyebrow">使用统计</p>
+                <h2 id="overview-usage-title">真实消耗与请求账本</h2>
+                <p data-usage-source-note>代理流量是成本真源；协作任务是原生 CLI 会话。</p>
+              </div>
+              <div class="overview-usage-tools">
+                <div class="overview-seg" role="tablist" aria-label="用量来源">
+                  <button type="button" role="tab" data-usage-source="proxy" aria-selected="true">代理流量</button>
+                  <button type="button" role="tab" data-usage-source="runs" aria-selected="false">协作任务</button>
+                </div>
+                <div class="overview-seg" role="radiogroup" aria-label="统计窗口">
+                  <button type="button" role="radio" data-usage-days="1" aria-checked="false">24 小时</button>
+                  <button type="button" role="radio" data-usage-days="7" aria-checked="true">7 天</button>
+                  <button type="button" role="radio" data-usage-days="30" aria-checked="false">30 天</button>
+                </div>
+              </div>
+            </header>
+            <div class="overview-hero" data-usage-hero aria-label="真实消耗"></div>
+            <div class="overview-split" data-usage-split aria-label="输入输出与成功率"></div>
+            <section class="overview-chart-card is-wide" aria-labelledby="overview-chart-trend-title">
+              <header class="overview-chart-head">
+                <div>
+                  <h3 id="overview-chart-trend-title">使用趋势</h3>
+                  <strong class="overview-chart-total" data-usage-trend-total></strong>
+                </div>
+                <ul class="overview-chart-legend" data-usage-trend-legend></ul>
+              </header>
+              <div class="overview-chart-body is-tall" data-usage-trend-chart></div>
+            </section>
+            <section class="overview-ledger" aria-labelledby="overview-ledger-title">
+              <header class="overview-ledger-head">
+                <div>
+                  <h3 id="overview-ledger-title">请求账本</h3>
+                  <div class="overview-seg is-compact" role="tablist" aria-label="账本视图">
+                    <button type="button" role="tab" data-usage-ledger="logs" aria-selected="true">请求记录</button>
+                    <button type="button" role="tab" data-usage-ledger="providers" aria-selected="false">Provider 统计</button>
+                    <button type="button" role="tab" data-usage-ledger="models" aria-selected="false">模型统计</button>
+                  </div>
+                </div>
+                <label class="overview-ledger-filter">
+                  <span>模型</span>
+                  <select data-usage-model aria-label="按模型筛选请求记录">
+                    <option value="">全部模型</option>
+                  </select>
+                </label>
+              </header>
+              <div class="overview-ledger-body" data-usage-ledger-body></div>
+            </section>
+          </section>
+
           <div class="metric-grid" aria-label="核心指标">
             <article class="metric-card">
-              <span class="metric-label">运行组件</span>
+              <span class="metric-label"><svg class="icon lucide" aria-hidden="true"><use href="#lucide-server"></use></svg>运行组件</span>
               <strong class="metric-value" id="metric-services">--</strong>
               <span class="metric-detail" id="metric-services-detail">等待健康检查</span>
             </article>
             <article class="metric-card">
-              <span class="metric-label">活跃任务</span>
+              <span class="metric-label"><svg class="icon lucide" aria-hidden="true"><use href="#lucide-play"></use></svg>活跃任务</span>
               <strong class="metric-value" id="metric-runs">--</strong>
               <span class="metric-detail" id="metric-runs-detail">暂无运行数据</span>
             </article>
             <article class="metric-card">
-              <span class="metric-label">配置源</span>
+              <span class="metric-label"><svg class="icon lucide" aria-hidden="true"><use href="#lucide-git-branch"></use></svg>配置源</span>
               <strong class="metric-value" id="metric-sources">--</strong>
               <span class="metric-detail" id="metric-sources-detail">等待配置索引</span>
             </article>
             <article class="metric-card">
-              <span class="metric-label">事件通道</span>
+              <span class="metric-label"><svg class="icon lucide" aria-hidden="true"><use href="#lucide-activity"></use></svg>事件通道</span>
               <strong class="metric-value metric-word" id="metric-events">连接中</strong>
               <span class="metric-detail" id="metric-events-detail">SSE /api/events</span>
             </article>
           </div>
-
-          <!-- v4.0: 团队协作可视化面板 -->
-          <div id="team-panel-container" class="animate-slide-up"></div>
 
           <div class="overview-grid">
             <section class="content-section" aria-labelledby="health-title">
@@ -327,6 +478,7 @@
                 </div>
                 <span class="status-label is-pending" id="health-summary">检查中</span>
               </div>
+              <div class="overview-health-pills" id="overview-health-pills" aria-label="组件健康胶囊"></div>
               <div class="health-list" id="health-list" aria-live="polite"></div>
             </section>
 
@@ -341,6 +493,8 @@
               <div class="run-list" id="overview-run-list" aria-live="polite"></div>
             </section>
           </div>
+
+          <div id="team-panel-container" class="animate-slide-up"></div>
 
           <!-- v4.0: DELTA 问责时间线 -->
           <div id="delta-timeline-container" class="animate-slide-up"></div>
@@ -383,16 +537,26 @@
           </div>
 
           <div class="workbench-shell">
-            <aside class="run-rail" aria-label="团队、会话与项目">
+            <aside class="run-rail" id="run-rail" aria-label="团队、会话与项目">
               <!-- Codex 式操作行置顶：新建任务 + 搜索（命令面板），在所有分区之上 -->
               <div class="rail-newtask">
-                <button class="newtask-button" id="new-task-row" type="button" title="新建任务（选择项目地址）">
+                <button class="newtask-button" id="new-task-row" type="button" title="新建任务（选择项目地址）Ctrl+N">
                   <svg class="icon lucide" aria-hidden="true"><use href="#lucide-plus"></use></svg>
                   <span>新建任务</span>
+                  <kbd class="rail-kbd" aria-hidden="true">Ctrl N</kbd>
                 </button>
-                <button class="newtask-button is-ghost" id="rail-search-row" type="button" title="搜索会话与命令（打开命令面板）">
+                <button class="newtask-button is-ghost" id="rail-search-row" type="button" title="搜索会话与命令（打开命令面板）Ctrl+K">
                   <svg class="icon lucide" aria-hidden="true"><use href="#lucide-search"></use></svg>
                   <span>搜索</span>
+                  <kbd class="rail-kbd" aria-hidden="true">Ctrl K</kbd>
+                </button>
+                <button class="newtask-button is-ghost" id="rail-automations-row" type="button" data-view="automations" title="自动化" aria-label="自动化">
+                  <svg class="icon lucide" aria-hidden="true"><use href="#lucide-timer"></use></svg>
+                  <span>自动化</span>
+                </button>
+                <button class="newtask-button is-ghost" id="rail-skills-row" type="button" title="技能" aria-label="技能">
+                  <svg class="icon lucide" aria-hidden="true"><use href="#lucide-wand-sparkles"></use></svg>
+                  <span>技能</span>
                 </button>
               </div>
               <!-- 置顶区（Codex 式：紧跟操作行、项目树之上）：置顶会话 + 置顶项目 + 置顶原生历史会话，内容由 app.js renderRailMetaSections 渲染 -->
@@ -409,7 +573,7 @@
                   <button class="team-tree-toggle" id="team-tree-toggle" type="button" aria-expanded="true" aria-controls="workbench-project-tree"
                     title="折叠/展开团队项目树">
                     <svg class="icon chevron lucide" aria-hidden="true"><use href="#lucide-chevron-right"></use></svg>
-                    <h2 id="team-rail-title">团队</h2>
+                    <span class="pane-title" id="team-rail-title" role="heading" aria-level="2">团队</span>
                   </button>
                   <button class="rail-action" id="team-newsession-button" type="button" title="新会话（选择项目地址）" aria-label="新会话，选择项目地址">
                     <svg class="icon lucide"><use href="#lucide-plus"></use></svg>
@@ -465,26 +629,27 @@
                 </div>
                 <div class="run-rail-list" id="working-run-list"></div>
               </section>
-              <!-- v3.7 Automations（codeg 对标）：composer 快照的定时/手动 headless 执行 -->
-              <section class="rail-block rail-block-automations" id="rail-automations" aria-labelledby="automations-rail-title" hidden>
-                <div class="pane-heading">
-                  <h2 id="automations-rail-title">自动化</h2>
-                  <button class="rail-action" id="automations-manage-button" type="button" title="管理自动化" aria-label="打开自动化管理">
-                    <svg class="icon lucide"><use href="#lucide-settings"></use></svg>
-                  </button>
-                  <span id="automations-count">0</span>
-                </div>
-                <div class="run-rail-list" id="automations-list"></div>
-              </section>
               <section class="rail-block rail-block-archived" id="rail-archived" aria-labelledby="archived-rail-title" hidden>
                 <button class="pane-heading archived-toggle" id="archived-toggle" type="button" aria-expanded="false" aria-controls="archived-run-list">
                   <svg class="icon chevron lucide" aria-hidden="true"><use href="#lucide-chevron-right"></use></svg>
-                  <h2 id="archived-rail-title">已归档</h2>
+                  <span class="pane-title" id="archived-rail-title" role="heading" aria-level="2">已归档</span>
                   <span id="archived-count">0</span>
                 </button>
                 <div class="run-rail-list" id="archived-run-list" hidden></div>
               </section>
-              <div class="rail-statusline" id="rail-statusline" aria-label="会话状态栏"></div>
+              <!-- 底部钉住区：状态栏 + 账户坞合成 sticky footer——内容超长滚动时两者都常驻栏底，
+                   原先状态栏没有 sticky，会随归档/置顶长列表滚出视野（账户坞自己钉底，状态栏被顶走） -->
+              <div class="rail-footer">
+                <div class="rail-statusline" id="rail-statusline" aria-label="会话状态栏"></div>
+                <button class="account-dock" id="account-dock" type="button" title="打开设置" aria-label="打开设置">
+                  <span class="account-dock-avatar" id="operator-avatar-preview" aria-hidden="true"></span>
+                  <span class="account-dock-copy">
+                    <strong id="account-dock-label">AEMEATH</strong>
+                    <span>打开设置</span>
+                  </span>
+                  <svg class="icon lucide account-dock-chevron" aria-hidden="true"><use href="#lucide-chevron-right"></use></svg>
+                </button>
+              </div>
             </aside>
 
             <section class="conversation-pane" aria-labelledby="conversation-title">
@@ -492,10 +657,29 @@
               <div class="conv-tabs" id="conv-tabs" role="tablist" aria-label="打开的会话" hidden></div>
               <div class="pane-heading conversation-heading">
                 <div class="conversation-heading-main">
+                  <!-- 参考桌面 agent 台顶栏：图标 + 标题 + chips 单行 slim 形态（console-form 第六轮） -->
+                  <span class="conversation-title-glyph" aria-hidden="true"><svg class="icon lucide"><use href="#lucide-messages-square"></use></svg></span>
                   <h2 id="conversation-title">新任务</h2>
+                  <!-- 参考桌面 agent 台顶栏：标题下随 项目/分支 chips + 溢出菜单（app.js paintConversationChips 驱动） -->
+                  <div class="conversation-chips" id="conversation-chips" hidden>
+                    <button class="icon-button conversation-overflow" id="conversation-overflow" type="button" title="会话操作" aria-label="会话操作" aria-haspopup="menu">
+                      <svg class="icon lucide" aria-hidden="true"><use href="#lucide-ellipsis"></use></svg>
+                    </button>
+                  </div>
                   <span id="conversation-meta">等待输入</span>
                   <div class="conversation-agents" id="conversation-agents" aria-label="本会话参与 CLI" hidden></div>
                 </div>
+                <!-- 更改 pill：终态 worktree run 的产物 diff 总统计（app.js paintChangesPill 驱动，点击展开 diff 面板） -->
+                <button class="changes-pill" id="changes-pill" type="button" hidden title="查看产物 diff"></button>
+                <button class="account-heading-chip" id="account-heading-chip" type="button" title="打开设置" aria-label="打开设置">
+                  <span class="account-dock-avatar" id="operator-avatar-heading" aria-hidden="true"></span>
+                </button>
+                <button class="icon-button" id="rail-session-toggle" type="button" title="打开会话列表" aria-label="打开会话列表" aria-expanded="false" aria-controls="run-rail">
+                  <svg class="icon lucide" aria-hidden="true"><use href="#lucide-list"></use></svg>
+                </button>
+                <button class="icon-button" id="run-cli-terminal-button" type="button" title="在终端中打开此会话的原生 CLI（与控制台共享同一会话，Ctrl+Alt+O）" aria-label="在终端中打开此会话的 CLI" disabled>
+                  <svg class="icon lucide" aria-hidden="true"><use href="#lucide-terminal"></use></svg>
+                </button>
                 <button class="icon-button danger-quiet" id="cancel-run-button" type="button" title="取消当前任务（级联中止本 run 全部 CLI 子进程）" aria-label="取消当前任务" disabled>
                   <svg class="icon lucide"><use href="#lucide-circle-stop"></use></svg>
                 </button>
@@ -536,6 +720,7 @@
                         <select id="composer-team" aria-label="选择会话从属团队"></select>
                       </label>
                       <button class="composer-cwd" id="composer-cwd" type="button" hidden title="会话项目地址（点击更换）"></button>
+                      <span class="composer-branch" id="composer-branch" hidden></span>
                       <button class="text-button composer-new-task" id="composer-new-task" type="button" hidden>新任务</button>
                       <button class="icon-button composer-automation" id="save-automation-button" type="button" title="将当前任务、目标 CLI、权限、模型与地址存为自动化" aria-label="存为自动化">
                         <svg class="icon lucide"><use href="#lucide-timer"></use></svg>
@@ -594,26 +779,53 @@
                   </section>
                   <div class="composer-collaborators" id="composer-collaborators" aria-label="额外协作者" hidden></div>
                   <label class="sr-only" id="composer-mode-hint" for="task-input">任务内容</label>
+                  <div class="composer-editing-bar" id="composer-editing-bar" role="status" hidden>
+                    <svg class="icon lucide" aria-hidden="true"><use href="#lucide-pencil"></use></svg>
+                    <span>正在编辑历史消息——发送将作为续聊追加，不改写原记录</span>
+                    <button class="composer-editing-cancel" id="composer-editing-cancel" type="button" title="取消编辑并恢复原草稿（Esc）">取消</button>
+                  </div>
                   <div class="attach-chips" id="attach-chips" hidden aria-label="已附加的资料文件" aria-live="polite"></div>
                   <textarea id="task-input" name="prompt" rows="2" role="combobox" aria-autocomplete="list" aria-controls="mention-menu slash-menu" aria-expanded="false" placeholder="描述目标 · @ 点名 · / 命令 · Ctrl+K 面板" required></textarea>
                   <div class="mention-menu" id="mention-menu" role="listbox" aria-label="点名团队成员" hidden></div>
                   <div class="slash-menu" id="slash-menu" role="listbox" aria-label="斜杠命令" hidden></div>
                   <div class="composer-footer">
-                    <button type="button" class="attach-button" id="attach-button" title="附加资料文件；也可在输入框直接粘贴图片" aria-label="附加资料文件">
-                      <svg class="icon lucide"><use href="#lucide-plus"></use></svg>
-                    </button>
-                    <label class="model-pick" id="task-model-pick" title="当前目标 CLI 的真实模型目录">
-                      <span aria-hidden="true">模型</span>
-                      <select id="task-model" aria-label="选择模型">
+                    <div class="composer-attach" id="composer-attach">
+                      <button type="button" class="attach-button" id="attach-button" title="附加文件或粘贴图片" aria-label="附加文件或粘贴图片" aria-haspopup="menu" aria-expanded="false" aria-controls="attach-menu">
+                        <svg class="icon lucide"><use href="#lucide-plus"></use></svg>
+                      </button>
+                      <div class="attach-menu" id="attach-menu" role="menu" aria-label="附加" hidden>
+                        <button type="button" class="attach-menu-row" role="menuitem" data-attach-action="file">
+                          <svg class="icon lucide" aria-hidden="true"><use href="#lucide-paperclip"></use></svg>
+                          <span>附加文件</span>
+                        </button>
+                        <button type="button" class="attach-menu-row" role="menuitem" data-attach-action="paste">
+                          <svg class="icon lucide" aria-hidden="true"><use href="#lucide-clipboard-list"></use></svg>
+                          <span>粘贴图片</span>
+                        </button>
+                      </div>
+                    </div>
+                    <div class="model-pick pick-menu-host" id="task-model-pick" title="当前目标 CLI 的真实模型目录">
+                      <select id="task-model" hidden aria-label="选择模型">
                         <option value="" selected>默认模型</option>
                       </select>
-                    </label>
-                    <label class="model-pick" id="task-effort-pick" title="当前目标 CLI 的可执行推理强度">
-                      <span aria-hidden="true">Effort</span>
-                      <select id="task-effort" aria-label="选择推理力度">
+                      <button type="button" class="pick-pill" id="model-pill" aria-haspopup="menu" aria-expanded="false" aria-controls="model-menu" title="选择模型">
+                        <span class="pick-pill-kicker" aria-hidden="true">模型</span>
+                        <span class="pick-pill-label" id="model-pill-label">默认模型</span>
+                        <svg class="icon lucide chevron" aria-hidden="true"><use href="#lucide-chevron-down"></use></svg>
+                      </button>
+                      <div class="pick-menu" id="model-menu" role="menu" aria-label="模型" hidden></div>
+                    </div>
+                    <div class="model-pick pick-menu-host" id="task-effort-pick" title="当前目标 CLI 的可执行推理强度">
+                      <select id="task-effort" hidden aria-label="选择推理力度">
                         <option value="" selected>CLI 默认</option>
                       </select>
-                    </label>
+                      <button type="button" class="pick-pill" id="effort-pill" aria-haspopup="menu" aria-expanded="false" aria-controls="effort-menu" title="选择推理力度">
+                        <span class="pick-pill-kicker" aria-hidden="true">Effort</span>
+                        <span class="pick-pill-label" id="effort-pill-label">CLI 默认</span>
+                        <svg class="icon lucide chevron" aria-hidden="true"><use href="#lucide-chevron-down"></use></svg>
+                      </button>
+                      <div class="pick-menu" id="effort-menu" role="menu" aria-label="推理力度" hidden></div>
+                    </div>
                     <div class="model-pick permission-pick" id="task-permission-pick" title="权限模式：Plan=只读规划；Review=只读深审；Build=可写盘（提交后经审批门）">
                       <select id="task-permission" aria-label="选择权限模式" hidden>
                         <option value="plan" selected>Plan · 只读</option>
@@ -627,9 +839,9 @@
                       </button>
                       <div class="permission-menu" id="permission-menu" role="menu" aria-label="权限模式" hidden></div>
                     </div>
-                    <span class="composer-session-controls" id="composer-session-controls" hidden>
+                    <span class="composer-session-controls" id="composer-session-controls" hidden title="沿用会话配置">
                       <svg class="icon lucide" aria-hidden="true"><use href="#lucide-lock"></use></svg>
-                      <span>沿用会话配置</span>
+                      <span>热调</span>
                     </span>
                     <span class="composer-spacer"></span>
                     <span class="key-hint" aria-hidden="true">Enter 发送 · Shift+Enter 换行</span>
@@ -641,12 +853,21 @@
               </form>
 
               <!-- 底部终端抽屉（LO 2026-08-08 图4：左图标开下侧终端）：不设常驻条，默认隐藏 -->
-              <section class="terminal-drawer" id="terminal-drawer" aria-label="内嵌终端" hidden>
+              <section class="terminal-drawer" id="terminal-drawer" aria-label="底部终端" hidden>
                 <div class="terminal-drawer-grip" id="terminal-drawer-grip" role="separator" aria-orientation="horizontal" tabindex="0" title="拖动调整终端高度 · 双击复位 · ↑↓ 步进"></div>
-                <button class="terminal-drawer-close" id="terminal-drawer-close" type="button" title="关闭终端（Ctrl+`）" aria-label="关闭终端"><svg class="icon lucide"><use href="#lucide-x"></use></svg></button>
+                <header class="terminal-drawer-head">
+                  <span class="terminal-drawer-title">
+                    <svg class="icon lucide" aria-hidden="true"><use href="#lucide-square-terminal"></use></svg>
+                    <strong>底部终端</strong>
+                    <em id="terminal-drawer-cwd"></em>
+                  </span>
+                  <button class="terminal-drawer-close" id="terminal-drawer-close" type="button" title="关闭底部终端（Ctrl+`）" aria-label="关闭底部终端"><svg class="icon lucide"><use href="#lucide-x"></use></svg></button>
+                </header>
                 <div class="terminal-drawer-body" id="workbench-terminal-container"></div>
               </section>
             </section>
+
+            <section class="automations-pane" id="automations-workbench" aria-label="自动化" hidden></section>
 
             <aside class="context-rail registry-dock" id="mission-control-dock" aria-label="Mission Control 任务投影" aria-busy="false" aria-hidden="true" inert>
               <header class="rail-tabbar">
@@ -713,6 +934,17 @@
                   </section>
                 </section>
               </div>
+              </section>
+
+              <section class="rail-tool-panel" data-tool-panel="terminal" role="tabpanel" aria-label="侧栏终端" hidden>
+                <header class="rail-terminal-head">
+                  <span class="terminal-drawer-title">
+                    <svg class="icon lucide" aria-hidden="true"><use href="#lucide-square-terminal"></use></svg>
+                    <strong>侧栏终端</strong>
+                    <em id="rail-terminal-cwd"></em>
+                  </span>
+                </header>
+                <div class="rail-terminal-body" id="rail-terminal-container"></div>
               </section>
 
               <section class="rail-tool-panel" data-tool-panel="review" role="tabpanel" aria-label="审阅" hidden>
@@ -787,46 +1019,54 @@
           <div class="team-hero">
             <p class="eyebrow team-hero-eyebrow">Multi-CLI Orchestration</p>
             <h1 class="team-hero-title" id="team-title">团队协作</h1>
-            <p class="team-hero-sub">团队启用、能力配置与运行态</p>
+            <p class="team-hero-sub">团队启用、能力配置、运行态与协作星图</p>
           </div>
 
-          <section class="team-control-workspace" id="team-settings-panel" aria-labelledby="team-settings-title">
+          <section class="team-control-workspace" id="team-settings-panel" aria-labelledby="team-settings-title" data-active-surface="orchestration">
+            <h2 class="sr-only" id="team-settings-title">团队控制</h2>
+            <div class="team-command-deck">
             <header class="team-control-header">
-              <div class="team-control-heading">
-                <span class="eyebrow">Team Control</span>
-                <h2 id="team-settings-title">团队控制</h2>
-              </div>
               <div class="team-control-actions">
-                <label class="team-switch-field">
-                  <span>团队</span>
-                  <select class="team-switch-select" id="team-switch-select" aria-label="选择要查看和配置的团队" title="有未保存修改时，切换前会要求确认"></select>
-                </label>
-                <span class="status-label is-neutral" id="team-active-status" aria-live="polite">等待团队数据</span>
-                <button class="button primary" id="team-activate-button" type="button" disabled>
-                  <svg class="icon lucide"><use href="#lucide-plug-zap"></use></svg>
-                  <span id="team-activate-label">设为当前团队</span>
-                </button>
-                <button class="button secondary" id="team-apply-providers-button" type="button" disabled title="按此团队绑定切换各 CLI 的 live 供应商配置">
-                  <svg class="icon lucide"><use href="#lucide-refresh-cw"></use></svg>
-                  应用供应商方案
-                </button>
-                <button class="button secondary" id="team-edit-button" type="button">
-                  <svg class="icon lucide"><use href="#lucide-settings"></use></svg>
-                  编辑设置
-                </button>
-                <button class="button secondary" id="team-new-button" type="button">
-                  <svg class="icon lucide"><use href="#lucide-plus"></use></svg>
-                  新建
-                </button>
-                <label class="team-switch-field team-preset-field" title="从预设模板新建：成员配比 + 主脑 + 协作风格提示词一次就位，保存前可任意改">
-                  <span>预设</span>
-                  <select class="team-switch-select" id="team-preset-select" aria-label="从预设模板新建团队"></select>
-                </label>
-                <button class="button secondary" id="team-import-button" type="button" title="导入团队包（.json）：自定义成员随包迁移，本机缺失的席位如实报告">
-                  <svg class="icon lucide"><use href="#lucide-upload"></use></svg>
-                  导入
-                </button>
-                <input type="file" id="team-import-file" accept="application/json,.json" hidden />
+                <div class="team-identity">
+                  <label class="team-switch-field">
+                    <span>当前团队</span>
+                    <select class="team-switch-select" id="team-switch-select" aria-label="选择要查看和配置的团队" title="有未保存修改时，切换前会要求确认"></select>
+                  </label>
+                  <div class="team-presence">
+                    <span class="status-label is-neutral" id="team-active-status" aria-live="polite">等待团队数据</span>
+                    <button class="button primary team-activate" id="team-activate-button" type="button" disabled>
+                      <svg class="icon lucide"><use href="#lucide-plug-zap"></use></svg>
+                      <span id="team-activate-label">设为当前团队</span>
+                    </button>
+                  </div>
+                </div>
+                <div class="team-control-tools">
+                  <div class="team-tool-group" data-group="ops">
+                    <button class="button secondary" id="team-apply-providers-button" type="button" disabled title="按此团队绑定切换各 CLI 的 live 供应商配置">
+                      <svg class="icon lucide"><use href="#lucide-refresh-cw"></use></svg>
+                      应用供应商
+                    </button>
+                    <button class="button secondary" id="team-edit-button" type="button" title="打开正在配置的团队设置">
+                      <svg class="icon lucide"><use href="#lucide-settings"></use></svg>
+                      设置
+                    </button>
+                  </div>
+                  <div class="team-tool-group" data-group="create">
+                    <button class="button secondary" id="team-new-button" type="button">
+                      <svg class="icon lucide"><use href="#lucide-plus"></use></svg>
+                      新建
+                    </button>
+                    <label class="team-switch-field team-preset-field" title="从预设模板新建：成员配比 + 主脑 + 协作风格提示词一次就位，保存前可任意改">
+                      <span>预设</span>
+                      <select class="team-switch-select" id="team-preset-select" aria-label="从预设模板新建团队"></select>
+                    </label>
+                    <button class="button secondary" id="team-import-button" type="button" title="导入团队包（.json）：自定义成员随包迁移，本机缺失的席位如实报告">
+                      <svg class="icon lucide"><use href="#lucide-upload"></use></svg>
+                      导入
+                    </button>
+                    <input type="file" id="team-import-file" accept="application/json,.json" hidden />
+                  </div>
+                </div>
               </div>
             </header>
 
@@ -839,9 +1079,124 @@
                 <svg class="icon lucide"><use href="#lucide-user-round"></use></svg>
                 成员库
               </button>
+              <button class="team-surface-tab" id="team-surface-settings-tab" type="button" role="tab" aria-selected="false" aria-controls="team-surface-settings" data-team-surface="settings" tabindex="-1">
+                <svg class="icon lucide"><use href="#lucide-settings"></use></svg>
+                团队设置
+              </button>
             </nav>
+            </div>
 
             <div class="team-surface" id="team-surface-orchestration" role="tabpanel" aria-labelledby="team-surface-orchestration-tab">
+              <section class="team-runtime-block team-starmap-block" aria-labelledby="team-starmap-title">
+                <h3 id="team-starmap-title"><svg class="icon lucide"><use href="#lucide-orbit"></use></svg>协作星图</h3>
+                <p class="team-starmap-lead">当前团队的活星图。亮点是执行中的席位，连线来自本队 TaskGraph。</p>
+                <div class="team-starmap-shell" id="team-starmap-root"></div>
+              </section>
+
+              <section class="team-runtime-block team-inbox-block" aria-labelledby="team-inbox-title">
+                <div class="team-inbox-heading">
+                  <div>
+                    <h3 id="team-inbox-title"><svg class="icon lucide"><use href="#lucide-messages-square"></use></svg>消息收发局</h3>
+                    <p class="team-starmap-lead">当前团队 run 的 Ask、答复与治理消息。每条记录都可回到对应任务核验。</p>
+                  </div>
+                  <span class="status-label is-neutral" id="team-inbox-status" role="status" aria-live="polite">等待消息</span>
+                </div>
+                <div id="team-inbox-root"></div>
+              </section>
+
+              <section class="team-runtime-block team-routing-block" id="team-router-workbench" aria-labelledby="team-routing-title">
+                <div class="team-router-head">
+                  <div>
+                    <h3 id="team-routing-title"><svg class="icon lucide"><use href="#lucide-route"></use></svg>路由与派工</h3>
+                    <p class="team-router-lead">按当前团队白名单生成可审计预览，不会启动 Agent。空名单会 fail-closed。</p>
+                    <p class="team-router-team" id="router-team-context">等待团队数据</p>
+                  </div>
+                  <span class="status-label is-neutral" id="router-status">等待预览</span>
+                </div>
+
+                <div class="team-router-layout">
+                  <form class="router-form" id="router-form">
+                    <div class="team-router-section-label">任务画像</div>
+                    <label class="sr-only" for="router-prompt">任务</label>
+                    <textarea id="router-prompt" name="router-prompt" rows="4" placeholder="例如：评审这条路由预览的安全面，并给出独立验证席" required></textarea>
+                    <div class="team-router-kinds" role="radiogroup" aria-label="任务类型">
+                      <button type="button" class="team-router-kind is-active" data-router-kind="auto">自动判断</button>
+                      <button type="button" class="team-router-kind" data-router-kind="planning">规划</button>
+                      <button type="button" class="team-router-kind" data-router-kind="coding">实现</button>
+                      <button type="button" class="team-router-kind" data-router-kind="review">评审</button>
+                      <button type="button" class="team-router-kind" data-router-kind="debugging">诊断</button>
+                      <button type="button" class="team-router-kind" data-router-kind="current-research">当前资料</button>
+                      <button type="button" class="team-router-kind" data-router-kind="long-context">长上下文</button>
+                    </div>
+                    <label class="sr-only" for="router-kind">任务类型</label>
+                    <select id="router-kind" name="router-kind" class="sr-only" tabindex="-1">
+                      <option value="auto" selected>自动判断</option>
+                      <option value="planning">规划</option>
+                      <option value="coding">实现</option>
+                      <option value="review">评审</option>
+                      <option value="current-research">当前资料</option>
+                      <option value="debugging">诊断</option>
+                      <option value="long-context">长上下文</option>
+                    </select>
+                    <div class="team-router-fields">
+                      <label>
+                        <span>风险</span>
+                        <select id="router-risk" name="router-risk">
+                          <option value="low">低 · 不强制独立验证</option>
+                          <option value="medium" selected>中 · 与正式派工同档</option>
+                          <option value="high">高 · 要求跨供应商验证</option>
+                        </select>
+                      </label>
+                      <label>
+                        <span>偏好席位</span>
+                        <select id="router-preferred-seat" name="router-preferred-seat">
+                          <option value="">自动（按团队评分）</option>
+                        </select>
+                      </label>
+                    </div>
+                    <label class="check-control standalone-check">
+                      <input id="router-current-source" type="checkbox" />
+                      <span>要求当前来源与引用</span>
+                    </label>
+                    <button class="button primary full-width" type="submit">
+                      <svg class="icon lucide"><use href="#lucide-route"></use></svg>
+                      生成路由预览
+                    </button>
+                  </form>
+
+                  <section class="route-result" aria-labelledby="route-result-title">
+                    <div class="team-router-section-label" id="route-result-title">决策结果</div>
+                    <p class="team-router-meta" id="route-result-meta">尚无路由记录</p>
+                    <div class="decision-primary" id="router-primary-decision">
+                      <span class="agent-avatar">--</span>
+                      <div>
+                        <span>主执行</span>
+                        <strong>等待任务画像</strong>
+                      </div>
+                    </div>
+                    <dl class="decision-facts" id="router-decision-facts"></dl>
+                    <div class="reason-list" id="router-reason-list"></div>
+                  </section>
+                </div>
+
+                <div class="team-router-candidates">
+                  <div class="team-router-section-label">候选评分</div>
+                  <div class="team-router-candidate-grid" id="router-candidate-body">
+                    <p class="team-router-empty">生成预览后显示全部候选与排除原因。</p>
+                  </div>
+                </div>
+
+                <div class="team-router-models">
+                  <div class="team-router-section-label">模型与适配器</div>
+                  <p class="team-router-hint">注册表健康是通道事实；真正能不能接活，还要过当前团队白名单。</p>
+                  <div class="team-router-model-grid" id="model-table-body"></div>
+                </div>
+
+                <div class="team-route-gate">
+                  <div class="team-router-section-label" id="team-route-gate-title">最近闸门</div>
+                  <div id="team-routing-root"></div>
+                </div>
+              </section>
               <div class="team-unified-grid">
               <div class="team-runtime-overview" aria-labelledby="team-runtime-title">
                 <div class="team-runtime-heading">
@@ -857,86 +1212,6 @@
                   <div id="team-roster-root"></div>
                 </section>
               </div>
-
-              <form class="team-settings-form" id="team-form">
-                <div class="team-settings-heading">
-                  <div>
-                    <span class="eyebrow">团队设置</span>
-                    <h3 id="team-form-title">编辑团队</h3>
-                  </div>
-                  <span class="status-label is-neutral" id="team-form-status" aria-live="polite">已保存</span>
-                </div>
-                <div class="team-form-body">
-                  <p class="team-builtin-note" id="team-builtin-note" hidden>
-                    514cc 是内置默认团队，配置冻结不可修改——可「另存为新团队」后自定义。
-                  </p>
-                  <label class="field">
-                    <span>名称</span>
-                    <input id="team-name-input" maxlength="60" autocomplete="off" required />
-                  </label>
-                  <label class="field">
-                    <span>描述</span>
-                    <textarea id="team-description-input" rows="2" maxlength="4000"></textarea>
-                  </label>
-                  <label class="field">
-                    <span>团队提示词（注入主脑规划轮）</span>
-                    <textarea id="team-prompt-input" rows="3" maxlength="4000" placeholder="该团队的协作风格、优先级与边界约束"></textarea>
-                  </label>
-                  <fieldset class="field team-members-field">
-                    <legend>可选席位与主脑</legend>
-                    <span class="team-roster-summary" id="team-roster-summary" role="status">0 个成员 · 未设置主脑</span>
-                    <div class="team-members-toolbar">
-                      <label class="team-members-search" title="按名称 / 职责 / 品牌 / 席位过滤；多个关键词空格分隔">
-                        <svg class="icon lucide" aria-hidden="true"><use href="#lucide-search"></use></svg>
-                        <input id="team-members-search" type="search" placeholder="搜索席位…" autocomplete="off" />
-                      </label>
-                      <button class="button secondary compact team-member-create" id="team-member-create-button" type="button"
-                        title="前往成员库新建自定义成员；保存后自动勾入当前团队草稿">
-                        <svg class="icon lucide" aria-hidden="true"><use href="#lucide-plus"></use></svg>
-                        新建成员
-                      </button>
-                    </div>
-                    <div id="team-members-list" class="team-members-list"></div>
-                  </fieldset>
-                  <p class="form-section-label">能力声明<span>勾选即声明给主脑派工参考；完整矩阵在配置图谱 <button class="text-button" type="button" data-config-surface-jump="capabilities">前往管理</button></span></p>
-                  <div class="field">
-                    <span class="field-label">团队 Skill</span>
-                    <div class="chip-wall" id="team-skills-chips" aria-label="选择团队 Skill"></div>
-                  </div>
-                  <div class="field">
-                    <span class="field-label">团队 MCP</span>
-                    <div class="chip-wall" id="team-mcp-chips" aria-label="选择团队 MCP"></div>
-                  </div>
-                  <p class="form-section-label">供应商绑定<span>配置图谱「一键应用团队方案」时按此逐应用切换；跟随当前全局 = 不绑定</span></p>
-                  <div class="provider-bind-grid">
-                    <label class="field"><span class="field-label">Claude Code</span><select id="team-provider-claude" aria-label="Claude 供应商绑定"></select></label>
-                    <label class="field"><span class="field-label">Codex</span><select id="team-provider-codex" aria-label="Codex 供应商绑定"></select></label>
-                    <label class="field"><span class="field-label">Gemini</span><select id="team-provider-gemini" aria-label="Gemini 供应商绑定"></select></label>
-                    <label class="field"><span class="field-label">Grok Build</span><select id="team-provider-grokbuild" aria-label="Grok Build 供应商绑定"></select></label>
-                    <label class="field"><span class="field-label">Kimi Code</span><select id="team-provider-kimi" aria-label="Kimi Code 供应商绑定"></select></label>
-                    <label class="field"><span class="field-label">OpenCode</span><select id="team-provider-opencode" aria-label="OpenCode 供应商绑定"></select></label>
-                    <label class="field"><span class="field-label">OpenClaw</span><select id="team-provider-openclaw" aria-label="OpenClaw 供应商绑定"></select></label>
-                    <label class="field"><span class="field-label">Hermes</span><select id="team-provider-hermes" aria-label="Hermes 供应商绑定"></select></label>
-                  </div>
-                </div>
-                <div class="team-form-actions">
-                  <button class="button danger" id="team-delete-button" type="button">删除团队</button>
-                  <span class="dialog-actions-spacer"></span>
-                  <button class="button secondary" id="team-export-button" type="button" title="把当前团队（含自定义成员定义）导出为团队包 JSON，可迁移/备份/分享">
-                    <svg class="icon lucide"><use href="#lucide-download"></use></svg>
-                    导出
-                  </button>
-                  <button class="button secondary" id="team-cancel-button" type="button">
-                    <svg class="icon lucide"><use href="#lucide-rotate-ccw"></use></svg>
-                    重置
-                  </button>
-                  <button class="button primary" id="team-save-button" type="submit">
-                    <svg class="icon lucide"><use href="#lucide-save"></use></svg>
-                    <span id="team-save-label">保存</span>
-                  </button>
-                </div>
-              </form>
-
               </div>
 
               <div class="team-runtime-details">
@@ -951,10 +1226,6 @@
               <section class="team-runtime-block" aria-labelledby="team-heatmap-title">
                 <h3 id="team-heatmap-title"><svg class="icon lucide"><use href="#lucide-activity"></use></svg>活跃度</h3>
                 <div id="team-heatmap-root"></div>
-              </section>
-              <section class="team-runtime-block team-routing-block" aria-labelledby="team-routing-title">
-                <h3 id="team-routing-title"><svg class="icon lucide"><use href="#lucide-route"></use></svg>路由与派工</h3>
-                <div id="team-routing-root"></div>
               </section>
               </div>
             </div>
@@ -1006,6 +1277,18 @@
                     <code id="member-id-value"></code>
                     <span class="member-source-spacer"></span>
                     <span id="member-runtime-status" class="status-label is-neutral">未接线</span>
+                  </div>
+                  <div class="member-avatar-field" id="member-avatar-field">
+                    <div class="member-avatar-preview" id="member-avatar-preview" aria-hidden="true"></div>
+                    <div class="member-avatar-copy">
+                      <span>头像</span>
+                      <p id="member-avatar-hint">默认使用该成员的官方 CLI 图标。保存成员后可换成自己的照片。</p>
+                      <div class="member-avatar-actions">
+                        <button class="button secondary compact" id="member-avatar-upload" type="button">更换头像</button>
+                        <button class="text-button" id="member-avatar-reset" type="button" hidden>恢复官方图标</button>
+                      </div>
+                    </div>
+                    <input id="member-avatar-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden />
                   </div>
                   <div class="member-usage-strip" id="member-usage-strip">
                     <span class="member-usage-label" title="引用此成员的团队；被引用时服务端会阻止删除">使用情况</span>
@@ -1115,6 +1398,90 @@
                 </footer>
               </form>
             </section>
+
+            <section class="team-surface team-settings-surface" id="team-surface-settings" role="tabpanel" aria-labelledby="team-surface-settings-tab" hidden>
+              <form class="team-settings-form" id="team-form">
+                <div class="team-settings-heading">
+                  <div>
+                    <span class="eyebrow">团队设置</span>
+                    <h3 id="team-form-title">编辑团队</h3>
+                  </div>
+                  <span class="status-label is-neutral" id="team-form-status" aria-live="polite">已保存</span>
+                </div>
+                <div class="team-form-body">
+                  <p class="team-builtin-note" id="team-builtin-note" hidden>
+                    514cc 是内置默认团队，配置冻结不可修改——可「另存为新团队」后自定义。
+                  </p>
+                  <div class="team-identity-fields">
+                    <label class="field">
+                      <span>名称</span>
+                      <input id="team-name-input" maxlength="60" autocomplete="off" required />
+                    </label>
+                    <label class="field">
+                      <span>描述</span>
+                      <textarea id="team-description-input" rows="2" maxlength="4000"></textarea>
+                    </label>
+                  </div>
+                  <label class="field">
+                    <span>团队提示词（注入主脑规划轮）</span>
+                    <textarea id="team-prompt-input" rows="3" maxlength="4000" placeholder="该团队的协作风格、优先级与边界约束"></textarea>
+                  </label>
+                  <fieldset class="field team-members-field">
+                    <legend>可选席位与主脑</legend>
+                    <span class="team-roster-summary" id="team-roster-summary" role="status">0 个成员 · 未设置主脑</span>
+                    <div class="team-members-toolbar">
+                      <label class="team-members-search" title="按名称 / 职责 / 品牌 / 席位过滤；多个关键词空格分隔">
+                        <svg class="icon lucide" aria-hidden="true"><use href="#lucide-search"></use></svg>
+                        <input id="team-members-search" type="search" placeholder="搜索席位…" autocomplete="off" />
+                      </label>
+                      <button class="button secondary compact team-member-create" id="team-member-create-button" type="button"
+                        title="前往成员库新建自定义成员；保存后自动勾入当前团队草稿">
+                        <svg class="icon lucide"><use href="#lucide-plus"></use></svg>
+                        新建成员
+                      </button>
+                    </div>
+                    <div id="team-members-list" class="team-members-list"></div>
+                  </fieldset>
+                  <p class="form-section-label">能力配结<span>这是给主脑看的菜单；安装与启停只在配置图谱 <button class="text-button" type="button" data-config-surface-jump="capabilities">前往管理</button></span></p>
+                  <p class="team-kit-note" id="team-kit-note" hidden>内置团队的配结只读。花片上的状态来自配置图谱，不在这里开关。</p>
+                  <div class="field">
+                    <span class="field-label">团队 Skill</span>
+                    <div class="chip-wall" id="team-skills-chips" aria-label="团队 Skill 配结"></div>
+                  </div>
+                  <div class="field">
+                    <span class="field-label">团队 MCP</span>
+                    <div class="chip-wall" id="team-mcp-chips" aria-label="团队 MCP 配结"></div>
+                  </div>
+                  <p class="form-section-label">供应商绑定<span>配置图谱「一键应用团队方案」时按此逐应用切换；跟随当前全局 = 不绑定</span></p>
+                  <div class="provider-bind-grid">
+                    <label class="field"><span class="field-label">Claude Code</span><select id="team-provider-claude" aria-label="Claude 供应商绑定"></select></label>
+                    <label class="field"><span class="field-label">Codex</span><select id="team-provider-codex" aria-label="Codex 供应商绑定"></select></label>
+                    <label class="field"><span class="field-label">Gemini</span><select id="team-provider-gemini" aria-label="Gemini 供应商绑定"></select></label>
+                    <label class="field"><span class="field-label">Grok Build</span><select id="team-provider-grokbuild" aria-label="Grok Build 供应商绑定"></select></label>
+                    <label class="field"><span class="field-label">Kimi Code</span><select id="team-provider-kimi" aria-label="Kimi Code 供应商绑定"></select></label>
+                    <label class="field"><span class="field-label">OpenCode</span><select id="team-provider-opencode" aria-label="OpenCode 供应商绑定"></select></label>
+                    <label class="field"><span class="field-label">OpenClaw</span><select id="team-provider-openclaw" aria-label="OpenClaw 供应商绑定"></select></label>
+                    <label class="field"><span class="field-label">Hermes</span><select id="team-provider-hermes" aria-label="Hermes 供应商绑定"></select></label>
+                  </div>
+                </div>
+                <div class="team-form-actions">
+                  <button class="button danger" id="team-delete-button" type="button">删除团队</button>
+                  <span class="dialog-actions-spacer"></span>
+                  <button class="button secondary" id="team-export-button" type="button" title="把当前团队（含自定义成员定义）导出为团队包 JSON，可迁移/备份/分享">
+                    <svg class="icon lucide"><use href="#lucide-download"></use></svg>
+                    导出
+                  </button>
+                  <button class="button secondary" id="team-cancel-button" type="button">
+                    <svg class="icon lucide"><use href="#lucide-rotate-ccw"></use></svg>
+                    重置
+                  </button>
+                  <button class="button primary" id="team-save-button" type="submit">
+                    <svg class="icon lucide"><use href="#lucide-save"></use></svg>
+                    <span id="team-save-label">保存</span>
+                  </button>
+                </div>
+              </form>
+            </section>
           </section>
         </section>
 
@@ -1123,7 +1490,7 @@
             <div>
               <p class="eyebrow">配置控制面</p>
               <h1 id="config-title">配置图谱</h1>
-              <p>供应商、Agent 能力、MCP 与运行时真源</p>
+              <p>供应商、本机运行时、Agent 能力、钩子与运行席位真源</p>
             </div>
             <span class="status-label is-neutral" id="config-workspace-status" aria-live="polite">正在汇总</span>
           </div>
@@ -1137,9 +1504,17 @@
                   <span class="config-topology-icon"><svg class="icon lucide"><use href="#lucide-server"></use></svg></span>
                   <span class="config-topology-copy"><strong>供应商与应用</strong><span id="config-topology-provider-count">读取中</span></span>
                 </button>
+                <button class="config-topology-node" id="config-topology-workbench" type="button" role="tab" aria-selected="false" aria-controls="config-surface-local-runtime" data-config-surface="local-runtime" tabindex="-1">
+                  <span class="config-topology-icon"><svg class="icon lucide"><use href="#lucide-terminal"></use></svg></span>
+                  <span class="config-topology-copy"><strong>本机运行时</strong><span id="config-topology-workbench-count">读取中</span></span>
+                </button>
                 <button class="config-topology-node" id="config-topology-capabilities" type="button" role="tab" aria-selected="false" aria-controls="config-surface-capabilities" data-config-surface="capabilities" tabindex="-1">
                   <span class="config-topology-icon"><svg class="icon lucide"><use href="#lucide-puzzle"></use></svg></span>
                   <span class="config-topology-copy"><strong>Agent · Skill · MCP</strong><span id="config-topology-capability-count">读取中</span></span>
+                </button>
+                <button class="config-topology-node" id="config-topology-hooks" type="button" role="tab" aria-selected="false" aria-controls="config-surface-hooks" data-config-surface="hooks" tabindex="-1">
+                  <span class="config-topology-icon"><svg class="icon lucide"><use href="#lucide-webhook"></use></svg></span>
+                  <span class="config-topology-copy"><strong>钩子</strong><span id="config-topology-hooks-count">读取中</span></span>
                 </button>
                 <button class="config-topology-node" id="config-topology-sources" type="button" role="tab" aria-selected="false" aria-controls="config-surface-sources" data-config-surface="sources" tabindex="-1">
                   <span class="config-topology-icon"><svg class="icon lucide"><use href="#lucide-file-text"></use></svg></span>
@@ -1186,11 +1561,13 @@
             <div class="provider-columns" id="provider-columns"></div>
           </section>
 
-          <section class="ccswitch-workbench" id="ccswitch-workbench" aria-label="运行与配置工作台"></section>
-
           </section>
 
-          <section class="config-surface-panel" id="config-surface-capabilities" data-config-surface-panel="capabilities" role="tabpanel" aria-labelledby="config-topology-capabilities" hidden>
+          <section class="config-surface-panel" id="config-surface-local-runtime" data-config-surface-panel="local-runtime" role="tabpanel" aria-labelledby="config-topology-workbench" hidden>
+          <section class="ccswitch-workbench" id="ccswitch-workbench" aria-label="运行与配置工作台"></section>
+          </section>
+
+          <section class="config-surface-panel" id="config-surface-capabilities" data-config-surface-panel="capabilities" data-cap-active-workspace="skills" role="tabpanel" aria-labelledby="config-topology-capabilities" hidden>
             <div class="config-surface-heading">
               <div>
                 <p class="eyebrow">编排声明与本机接入</p>
@@ -1201,16 +1578,52 @@
                 重新扫描
               </button>
             </div>
+
+            <div class="cap-overview" id="cap-overview" aria-label="能力概览">
+              <button class="cap-stat" type="button" data-cap-jump="skills" aria-controls="cap-workspace-skills">
+                <span class="cap-stat-label">Skill</span>
+                <strong class="cap-stat-value" id="cap-stat-skills">—</strong>
+                <span class="cap-stat-sub" id="cap-stat-skills-sub">等待扫描</span>
+              </button>
+              <button class="cap-stat" type="button" data-cap-jump="skills" aria-controls="cap-workspace-skills">
+                <span class="cap-stat-label">成员声明</span>
+                <strong class="cap-stat-value" id="cap-stat-declared">—</strong>
+                <span class="cap-stat-sub" id="cap-stat-declared-sub">勾选=提示词声明</span>
+              </button>
+              <button class="cap-stat" type="button" data-cap-jump="mcp" aria-controls="cap-workspace-mcp">
+                <span class="cap-stat-label">MCP</span>
+                <strong class="cap-stat-value" id="cap-stat-mcp">—</strong>
+                <span class="cap-stat-sub" id="cap-stat-mcp-sub">本机配置扫描</span>
+              </button>
+              <button class="cap-stat" type="button" data-cap-jump="mcp" aria-controls="cap-workspace-mcp">
+                <span class="cap-stat-label">可启停</span>
+                <strong class="cap-stat-value" id="cap-stat-writable">—</strong>
+                <span class="cap-stat-sub" id="cap-stat-writable-sub">仅 claude.json 全局</span>
+              </button>
+            </div>
+
+            <nav class="cap-workspace-switcher" id="cap-workspace-tabs" role="tablist" aria-label="能力工作区">
+              <button class="cap-workspace-tab is-active" id="cap-workspace-skills-tab" type="button" role="tab" aria-selected="true" aria-controls="cap-workspace-skills" data-cap-workspace="skills">
+                <svg class="icon lucide"><use href="#lucide-puzzle"></use></svg>
+                Skill 声明
+              </button>
+              <button class="cap-workspace-tab" id="cap-workspace-mcp-tab" type="button" role="tab" aria-selected="false" aria-controls="cap-workspace-mcp" data-cap-workspace="mcp" tabindex="-1">
+                <svg class="icon lucide"><use href="#lucide-server"></use></svg>
+                MCP 接入
+              </button>
+            </nav>
+
+            <div class="cap-workspace" id="cap-workspace-skills" role="tabpanel" aria-labelledby="cap-workspace-skills-tab">
             <section class="content-section" aria-labelledby="cap-agents-title">
               <div class="section-heading">
                 <div>
                   <h2 id="cap-agents-title">Agent 花名册</h2>
-                  <p>module.yaml 注册的命名 agent 及其 skill 承载</p>
+                  <p>module.yaml 注册的命名 agent；点到矩阵里有列的成员即可聚焦该列</p>
                 </div>
               </div>
               <div class="chip-grid" id="cap-agents-grid"></div>
             </section>
-            <section class="content-section" aria-labelledby="cap-skills-title">
+            <section class="content-section cap-matrix-section" aria-labelledby="cap-skills-title">
               <div class="section-heading">
                 <div>
                   <h2 id="cap-skills-title">Skill 启停矩阵</h2>
@@ -1223,6 +1636,7 @@
                   <svg class="icon lucide" aria-hidden="true"><use href="#lucide-search"></use></svg>
                   <input id="cap-skills-filter" type="search" autocomplete="off" placeholder="筛选 Skill 名称或描述" aria-label="筛选 Skill" />
                 </label>
+                <div class="cap-skill-model-chips" id="cap-skills-model-chips" aria-label="各成员已声明数"></div>
                 <span class="cap-matrix-scope subtle" id="cap-skills-scope"></span>
                 <button class="button secondary" type="button" data-cap-bulk="enable">
                   <svg class="icon lucide"><use href="#lucide-check"></use></svg>全部声明
@@ -1230,8 +1644,14 @@
                 <button class="button secondary" type="button" data-cap-bulk="disable">
                   <svg class="icon lucide"><use href="#lucide-x"></use></svg>全部取消
                 </button>
+                <button class="button secondary" id="cap-skill-market-button" type="button">
+                  <svg class="icon lucide"><use href="#lucide-store"></use></svg>去市场发现
+                </button>
+                <button class="button primary" id="cap-skill-create-button" type="button">
+                  <svg class="icon lucide"><use href="#lucide-plus"></use></svg>新建 Skill
+                </button>
               </div>
-              <div class="table-scroll">
+              <div class="table-scroll cap-matrix-scroll">
                 <table class="data-table cap-matrix">
                   <thead id="cap-skills-head"><tr><th>Skill</th></tr></thead>
                   <tbody id="cap-skills-body"><tr><td class="subtle">正在读取…</td></tr></tbody>
@@ -1239,21 +1659,38 @@
               </div>
               <p class="subtle" id="cap-skills-ghosts" hidden></p>
             </section>
-            <section class="content-section" aria-labelledby="cap-mcp-title">
+            </div>
+
+            <div class="cap-workspace" id="cap-workspace-mcp" role="tabpanel" aria-labelledby="cap-workspace-mcp-tab" hidden>
+            <section class="content-section cap-mcp-section" aria-labelledby="cap-mcp-title">
               <div class="section-heading">
                 <div>
                   <h2 id="cap-mcp-title">MCP 服务器</h2>
                   <p id="cap-mcp-summary">本机配置声明扫描（env/参数属密钥面，不展示）；claude.json 全局 server 可隔离启停</p>
                 </div>
               </div>
-              <div class="table-scroll">
-                <table class="data-table">
-                  <thead><tr><th>名称</th><th>传输</th><th>入口</th><th>范围</th><th>来源文件</th><th>操作</th></tr></thead>
-                  <tbody id="cap-mcp-body"><tr><td colspan="6" class="subtle">正在读取…</td></tr></tbody>
-                </table>
+              <div class="cap-mcp-toolbar" role="group" aria-label="MCP 筛选">
+                <label class="search-field" for="cap-mcp-search">
+                  <svg class="icon lucide" aria-hidden="true"><use href="#lucide-search"></use></svg>
+                  <input id="cap-mcp-search" type="search" autocomplete="off" placeholder="筛选名称、传输或入口" aria-label="筛选 MCP" />
+                </label>
+                <div class="cap-mcp-filters" id="cap-mcp-filters">
+                  <button type="button" class="is-active" data-mcp-filter="all" aria-pressed="true">全部</button>
+                  <button type="button" data-mcp-filter="writable" aria-pressed="false">可启停</button>
+                  <button type="button" data-mcp-filter="disabled" aria-pressed="false">已禁用</button>
+                </div>
+                <button class="button primary" id="cap-mcp-create-button" type="button">
+                  <svg class="icon lucide"><use href="#lucide-plus"></use></svg>新建 MCP
+                </button>
               </div>
+              <div class="cap-mcp-grid" id="cap-mcp-body"></div>
               <div class="cap-map" id="cap-mcp-map"></div>
             </section>
+            </div>
+          </section>
+
+          <section class="config-surface-panel" id="config-surface-hooks" data-config-surface-panel="hooks" role="tabpanel" aria-labelledby="config-topology-hooks" hidden>
+            <div id="hooks-workbench" class="hooks-workbench" aria-label="钩子设置"></div>
           </section>
 
           <section class="config-surface-panel" id="config-surface-sources" data-config-surface-panel="sources" role="tabpanel" aria-labelledby="config-topology-sources" hidden>
@@ -1551,105 +1988,206 @@
           <section class="config-surface-panel" id="config-surface-remote" aria-label="远程主机或项目配置图谱" hidden></section>
         </section>
 
-        <section class="view" id="view-router" data-view-panel="router" aria-labelledby="router-title" hidden>
+        <section class="view" id="view-appearance" data-view-panel="appearance" aria-labelledby="appearance-title" hidden>
           <div class="page-heading compact-heading">
             <div>
-              <p class="eyebrow">能力驱动调度</p>
-              <h1 id="router-title">模型路由</h1>
-              <p>基于任务类型、风险、实时资料需求和可用性生成可审计路由。</p>
+              <p class="eyebrow">基础设置</p>
+              <h1 id="appearance-title">外观</h1>
+              <p>主题、字号与会话代码块的显示方式。改完立刻生效。</p>
             </div>
-            <span class="status-label is-neutral" id="router-status">等待预览</span>
+            <div class="heading-actions">
+              <button class="button secondary" id="appearance-reset" type="button">恢复默认</button>
+            </div>
           </div>
 
-          <div class="router-layout">
-            <form class="router-form" id="router-form">
-              <div class="section-heading">
-                <div>
-                  <h2>任务画像</h2>
-                  <p>路由预览不会启动 Agent</p>
+          <section class="settings-card" aria-labelledby="appearance-interface-title">
+            <header class="settings-card-head">
+              <h2 id="appearance-interface-title">界面设置</h2>
+              <p>选择亮色、深色或跟随系统；字号只改文字，图标与边距不动。</p>
+            </header>
+            <div class="settings-stack">
+              <div class="settings-block">
+                <div class="settings-row-copy">
+                  <strong>界面主题</strong>
+                  <span>选择亮色、深色或跟随系统主题。</span>
+                </div>
+                <div class="appearance-theme-grid" id="appearance-theme-grid" role="radiogroup" aria-label="界面主题">
+                  <button class="appearance-theme-card" type="button" role="radio" data-appearance-theme="light" aria-checked="false">
+                    <span class="appearance-theme-swatch is-light" aria-hidden="true"><i></i><i></i><i></i></span>
+                    <strong>亮色</strong>
+                    <span>暖米白纸面</span>
+                  </button>
+                  <button class="appearance-theme-card" type="button" role="radio" data-appearance-theme="dark" aria-checked="false">
+                    <span class="appearance-theme-swatch is-dark" aria-hidden="true"><i></i><i></i><i></i></span>
+                    <strong>深色</strong>
+                    <span>暖棕黑墨面</span>
+                  </button>
+                  <button class="appearance-theme-card" type="button" role="radio" data-appearance-theme="system" aria-checked="false">
+                    <span class="appearance-theme-swatch is-system" aria-hidden="true"><i></i><i></i><i></i></span>
+                    <strong>跟随系统</strong>
+                    <span>跟操作系统走</span>
+                  </button>
                 </div>
               </div>
-              <label for="router-prompt">任务</label>
-              <textarea id="router-prompt" rows="7" placeholder="输入需要路由的任务" required></textarea>
-              <div class="field-grid">
-                <label>
-                  <span>任务类型</span>
-                  <select id="router-kind">
-                    <option value="auto">自动判断</option>
-                    <option value="planning">规划</option>
-                    <option value="coding">实现</option>
-                    <option value="review">评审</option>
-                    <option value="current-research">当前资料</option>
-                    <option value="debugging">诊断</option>
-                  </select>
-                </label>
-                <label>
-                  <span>风险等级</span>
-                  <select id="router-risk">
-                    <option value="low">低</option>
-                    <option value="medium" selected>中</option>
-                    <option value="high">高</option>
-                  </select>
-                </label>
+              <div class="settings-row">
+                <div class="settings-row-copy">
+                  <strong>界面字号</strong>
+                  <span>调整应用界面的文字大小，图标与边距尺寸不受影响。</span>
+                </div>
+                <div class="settings-font-control">
+                  <input id="appearance-font-range" type="range" min="12" max="18" step="1" value="14" aria-label="界面字号" />
+                  <label class="settings-unit">
+                    <input id="appearance-font-size" type="number" min="12" max="18" step="1" value="14" aria-label="界面字号数值" />
+                    <span>px</span>
+                  </label>
+                </div>
               </div>
-              <label class="check-control standalone-check">
-                <input id="router-current-source" type="checkbox" />
-                <span>要求当前来源与引用</span>
-              </label>
-              <button class="button primary full-width" type="submit">
-                <svg class="icon lucide"><use href="#lucide-route"></use></svg>
-                生成路由预览
+              <div class="settings-row">
+                <div class="settings-row-copy">
+                  <strong>减少动效</strong>
+                  <span>关掉过渡和入场动画。系统已开「减少动态效果」时本来就会收敛。</span>
+                </div>
+                <button class="settings-switch" id="appearance-motion" type="button" role="switch" aria-checked="false" aria-label="减少动效">
+                  <span class="settings-switch-thumb"></span>
+                </button>
+              </div>
+              <div class="settings-block">
+                <div class="settings-row-copy">
+                  <strong>强调色</strong>
+                  <span>选中项、主按钮和滑杆的颜色。不会改代码着色。</span>
+                </div>
+                <div class="appearance-accent-grid" id="appearance-accent-grid" role="radiogroup" aria-label="强调色">
+                  <button class="appearance-accent-card" type="button" role="radio" data-appearance-accent="copper" aria-checked="true"><i></i>铜橙</button>
+                  <button class="appearance-accent-card" type="button" role="radio" data-appearance-accent="rose" aria-checked="false"><i></i>玫瑰</button>
+                  <button class="appearance-accent-card" type="button" role="radio" data-appearance-accent="teal" aria-checked="false"><i></i>青石</button>
+                  <button class="appearance-accent-card" type="button" role="radio" data-appearance-accent="indigo" aria-checked="false"><i></i>墨蓝</button>
+                </div>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row-copy">
+                  <strong>界面字体</strong>
+                  <span>只改正文字体。侧栏、顶栏和图标保持原来的系统界面字体，避免叠字。</span>
+                </div>
+                <select id="appearance-ui-face" aria-label="界面字体">
+                  <option value="system">系统默认</option>
+                  <option value="yahei">微软雅黑优先</option>
+                  <option value="song">宋体 / 衬线</option>
+                </select>
+              </div>
+              <div class="settings-row">
+                <div class="settings-row-copy">
+                  <strong>界面疏密</strong>
+                  <span>改设置行和会话气泡的间距，不改侧栏宽度。</span>
+                </div>
+                <div class="appearance-seg" id="appearance-density" role="radiogroup" aria-label="界面疏密">
+                  <button type="button" role="radio" data-appearance-density="compact" aria-checked="false">紧凑</button>
+                  <button type="button" role="radio" data-appearance-density="default" aria-checked="true">默认</button>
+                  <button type="button" role="radio" data-appearance-density="comfortable" aria-checked="false">宽松</button>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="settings-card" aria-labelledby="appearance-code-title">
+            <header class="settings-card-head">
+              <h2 id="appearance-code-title">代码设置</h2>
+              <p>只改会话里 Markdown 代码块的显示。着色跟随界面主题，没有独立的 GitHub 主题包。</p>
+            </header>
+            <div class="settings-row">
+              <div class="settings-row-copy">
+                <strong>显示行号</strong>
+                <span>在代码块左侧加行号。长行换行打开时会先收起，避免对不齐。</span>
+              </div>
+              <button class="settings-switch" id="appearance-code-lines" type="button" role="switch" aria-checked="false" aria-label="显示行号">
+                <span class="settings-switch-thumb"></span>
               </button>
-            </form>
-
-            <section class="route-result" aria-labelledby="route-result-title">
-              <div class="section-heading">
-                <div>
-                  <h2 id="route-result-title">决策结果</h2>
-                  <p id="route-result-meta">尚无路由记录</p>
-                </div>
+            </div>
+            <div class="settings-row">
+              <div class="settings-row-copy">
+                <strong>长行自动换行</strong>
+                <span>长行在块内折行，不再左右横滑。</span>
               </div>
-              <div class="decision-primary" id="router-primary-decision">
-                <span class="agent-avatar">--</span>
-                <div>
-                  <span>主执行</span>
-                  <strong>等待任务画像</strong>
-                </div>
+              <button class="settings-switch" id="appearance-code-wrap" type="button" role="switch" aria-checked="false" aria-label="长行自动换行">
+                <span class="settings-switch-thumb"></span>
+              </button>
+            </div>
+            <div class="settings-row">
+              <div class="settings-row-copy">
+                <strong>代码字号</strong>
+                <span>只改代码块文字大小，不影响界面字号。</span>
               </div>
-              <dl class="decision-facts" id="router-decision-facts"></dl>
-              <div class="reason-list" id="router-reason-list"></div>
-              <div class="candidate-block">
-                <h3 class="candidate-title">候选评分</h3>
-                <div class="table-scroll">
-                  <table class="data-table candidate-table">
-                    <thead><tr><th>候选</th><th>综合得分</th><th>健康</th><th>结论</th></tr></thead>
-                    <tbody id="router-candidate-body"><tr><td colspan="4" class="subtle">生成路由预览后显示全部候选与排除原因。</td></tr></tbody>
-                  </table>
-                </div>
-              </div>
-            </section>
-          </div>
-
-          <section class="content-section model-section" aria-labelledby="model-registry-title">
-            <div class="section-heading">
-              <div>
-                <h2 id="model-registry-title">模型与适配器</h2>
-                <p>默认全能力、当前可用性与最近验证</p>
+              <div class="settings-font-control">
+                <input id="appearance-code-range" type="range" min="11" max="16" step="0.5" value="12.5" aria-label="代码字号" />
+                <label class="settings-unit">
+                  <input id="appearance-code-size" type="number" min="11" max="16" step="0.5" value="12.5" aria-label="代码字号数值" />
+                  <span>px</span>
+                </label>
               </div>
             </div>
-            <div class="table-scroll">
-              <table class="data-table model-table">
-                <thead>
-                  <tr>
-                    <th>角色</th>
-                    <th>适配器 / 模型</th>
-                    <th>优势</th>
-                    <th>可用性</th>
-                    <th>最近验证</th>
-                  </tr>
-                </thead>
-                <tbody id="model-table-body"></tbody>
-              </table>
+            <div class="settings-row">
+              <div class="settings-row-copy">
+                <strong>代码字体</strong>
+                <span>本机有对应字体才会切换；没有就回落到系统等宽。</span>
+              </div>
+              <select id="appearance-code-face" aria-label="代码字体">
+                <option value="system">系统等宽</option>
+                <option value="cascadia">Cascadia Code</option>
+                <option value="jetbrains">JetBrains Mono</option>
+              </select>
+            </div>
+          </section>
+
+          <section class="settings-card" aria-labelledby="appearance-preview-title">
+            <header class="settings-card-head">
+              <h2 id="appearance-preview-title">代码预览</h2>
+              <p>同时预览亮色与深色下的代码块。当前界面使用的主题会标「当前生效」。</p>
+            </header>
+            <div class="appearance-previews">
+              <article class="appearance-preview" data-theme="light" data-appearance-preview="light">
+                <header>
+                  <div>
+                    <strong>浅色预览</strong>
+                    <span>暖纸 · 铜橙关键字</span>
+                  </div>
+                  <span class="appearance-preview-badge" data-appearance-active="light" hidden>当前生效</span>
+                </header>
+                <div class="md-body" id="appearance-preview-light"></div>
+                <button class="button secondary" type="button" data-appearance-apply="light">使用亮色</button>
+              </article>
+              <article class="appearance-preview" data-theme="dark" data-appearance-preview="dark">
+                <header>
+                  <div>
+                    <strong>深色预览</strong>
+                    <span>暖墨 · 同族提亮</span>
+                  </div>
+                  <span class="appearance-preview-badge" data-appearance-active="dark" hidden>当前生效</span>
+                </header>
+                <div class="md-body" id="appearance-preview-dark"></div>
+                <button class="button secondary" type="button" data-appearance-apply="dark">使用深色</button>
+              </article>
+            </div>
+          </section>
+        </section>
+
+        <section class="view" id="view-browser" data-view-panel="browser" aria-labelledby="browser-title" hidden>
+          <div class="page-heading compact-heading">
+            <div>
+              <p class="eyebrow">基础设置</p>
+              <h1 id="browser-title">浏览器</h1>
+              <p>协作台左侧工具栏的内置浏览面板，用来打开 HTTP(S) 页面。</p>
+            </div>
+          </div>
+          <section class="settings-card" aria-labelledby="browser-control-title">
+            <header class="settings-card-head">
+              <h2 id="browser-control-title">浏览器控制</h2>
+              <p>这是协作台工具，不是独立插件，也没有单独的缓存清理接口。</p>
+            </header>
+            <div class="settings-row">
+              <div class="settings-row-copy">
+                <strong>打开协作台浏览器</strong>
+                <span>在左侧工具栏打开浏览面板，快捷键 Ctrl+Alt+B。</span>
+              </div>
+              <button class="button primary" id="settings-open-browser" type="button">打开浏览器</button>
             </div>
           </section>
         </section>
@@ -1659,10 +2197,11 @@
             <div>
               <p class="eyebrow">审批与可观测性</p>
               <h1 id="security-title">安全诊断</h1>
-              <p>权限门禁、Secret 隔离、端点状态与运行日志。</p>
+              <p>权限门禁、Secret 隔离、远程门闩、审批租约与端点状态。授权会写审计账本。</p>
             </div>
             <span class="status-label is-pending" id="security-summary">检查中</span>
           </div>
+          <div class="security-posture" id="security-posture" aria-live="polite"></div>
 
           <div class="security-grid">
             <section class="content-section" aria-labelledby="policy-title">
@@ -1689,9 +2228,9 @@
             <div class="section-heading">
               <div>
                 <h2 id="remote-gates-title">远程 / 高风险面门闩</h2>
-                <p>Channels · Gateway · Office · PTY · SSH — 默认 fail-closed，需 LO 单独授权</p>
+                <p>默认 fail-closed。授权与撤销都走账本；撤销立即阻止后续调用，已启动的远程任务不会自动终止。</p>
               </div>
-              <span class="status-label is-ok">blocked</span>
+              <span class="status-label is-neutral" id="remote-gates-summary">读取中</span>
             </div>
             <div class="remote-gates-list" id="remote-gates-list" aria-live="polite"></div>
           </section>
@@ -1776,22 +2315,22 @@
 
           <div class="metric-grid" aria-label="治理指标">
             <article class="metric-card">
-              <span class="metric-label">路由门 · 近 7 天</span>
+              <span class="metric-label"><svg class="icon lucide" aria-hidden="true"><use href="#lucide-git-branch"></use></svg>路由门 · 近 7 天</span>
               <strong class="metric-value" id="obs-routegate-count">--</strong>
               <span class="metric-detail" id="obs-routegate-detail">等待读取</span>
             </article>
             <article class="metric-card">
-              <span class="metric-label">DELTA 账本</span>
+              <span class="metric-label"><svg class="icon lucide" aria-hidden="true"><use href="#lucide-layers"></use></svg>DELTA 账本</span>
               <strong class="metric-value" id="obs-delta-count">--</strong>
               <span class="metric-detail" id="obs-delta-detail">0=白发 / 1=补强 / 2=推翻</span>
             </article>
             <article class="metric-card">
-              <span class="metric-label">距上次外部发火</span>
+              <span class="metric-label"><svg class="icon lucide" aria-hidden="true"><use href="#lucide-timer"></use></svg>距上次外部发火</span>
               <strong class="metric-value" id="obs-fire-days">--</strong>
               <span class="metric-detail" id="obs-fire-detail">codex-to- / grok-to-</span>
             </article>
             <article class="metric-card">
-              <span class="metric-label">双地落漂移</span>
+              <span class="metric-label"><svg class="icon lucide" aria-hidden="true"><use href="#lucide-activity"></use></svg>双地落漂移</span>
               <strong class="metric-value metric-word" id="obs-drift-status">未检查</strong>
               <span class="metric-detail"><button class="text-button" id="obs-drift-button" type="button">运行漂移检查</button></span>
             </article>
@@ -1889,9 +2428,9 @@
         <section class="view" id="view-bootstrapper" data-view-panel="bootstrapper" aria-labelledby="bootstrapper-title" hidden>
           <div class="page-heading compact-heading">
             <div>
-              <p class="eyebrow">快速创建</p>
+              <p class="eyebrow">静态 starter</p>
               <h1 id="bootstrapper-title">项目启动器</h1>
-              <p>可视化配置新项目，选择框架、样式、主题，一键创建。</p>
+              <p>生成本地静态壳：5 个文件，无构建、无 npm。选风味和色板，确认后落盘。</p>
             </div>
           </div>
           <div id="bootstrapper-container"></div>
@@ -1903,7 +2442,7 @@
             <div>
               <p class="eyebrow">外部接入</p>
               <h1 id="channels-title">渠道</h1>
-              <p>把 Telegram 与 Webhook 事件接入协作流，出站推送 run/审批/交接信号。</p>
+              <p>按向导接入 Telegram 或 Webhook。先验通再创建，入站带签名，出站可试投。</p>
             </div>
           </div>
           <div id="channels-container"></div>
@@ -1915,7 +2454,7 @@
             <div>
               <p class="eyebrow">文档生成</p>
               <h1 id="office-title">文档工坊</h1>
-              <p>进程内生成 Word / Excel / PowerPoint，模板化创建，先预览计划再落盘。</p>
+              <p>选类型、写章节，模板会带上正文。先看计划，确认后才落到 output-docs/。</p>
             </div>
           </div>
           <div id="office-container"></div>
@@ -1937,9 +2476,9 @@
         <section class="view" id="view-market" data-view-panel="market" aria-labelledby="market-title" hidden>
           <div class="page-heading compact-heading">
             <div>
-              <p class="eyebrow">供应链</p>
-              <h1 id="market-title">市场</h1>
-              <p>Skills 与 MCP 远程浏览、暂存审查、确认后原子安装，全程哈希台账。</p>
+              <p class="eyebrow">Agent 能力</p>
+              <h1 id="market-title">插件</h1>
+              <p>管理 Skill 与 MCP。仓库扫描发现技能，官方 Registry / Smithery 发现 MCP；审查确认后写入项目与 CLI。</p>
             </div>
           </div>
           <div id="market-container"></div>
@@ -1957,18 +2496,11 @@
           <div id="hosts-container"></div>
         </section>
 
-        <!-- G4: 协作星图（Awwwards 艺术面，全屏 canvas，无工具面 heading） -->
-        <section class="view" id="view-hero" data-view-panel="hero" aria-label="协作星图" hidden>
-          <div id="hero-container"></div>
-        </section>
       </main>
 
+      <input id="operator-avatar-file" type="file" accept="image/png,image/jpeg,image/gif,image/webp" hidden />
+
       <footer class="global-statusbar" aria-label="控制面状态">
-        <span class="statusbar-segment statusbar-connection">
-          <span class="status-dot is-pending" id="global-status-dot"></span>
-          <span id="global-status-label">API 连接中</span>
-        </span>
-        <span class="statusbar-segment">AEMEATH</span>
         <span class="statusbar-segment statusbar-team-pulse" id="global-team-pulse" title="当前团队 CLI 脉搏"></span>
         <span class="statusbar-spacer"></span>
         <span class="statusbar-segment">本机控制面</span>
@@ -1996,6 +2528,111 @@
         </button>
       </nav>
     </div>
+
+    <dialog class="action-dialog cap-wizard-dialog cap-wizard-wide" id="cap-skill-wizard" aria-labelledby="cap-skill-wizard-title">
+      <form id="cap-skill-wizard-form">
+        <div class="dialog-heading">
+          <div>
+            <span class="eyebrow">Skill 目录</span>
+            <h2 id="cap-skill-wizard-title">新建 Skill</h2>
+          </div>
+          <button class="icon-button" id="cap-skill-wizard-close" type="button" aria-label="关闭" title="关闭">
+            <svg class="icon lucide"><use href="#lucide-x"></use></svg>
+          </button>
+        </div>
+        <div class="dialog-body cap-wizard-split">
+          <div class="cap-wizard-form-pane">
+            <p class="cap-wizard-note">写入当前项目 <code>.agents/skills/名称/SKILL.md</code>。刷新后会出现在矩阵里，再勾给成员。不会改 module.yaml，也不会装进 <code>~/.claude/skills</code>。仓库发现 / ZIP 安装走「市场」。右侧是即将落盘的完整文件。</p>
+            <label class="field">
+              <span>名称</span>
+              <input id="cap-skill-wizard-name" name="name" maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9._-]*" autocomplete="off" required placeholder="my-skill" />
+            </label>
+            <label class="field">
+              <span>说明</span>
+              <input id="cap-skill-wizard-description" name="description" maxlength="200" autocomplete="off" placeholder="一句话说明这个 Skill 做什么" />
+            </label>
+            <label class="field">
+              <span>正文</span>
+              <textarea id="cap-skill-wizard-body" name="body" rows="10" maxlength="65536" placeholder="写给模型看的用法说明"></textarea>
+            </label>
+          </div>
+          <label class="field cap-wizard-json-pane">
+            <span>SKILL.md 预览</span>
+            <textarea id="cap-skill-wizard-preview" rows="18" spellcheck="false" readonly aria-readonly="true"></textarea>
+          </label>
+        </div>
+        <div class="dialog-actions">
+          <button class="button secondary" id="cap-skill-wizard-cancel" type="button">取消</button>
+          <button class="button primary" id="cap-skill-wizard-submit" type="submit">创建</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog class="action-dialog cap-wizard-dialog cap-wizard-wide" id="cap-mcp-wizard" aria-labelledby="cap-mcp-wizard-title">
+      <form id="cap-mcp-wizard-form" novalidate>
+        <div class="dialog-heading">
+          <div>
+            <span class="eyebrow">MCP 接入</span>
+            <h2 id="cap-mcp-wizard-title">新建 MCP</h2>
+          </div>
+          <button class="icon-button" id="cap-mcp-wizard-close" type="button" aria-label="关闭" title="关闭">
+            <svg class="icon lucide"><use href="#lucide-x"></use></svg>
+          </button>
+        </div>
+        <div class="dialog-body cap-wizard-split">
+          <div class="cap-wizard-form-pane">
+            <p class="cap-wizard-note">左侧好填，右侧是提交真源。JSON 可写 <code>env</code> / <code>headers</code> / <code>cwd</code> / <code>envPassthrough</code>，会投影到勾选应用的 live 配置。密钥键回读会被打码。</p>
+            <label class="field">
+              <span>ID</span>
+              <input id="cap-mcp-wizard-id" name="id" maxlength="96" pattern="[A-Za-z0-9][A-Za-z0-9._-]*" autocomplete="off" required placeholder="my-server" />
+            </label>
+            <label class="field">
+              <span>显示名</span>
+              <input id="cap-mcp-wizard-name" name="name" maxlength="120" autocomplete="off" required placeholder="我的 MCP" />
+            </label>
+            <label class="field">
+              <span>类型</span>
+              <select id="cap-mcp-wizard-transport" name="transport">
+                <option value="stdio" selected>STDIO · 本地命令</option>
+                <option value="http">流式 HTTP</option>
+              </select>
+            </label>
+            <div id="cap-mcp-wizard-stdio-fields">
+              <label class="field">
+                <span>启动命令</span>
+                <input id="cap-mcp-wizard-command" name="command" maxlength="500" autocomplete="off" placeholder="npx" />
+              </label>
+              <label class="field">
+                <span>参数（空格分隔）</span>
+                <input id="cap-mcp-wizard-args" name="args" maxlength="2000" autocomplete="off" placeholder="-y @modelcontextprotocol/server-filesystem" />
+              </label>
+              <label class="field">
+                <span>工作目录</span>
+                <input id="cap-mcp-wizard-cwd" name="cwd" maxlength="500" autocomplete="off" placeholder="~/code" />
+              </label>
+            </div>
+            <div id="cap-mcp-wizard-http-fields" hidden>
+              <label class="field">
+                <span>URL</span>
+                <input id="cap-mcp-wizard-url" name="url" maxlength="500" autocomplete="off" placeholder="https://mcp.example.com/mcp" />
+              </label>
+            </div>
+            <fieldset class="cap-wizard-apps">
+              <legend>投影到（写入该 CLI 的 live MCP 配置）</legend>
+              <div class="cap-wizard-app-grid" id="cap-mcp-wizard-apps"></div>
+            </fieldset>
+          </div>
+          <label class="field cap-wizard-json-pane">
+            <span>完整 JSON 配置</span>
+            <textarea id="cap-mcp-wizard-json" name="config" rows="18" spellcheck="false" aria-label="MCP 完整 JSON 配置"></textarea>
+          </label>
+        </div>
+        <div class="dialog-actions">
+          <button class="button secondary" id="cap-mcp-wizard-cancel" type="button">取消</button>
+          <button class="button primary" id="cap-mcp-wizard-submit" type="submit">创建</button>
+        </div>
+      </form>
+    </dialog>
 
     <dialog class="action-dialog" id="action-dialog" aria-labelledby="dialog-title">
       <form method="dialog">
@@ -2090,14 +2727,23 @@
             <span>选择自动化</span>
             <select id="automation-edit-select" aria-label="选择要编辑的自动化"></select>
           </label>
+          <div id="automation-edit-status" class="automation-edit-status" aria-live="polite"></div>
           <label class="field">
             <span>名称</span>
             <input id="automation-edit-name" maxlength="80" autocomplete="off" required />
           </label>
-          <label class="field">
-            <span>计划（manual / every:30m / every:6h / every:1d）</span>
-            <input id="automation-edit-schedule" maxlength="32" autocomplete="off" placeholder="manual" />
-          </label>
+          <div class="field">
+            <span>计划</span>
+            <input id="automation-edit-schedule" maxlength="32" autocomplete="off" placeholder="manual" aria-describedby="automation-schedule-hint" />
+            <div class="automation-schedule-presets" id="automation-schedule-presets">
+              <button class="chip" type="button" data-schedule-preset="manual">仅手动</button>
+              <button class="chip" type="button" data-schedule-preset="idle">闲时</button>
+              <button class="chip" type="button" data-schedule-preset="every:30m">每 30 分钟</button>
+              <button class="chip" type="button" data-schedule-preset="every:6h">每 6 小时</button>
+              <button class="chip" type="button" data-schedule-preset="every:1d">每天</button>
+            </div>
+            <span class="field-hint" id="automation-schedule-hint">manual = 仅手动；idle = 闲时自动；every:&lt;n&gt;m/h/d = 定时（如 every:30m）</span>
+          </div>
           <label class="field">
             <span>权限</span>
             <select id="automation-edit-permission">
@@ -2116,6 +2762,7 @@
           </section>
         </div>
         <div class="dialog-actions automation-dialog-actions">
+          <button class="button secondary" id="automation-toggle-button" type="button">停用</button>
           <button class="button secondary" id="automation-cancel-run-button" type="button">取消当前运行</button>
           <button class="button secondary" id="automation-run-now-button" type="button">立即执行</button>
           <span class="composer-spacer"></span>
@@ -2327,9 +2974,45 @@
             <p class="form-section-label">Kimi Code 模型<span>投影 ~/.kimi-code/config.toml：default_model + providers/models 标记块</span></p>
             <label class="field"><span class="field-label">默认模型</span><input id="provider-kimi-model" type="text" maxlength="80" list="provider-catalog-list" /></label>
           </div>
+          <div class="provider-opencode-fields" id="provider-opencode-fields" hidden>
+            <div class="provider-form-grid">
+              <label class="field">
+                <span class="field-label">供应商标识</span>
+                <input id="provider-opencode-key" type="text" maxlength="80" placeholder="tokenrhythm" autocomplete="off" />
+                <span class="field-hint" id="provider-opencode-key-hint">写入 opencode.json 的 provider 键。新建时跟名称同步；创建后不可更改。</span>
+              </label>
+              <label class="field">
+                <span class="field-label">接口格式</span>
+                <select id="provider-opencode-format">
+                  <option value="openai_chat">OpenAI Compatible</option>
+                  <option value="openai_responses">OpenAI Responses</option>
+                  <option value="anthropic">Anthropic Messages</option>
+                  <option value="gemini_native">Gemini 原生</option>
+                </select>
+                <span class="field-hint">决定投影用的 AI SDK 适配器，默认 OpenAI Compatible。</span>
+              </label>
+            </div>
+            <p class="form-section-label">请求头<span>投影到 options.headers，例如 X-Title</span></p>
+            <div class="provider-opencode-pair-list" id="provider-opencode-headers"></div>
+            <button class="button secondary" id="provider-opencode-header-add" type="button">
+              <svg class="icon lucide"><use href="#lucide-plus"></use></svg>
+              添加请求头
+            </button>
+            <p class="form-section-label">额外选项<span>投影到 options；timeout 用毫秒。不要填 apiKey / baseURL</span></p>
+            <div class="provider-opencode-pair-list" id="provider-opencode-options"></div>
+            <button class="button secondary" id="provider-opencode-option-add" type="button">
+              <svg class="icon lucide"><use href="#lucide-plus"></use></svg>
+              添加选项
+            </button>
+          </div>
           <div class="provider-models-block" id="provider-models-opencode" hidden>
-            <p class="form-section-label">OpenCode 模型</p>
-            <label class="field"><span class="field-label">默认模型</span><input id="provider-opencode-model" type="text" maxlength="80" list="provider-catalog-list" /></label>
+            <p class="form-section-label">OpenCode 模型<span>模型 ID 是请求值，显示名写入 models 表；默认模型成为顶层 model 指针</span></p>
+            <label class="field"><span class="field-label">默认模型</span><input id="provider-opencode-model" type="text" maxlength="80" list="provider-catalog-list" placeholder="qwen3-8-27b" /></label>
+            <div class="provider-opencode-pair-list" id="provider-opencode-models"></div>
+            <button class="button secondary" id="provider-opencode-model-add" type="button">
+              <svg class="icon lucide"><use href="#lucide-plus"></use></svg>
+              添加模型
+            </button>
           </div>
           <div class="provider-models-block" id="provider-models-openclaw" hidden>
             <p class="form-section-label">OpenClaw 模型</p>
@@ -2690,7 +3373,6 @@
     <script type="module" src="./hosts-panel.js"></script>
     <script type="module" src="./splitter.js"></script>
     <script type="module" src="./workbench-chrome.js"></script>
-    <script type="module" src="./hero-starmap.js"></script>
     <script type="module" src="./app.js"></script>
     <script src="./atelier-canvas.js" defer></script>
   </body>

@@ -61,18 +61,23 @@ export async function acquireInstanceLock(lockRoot, metadata = {}, { ownerIsActi
       await handle.writeFile(`${JSON.stringify(owner)}\n`, "utf8");
       await handle.sync();
       let released = false;
+      let handleClosed = false;
       return {
         path,
         owner,
         async release() {
           if (released) return;
-          released = true;
-          await handle.close().catch(() => {});
+          if (!handleClosed) {
+            await handle.close().catch(() => {});
+            handleClosed = true;
+          }
           try {
             const current = JSON.parse(await readFile(path, "utf8"));
             if (current.nonce === nonce) await unlink(path);
+            released = true;
           } catch (error) {
             if (error.code !== "ENOENT") throw error;
+            released = true;
           }
         },
       };

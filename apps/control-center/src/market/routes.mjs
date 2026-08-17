@@ -9,7 +9,12 @@ let service = null;
 
 function ensureService(ctx) {
   if (!service) {
-    service = createMarketService({ dataRoot: ctx.state.dataRoot, eventStore: ctx.state.eventStore });
+    service = createMarketService({
+      dataRoot: ctx.state.dataRoot,
+      eventStore: ctx.state.eventStore,
+      ccswitchDomain: ctx.state.ccswitchDomain,
+      repoRoot: ctx.state.repoRoot,
+    });
   }
   return service;
 }
@@ -53,8 +58,12 @@ export function registerMarketRoutes(router, ctx) {
     ctx.json(response, 200, await market.mcpInstall(payload ?? {}));
   }));
 
-  router.post("/api/market/skills/stage", guarded("skills_marketplace", async (request, response) => {
+  router.post("/api/market/skills/stage", guarded("skills_marketplace", async (request, response, url) => {
     const payload = await ctx.body(request, 1024 * 1024);
+    if (url.pathname.startsWith("/api/market/skills/stage-repo")) {
+      ctx.json(response, 200, await market.skillsStageFromRepo(payload ?? {}));
+      return;
+    }
     ctx.json(response, 200, await market.skillsStage(payload ?? {}));
   }));
 
@@ -78,4 +87,50 @@ export function registerMarketRoutes(router, ctx) {
       ? { ok: true }
       : { ok: false, code: "MARKET_NOT_FOUND", message: `skill not found: ${name}` });
   }));
+
+  router.delete("/api/market/mcp/", guarded("mcp_marketplace", async (request, response, url) => {
+    const id = decodeURIComponent(url.pathname.replace(/^\/api\/market\/mcp\//, ""));
+    ctx.json(response, 200, { ok: true, ...(await market.mcpRemove(id)) });
+  }));
+
+  router.put("/api/market/mcp/", guarded("mcp_marketplace", async (request, response, url) => {
+    const id = decodeURIComponent(url.pathname.replace(/^\/api\/market\/mcp\//, ""));
+    const payload = await ctx.body(request);
+    ctx.json(response, 200, await market.mcpUpdateApps({ id, apps: payload?.apps }));
+  }));
+
+  router.put("/api/market/skills/", guarded("skills_marketplace", async (request, response, url) => {
+    const name = decodeURIComponent(url.pathname.replace(/^\/api\/market\/skills\//, ""));
+    const payload = await ctx.body(request);
+    ctx.json(response, 200, await market.skillUpdateApps({ name, apps: payload?.apps }));
+  }));
+
+  router.get("/api/market/repos", guarded("skills_marketplace", async (request, response) => {
+    ctx.json(response, 200, { ok: true, repos: await market.listRepos() });
+  }));
+
+  router.post("/api/market/repos", guarded("skills_marketplace", async (request, response, url) => {
+    const rest = url.pathname.slice("/api/market/repos".length);
+    if (rest === "/scan-all") {
+      ctx.json(response, 200, { ok: true, ...(await market.scanAllRepos()) });
+      return;
+    }
+    if (rest.endsWith("/scan")) {
+      const id = decodeURIComponent(rest.replace(/^\//, "").replace(/\/scan$/, ""));
+      ctx.json(response, 200, { ok: true, repo: await market.scanRepo(id) });
+      return;
+    }
+    const payload = await ctx.body(request);
+    ctx.json(response, 201, { ok: true, repo: await market.addRepo(payload ?? {}) });
+  }));
+
+  router.delete("/api/market/repos/", guarded("skills_marketplace", async (request, response, url) => {
+    const id = decodeURIComponent(url.pathname.replace(/^\/api\/market\/repos\//, ""));
+    ctx.json(response, 200, { ok: true, ...(await market.removeRepo(id)) });
+  }));
+
+  router.get("/api/market/catalog", guarded("skills_marketplace", async (request, response, url) => {
+    ctx.json(response, 200, { ok: true, skills: await market.catalogSkills(url.searchParams.get("q") || "") });
+  }));
+
 }

@@ -1,20 +1,44 @@
 /* ==========================================================================
-   G4 协作星图英雄页（Awwwards 艺术面）—— 全屏 canvas + 实验排版。
-   独立视图容器，不触碰任何工具面样式；reduced-motion 全降级。
+   协作星图 —— 嵌在团队编排面，不再是独立全屏观测页。
+   reduced-motion：JS 已停 raf，这里只去掉 tip 过渡。
    ========================================================================== */
 
-#view-hero {
-  /* 撑满主区，去掉工具面内边距，canvas 直达边缘 */
-  padding: 0;
+.team-starmap-block {
   overflow: hidden;
+}
+
+.team-starmap-lead {
+  margin: -4px 0 12px;
+  color: var(--muted-foreground);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+.team-starmap-shell {
   position: relative;
+  overflow: hidden;
+  border-radius: calc(var(--radius-xl) - 4px);
+  background:
+    radial-gradient(ellipse 80% 70% at 50% 48%, color-mix(in oklab, var(--primary) 9%, transparent), transparent 64%),
+    color-mix(in oklab, var(--muted) 28%, var(--card));
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+.team-starmap-shell.is-focus-pulse {
+  animation: team-starmap-focus 1.2s var(--ease-out, ease);
+}
+
+@keyframes team-starmap-focus {
+  0% { box-shadow: inset 0 0 0 1px var(--border), 0 0 0 0 color-mix(in oklab, var(--primary) 0%, transparent); }
+  35% { box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--primary) 55%, var(--border)), 0 0 0 6px color-mix(in oklab, var(--primary) 18%, transparent); }
+  100% { box-shadow: inset 0 0 0 1px var(--border), 0 0 0 0 color-mix(in oklab, var(--primary) 0%, transparent); }
 }
 
 .hero-stage {
   position: relative;
   width: 100%;
-  height: calc(100vh - var(--topbar-height, 56px) - 28px);
-  min-height: 480px;
+  height: min(42vh, 380px);
+  min-height: 280px;
   overflow: hidden;
 }
 
@@ -22,15 +46,15 @@
   position: absolute;
   inset: 0;
   display: block;
-  cursor: crosshair;
+  cursor: pointer;
 }
 
-/* —— hover 名称卡（DOM 层，排版精度高于 canvas 文字） —— */
 .hero-tip {
   position: absolute;
   left: var(--hero-tip-x, -999px);
   top: var(--hero-tip-y, -999px);
   transform: translate(-50%, -100%);
+  max-width: min(72%, 420px);
   padding: 5px 12px;
   border-radius: 9999px;
   background: color-mix(in oklab, var(--card, #fff) 80%, transparent);
@@ -42,23 +66,25 @@
   font-weight: 500;
   letter-spacing: 0.02em;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   pointer-events: none;
   opacity: 0;
   transition: opacity var(--dur-med, 150ms) var(--ease-out, ease);
 }
+
 .hero-tip.is-visible {
   opacity: 1;
 }
 
-/* —— 实验排版：左侧竖排巨字 + 拉丁小标 —— */
 .hero-type {
   position: absolute;
-  left: clamp(18px, 4vw, 64px);
+  left: clamp(14px, 2.4vw, 28px);
   top: 50%;
   transform: translateY(-50%);
   display: flex;
   align-items: flex-start;
-  gap: clamp(10px, 1.6vw, 22px);
+  gap: 10px;
   pointer-events: none;
   user-select: none;
 }
@@ -66,70 +92,76 @@
 .hero-type-vertical {
   writing-mode: vertical-rl;
   font-family: "Songti SC", "Noto Serif SC", "SimSun", serif;
-  font-size: clamp(64px, 11vh, 128px);
+  font-size: clamp(36px, 6vh, 64px);
   font-weight: 700;
   letter-spacing: 0.14em;
   line-height: 1;
-  /* 描边空心字：色淡而不夺 canvas 主体 */
   color: transparent;
-  -webkit-text-stroke: 1.5px color-mix(in oklch, var(--foreground, #1c1917) 34%, transparent);
+  -webkit-text-stroke: 1px color-mix(in oklch, var(--foreground, #1c1917) 34%, transparent);
 }
 
 .hero-type-latin {
   writing-mode: vertical-rl;
-  font-size: clamp(10px, 1.2vh, 13px);
+  max-height: 220px;
+  overflow: hidden;
+  font-size: 11px;
   font-weight: 600;
-  letter-spacing: 0.42em;
+  letter-spacing: 0.32em;
   line-height: 1.7;
   color: color-mix(in oklch, var(--muted-foreground, #78716c) 80%, transparent);
 }
 
-/* —— 右下巨型计数（实验排版第二极） —— */
 .hero-count {
   position: absolute;
-  right: clamp(18px, 4vw, 64px);
-  bottom: clamp(16px, 4vh, 48px);
+  right: clamp(14px, 2.4vw, 28px);
+  bottom: clamp(10px, 2vh, 20px);
   display: flex;
   align-items: baseline;
-  gap: 14px;
+  gap: 10px;
   pointer-events: none;
   user-select: none;
 }
 
 .hero-count-num {
-  font-size: clamp(96px, 20vh, 220px);
+  font-size: clamp(48px, 10vh, 88px);
   font-weight: 800;
   line-height: 0.9;
   letter-spacing: -0.05em;
   color: transparent;
-  -webkit-text-stroke: 2px color-mix(in oklch, var(--primary) 55%, transparent);
+  -webkit-text-stroke: 1.5px color-mix(in oklch, var(--primary) 55%, transparent);
   font-variant-numeric: tabular-nums;
 }
 
 .hero-count-label {
-  font-size: 11px;
+  max-width: 72px;
+  font-size: 10px;
   font-weight: 600;
-  letter-spacing: 0.3em;
-  line-height: 1.8;
+  letter-spacing: 0.22em;
+  line-height: 1.6;
   color: color-mix(in oklch, var(--muted-foreground, #78716c) 75%, transparent);
 }
 
-/* —— reduced-motion：静态构图（JS 已停 raf），排版无过渡 —— */
 @media (prefers-reduced-motion: reduce) {
   .hero-tip {
     transition: none;
+  }
+  .team-starmap-shell.is-focus-pulse {
+    animation: none;
   }
   .hero-canvas {
     cursor: default;
   }
 }
 
-/* 窄屏：排版让位 canvas */
 @media (max-width: 720px) {
+  .hero-stage {
+    height: 260px;
+    min-height: 240px;
+  }
   .hero-type-vertical {
-    font-size: 56px;
+    font-size: 32px;
   }
   .hero-count-num {
-    font-size: 88px;
+    font-size: 44px;
   }
 }

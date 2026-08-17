@@ -1184,6 +1184,14 @@ export class SessionAggregator {
         unsupported("cursor", "Cursor project-session deletion is not supported"),
         unsupported("kimi", "Kimi project-session deletion is not supported"),
         unsupported("pi", "Pi project-session deletion is not supported"),
+        // v4.0 五源 + bridge/grok：如实列出未支持，避免"删除成功但列表刷新后仍出现"的误导
+        unsupported("bridge", "Bridge thread deletion is not supported"),
+        unsupported("grok", "Grok project-session deletion is not supported"),
+        unsupported("opencode", "OpenCode project-session deletion is not supported"),
+        unsupported("cline", "Cline project-session deletion is not supported"),
+        unsupported("openclaw", "OpenClaw project-session deletion is not supported"),
+        unsupported("hermes", "Hermes project-session deletion is not supported"),
+        unsupported("codebuddy", "CodeBuddy project-session deletion is not supported"),
       ],
     };
     const moveInto = async (source, dest) => {

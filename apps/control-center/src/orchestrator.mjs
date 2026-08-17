@@ -60,6 +60,10 @@ const ADAPTER_RESUME_FEATURES = Object.freeze({
   "gemini-stream-json": { defaultCommand: "gemini", args: (sessionId) => ["--resume", sessionId] },
   "grok-build-headless": { defaultCommand: "grok", args: (sessionId) => ["-r", sessionId] },
   "kimi-headless-resume": { defaultCommand: "kimi", args: (sessionId) => ["-S", sessionId] },
+  // OpenCode TUI 默认命令直接吃全局 --session（1.18 --help 实证）；会话在 opencode 自有 SQLite，cwd 无关
+  "opencode-run-json": { defaultCommand: "opencode", args: (sessionId) => ["--session", sessionId] },
+  // Pi 交互 TUI 用 --session-id 精确打开既有 project session（与 RPC 创建旗标同源；--session 是模糊前缀查找，不用）
+  "pi-rpc": { defaultCommand: "pi", args: (sessionId) => ["--session-id", sessionId] },
 });
 
 function commandHintToken(value) {
@@ -1162,8 +1166,13 @@ export class Orchestrator {
     const key = `${run.id}:${runtimeProfileId}`;
     let pending = this.remoteAdapters.get(key);
     if (!pending) {
-      if (!this.remoteRunner) {
-        throw Object.assign(new Error("remote runner is not wired; remote runs are unavailable"), { code: "REMOTE_UNAVAILABLE" });
+      const requiredRemoteMethods = ["validateRemote", "assertRunnable", "assertDispatchable"];
+      const missingRemoteMethods = requiredRemoteMethods.filter((method) => typeof this.remoteRunner?.[method] !== "function");
+      if (missingRemoteMethods.length) {
+        throw Object.assign(
+          new Error(`remote runner cannot enforce the current run contract: missing ${missingRemoteMethods.join(", ")}`),
+          { code: "REMOTE_UNAVAILABLE" },
+        );
       }
       const profile = (this.models?.profiles || []).find((item) => item.id === runtimeProfileId);
       if (!profile) {
@@ -1183,6 +1192,50 @@ export class Orchestrator {
       this.remoteAdapters.set(key, pending);
     }
     return pending;
+  }
+
+  assertRemoteDispatchable(run) {
+    if (!run?.remote) return;
+    if (typeof this.remoteRunner?.assertDispatchable !== "function") {
+      throw Object.assign(new Error("remote runner cannot enforce per-dispatch SSH authorization"), { code: "REMOTE_UNAVAILABLE" });
+    }
+    this.remoteRunner.assertDispatchable(run.remote.hostId, run.remote.path);
+  }
+
+  providerBindingFor(adapter, runtimeProfileId, { remote = false } = {}) {
+    const profile = (this.models?.profiles || []).find((item) => item.id === runtimeProfileId) || null;
+    const requestedProviderId = profile?.providerId == null ? null : String(profile.providerId).trim() || null;
+    if (!remote && typeof adapter?.getProviderBinding === "function") {
+      const binding = adapter.getProviderBinding();
+      return {
+        requestedProviderId: binding?.requestedProviderId ?? requestedProviderId,
+        effectiveProviderId: binding?.effectiveProviderId ?? null,
+        mode: binding?.mode === "bound" ? "bound" : "adapter-managed",
+        degradedReason: binding?.degradedReason ?? null,
+        degradedDetail: binding?.degradedDetail ?? null,
+        providerApp: binding?.providerApp ?? null,
+        adapterId: binding?.adapterId || adapter?.id || null,
+        routeMode: binding?.routeMode ?? (binding?.mode === "bound" ? "direct-projection" : "adapter-managed"),
+        bindingScope: binding?.bindingScope ?? (binding?.mode === "bound" ? "upstream" : "adapter"),
+        upstreamProviderId: binding?.upstreamProviderId ?? (binding?.mode === "bound" ? binding?.effectiveProviderId ?? null : null),
+        upstreamAttribution: binding?.upstreamAttribution ?? (binding?.mode === "bound" ? "exact" : "unavailable"),
+      };
+    }
+    return {
+      requestedProviderId,
+      effectiveProviderId: null,
+      mode: "adapter-managed",
+      degradedReason: requestedProviderId
+        ? (remote ? "remote-provider-projection-disabled" : "binding-descriptor-unavailable")
+        : null,
+      degradedDetail: null,
+      providerApp: null,
+      adapterId: adapter?.id || null,
+      routeMode: "adapter-managed",
+      bindingScope: "adapter",
+      upstreamProviderId: null,
+      upstreamAttribution: "unavailable",
+    };
   }
 
   /** 远程 run 终态处置：关闭其专用 adapter（codex app-server close → 通道收 + pgid kill 远端进程树）。 */
@@ -1586,6 +1639,65 @@ export class Orchestrator {
     return hints;
   }
 
+  /**
+   * 交互式 CLI 接续规格（一键跳终端用）：返回可直接 spawn 的 { command, args, cwd }。
+   * 与 headless resume 同一张特征表（ADAPTER_RESUME_FEATURES）——交互式不带 -p/--json，
+   * 用户拿到的是真 CLI 界面，与控制台共享同一个原生会话（同一 session 文件）。
+   * 优先级：显式指定成员 → 执行所有者 → 任一已有原生会话的成员。
+   */
+  interactiveCliSpecForRun(run, preferredAgentId = null, { strict = false } = {}) {
+    const preferred = String(preferredAgentId || "").trim();
+    if (preferred) {
+      const spec = this.#interactiveCliSpecForMember(run, preferred);
+      if (spec) return spec;
+      // 严格模式（罩层成员页签点击）：点名要谁就是谁，点名落空如实报不支持——
+      // 不能静默回落到别的成员，否则用户以为在跟 A 说话其实开的是 B 的终端
+      if (strict) return null;
+    }
+    return this.interactiveCliSpecsForRun(run)[0] ?? null;
+  }
+
+  /**
+   * 全成员接续规格（沉浸罩层的成员切换页签用，LO 2026-08-17）：每个已有原生会话、
+   * 且所属 adapter 支持交互式 resume 的成员一条；执行所有者排最前，其余按 sessions 台账序。
+   * 没有任何可接续成员时返回空数组。
+   */
+  interactiveCliSpecsForRun(run) {
+    const sessions = run?.sessions || {};
+    const specs = [];
+    for (const agentId of Object.keys(sessions)) {
+      const spec = this.#interactiveCliSpecForMember(run, agentId);
+      if (spec) specs.push(spec);
+    }
+    const owner = executionOwnerIdOf(run);
+    if (owner) specs.sort((a, b) => (a.agentId === owner ? -1 : b.agentId === owner ? 1 : 0));
+    return specs;
+  }
+
+  /** 单成员接续规格解析：无原生会话 / adapter 不支持交互 resume / 无可用命令 → null。 */
+  #interactiveCliSpecForMember(run, agentId) {
+    const sessions = run?.sessions || {};
+    const session = sessions[agentId];
+    const sessionId = typeof session === "string" ? session : (session?.sessionId || session?.id || null);
+    if (!sessionId) return null;
+    const runtimeProfileId = this.runtimeProfileIdFor(run, agentId);
+    const adapter = this.adapters.get(runtimeProfileId);
+    const feature = ADAPTER_RESUME_FEATURES[adapter?.id];
+    if (!feature) return null;
+    if (typeof adapter.canResume === "function" && adapter.canResume(sessionId) !== true) return null;
+    const command = String(adapter.command || feature.defaultCommand || "").trim();
+    if (!command) return null;
+    return {
+      agentId,
+      runtimeProfileId,
+      protocol: adapter.id,
+      sessionId,
+      command,
+      args: feature.args(String(sessionId)),
+      cwd: run.cwd || null,
+    };
+  }
+
   async save(run) {
     if (this.clearedRuns.has(run.id)) return run; // 墓碑：已清除 run 的迟到写盘直接丢弃，不复活文件
     // 竞态修复（烛 wave2 P1）：旧序"快照 → await 写盘 → 回写旧快照"会把写盘窗口内的并发变更
@@ -1833,8 +1945,13 @@ export class Orchestrator {
       if (sessionCwd) {
         throw Object.assign(new Error("remote and cwd are mutually exclusive run targets"), { code: "VALIDATION_FAILED" });
       }
-      if (!this.remoteRunner) {
-        throw Object.assign(new Error("remote runner is not wired; remote runs are unavailable"), { code: "REMOTE_UNAVAILABLE" });
+      const requiredRemoteMethods = ["validateRemote", "assertRunnable", "assertDispatchable"];
+      const missingRemoteMethods = requiredRemoteMethods.filter((method) => typeof this.remoteRunner?.[method] !== "function");
+      if (missingRemoteMethods.length) {
+        throw Object.assign(
+          new Error(`remote runner cannot enforce the current run contract: missing ${missingRemoteMethods.join(", ")}`),
+          { code: "REMOTE_UNAVAILABLE" },
+        );
       }
       const normalized = this.remoteRunner.validateRemote(input.remote);
       await this.remoteRunner.assertRunnable(normalized.hostId, normalized.path);
@@ -1964,6 +2081,7 @@ export class Orchestrator {
       teamRoster, // 逻辑成员 → runtime profile 与人格/默认档快照；既有 run 不受后续成员编辑漂移
       teamRosterVersion: team ? 1 : null,
       teamSkills: team ? [...(team.skills ?? [])] : null, // 团队 skill 声明快照（成员轮按 agent 负名单过滤注入）
+      teamMcp: team ? [...(team.mcp ?? [])] : null, // 团队 MCP 声明快照（隔离区过滤后注入，不假装服务器还在）
       coordinatorId,
       orchestrationMode,
       startAgentId,
@@ -2045,20 +2163,32 @@ export class Orchestrator {
     await this.save(run);
     try {
       const response = await this.approvalBroker.request(message, { runId: run.id, sessionId: null });
-      if (run.status !== "waiting_approval") return;
-      if (response.decision !== "accept") {
-        run.status = "cancelled";
-        run.error = "Build permission was denied or expired.";
-        run.buildApproval.status = "denied";
+      let accepted = false;
+      let denied = false;
+      await this.withRunTransition(id, async () => {
+        const waiting = run.status === "waiting_approval" || run.status === "waiting_for_approval";
+        if (!waiting || run.buildApproval?.status !== "pending") return;
+        if (response.decision !== "accept") {
+          run.status = "cancelled";
+          run.error = "Build permission was denied or expired.";
+          run.buildApproval.status = "denied";
+          await this.save(run);
+          denied = true;
+          return;
+        }
+        run.buildApproval.status = "approved";
+        run.buildApproval.approvalId = response.approvalId || null;
+        run.buildApproval.approvedAt = new Date().toISOString();
+        this.issueCapabilityLease(run, { actor: "operator" });
         await this.save(run);
+        accepted = true;
+      });
+      if (denied) {
         await this.emitEvent(run, "run.cancelled", { reason: "build approval denied" }, { runId: run.id });
         return;
       }
-      run.buildApproval.status = "approved";
-      run.buildApproval.approvalId = response.approvalId || null;
-      run.buildApproval.approvedAt = new Date().toISOString();
-      const lease = this.issueCapabilityLease(run, { actor: "operator" });
-      await this.save(run);
+      if (!accepted) return;
+      const lease = run.buildApproval?.lease || null;
       await this.emitEvent(run, "run.approved", {
         permissionMode: run.permissionMode,
         policySha256,
@@ -2070,7 +2200,7 @@ export class Orchestrator {
       }
       await this.startExecution(run.id);
     } catch (error) {
-      if (run.status === "cancelled") return;
+      if (run.status === "cancelled" || run.status === "interrupted" || run.buildApproval?.status === "withdrawn") return;
       run.status = "failed";
       run.error = error.message;
       await this.save(run);
@@ -2115,6 +2245,7 @@ export class Orchestrator {
         protocol: attempt.protocol || null,
         clientUserMessageId: attempt.clientUserMessageId || null,
         nativeTurnId: attempt.nativeTurnId || null,
+        providerBinding: attempt.providerBinding || null,
       },
       { runId: run.id, sessionId: attempt.sessionId || null, agentId },
     );
@@ -2126,12 +2257,18 @@ export class Orchestrator {
     sourceWorkItemId = null,
     sourceBusMessageId = null,
     allowAutoRecovery = true,
+    nativeCommand = false,
   } = {}) {
     const member = this.memberForRun(run, agentId);
     const runtimeProfileId = member.runtimeProfileId;
+    if (nativeCommand && !/^\/[A-Za-z0-9_-]+([ \t]+\S+){0,8}$/.test(String(prompt))) {
+      throw Object.assign(new Error("nativeCommand prompt must be a single-line slash command"), { code: "VALIDATION_FAILED" });
+    }
     // Source paths stay in the private run ledger and are injected only at the adapter boundary.
     // Public run/event prompts keep the operator's original text and receive a filename-only projection.
-    prompt = promptWithRunSources(prompt, run.activeInteractionSources ?? run.sources);
+    // 原生命令轮（/compact 等）例外：CLI 需要裸命令作为完整输入，附件/团队声明/成员人格
+    // 任何包装都会让 CLI 把它当成普通文本——Desktop 的做法同样是把斜杠命令原样作为用户输入传递。
+    prompt = nativeCommand ? String(prompt) : promptWithRunSources(prompt, run.activeInteractionSources ?? run.sources);
     const promptSha256 = createHash("sha256").update(prompt).digest("hex");
     const preparedAttempt = sourceWorkItemId
       ? [...(run.turnAttempts || [])].reverse().find((attempt) =>
@@ -2156,7 +2293,7 @@ export class Orchestrator {
       });
     }
     let enabledSkillDeclarations = [];
-    {
+    if (!nativeCommand) {
       const disabled = await this.capabilities.agentDisabledSkills(agentId);
       enabledSkillDeclarations = (run.teamSkills ?? []).filter((skill) => !disabled.has(skill));
       // teamBrief 是团队级快照，含未按成员过滤的 Skill 总表；provider prompt 中移除该行，
@@ -2164,16 +2301,30 @@ export class Orchestrator {
       if (run.teamBrief && prompt.includes(run.teamBrief)) {
         const filteredBrief = run.teamBrief
           .split(/\r?\n/)
-          .filter((line) => !line.startsWith("团队 Skill（声明，供派工参考）："))
+          .filter((line) => !line.startsWith("团队 Skill（声明，供派工参考）：") && !line.startsWith("团队 MCP（声明，供派工参考）："))
           .join("\n");
         prompt = prompt.replace(run.teamBrief, filteredBrief);
       }
+      let enabledMcpDeclarations = [];
+      if (Array.isArray(run.teamMcp) && run.teamMcp.length) {
+        if (typeof this.capabilities.disabledMcpNames === "function") {
+          const mcpState = await this.capabilities.disabledMcpNames();
+          const disabledNames = mcpState?.names instanceof Set ? mcpState.names : new Set();
+          enabledMcpDeclarations = mcpState?.failClosed ? [] : run.teamMcp.filter((name) => !disabledNames.has(name));
+        }
+      }
+      const kitBlocks = [];
       if (run.teamSkills?.length) {
         const declared = enabledSkillDeclarations.length ? enabledSkillDeclarations.join("、") : "无";
-        prompt = `[团队 Skill 提示声明]\n- 本成员本轮声明：${declared}\n- 这只是注入模型的提示词声明，不授予工具、文件、网络或沙箱权限；真实调用仍受 adapter 与运行时策略约束。\n\n${prompt}`;
+        kitBlocks.push(`[团队 Skill 提示声明]\n- 本成员本轮声明：${declared}\n- 这只是注入模型的提示词声明，不授予工具、文件、网络或沙箱权限；真实调用仍受 adapter 与运行时策略约束。`);
       }
+      if (run.teamMcp?.length) {
+        const declared = enabledMcpDeclarations.length ? enabledMcpDeclarations.join("、") : "无";
+        kitBlocks.push(`[团队 MCP 提示声明]\n- 本轮可用声明：${declared}\n- 隔离或读不到的服务器不会出现在这里；真实调用仍受运行时约束。`);
+      }
+      if (kitBlocks.length) prompt = `${kitBlocks.join("\n\n")}\n\n${prompt}`;
     }
-    const memberPrompt = this.memberPromptForRun(run, agentId);
+    const memberPrompt = nativeCommand ? null : this.memberPromptForRun(run, agentId);
     if (memberPrompt) prompt = `${memberPrompt}\n\n${prompt}`;
     this.assertLifecycleOwner(run, controller);
     const coordinatorId = run.coordinatorId || "claude-fable";
@@ -2212,6 +2363,7 @@ export class Orchestrator {
     const remotePair = run.remote ? await this.remoteAdapterFor(run, runtimeProfileId) : null;
     const adapter = remotePair ? remotePair.adapter : this.adapters.get(runtimeProfileId);
     if (!adapter) throw Object.assign(new Error(`no executable adapter for ${agentId}`), { code: "ADAPTER_UNAVAILABLE" });
+    let providerBinding = this.providerBindingFor(adapter, runtimeProfileId, { remote: Boolean(run.remote) });
     const adapterTemplate = adapter.id ? ADAPTER_TEMPLATES.find((item) => item.id === adapter.id) : null;
     if (adapterTemplate && !adapterTemplate.permissionModes.includes(effectivePermissionMode)) {
       throw Object.assign(new Error(`${agentId} adapter cannot honor ${effectivePermissionMode}`), { code: "UNSUPPORTED_PERMISSION" });
@@ -2239,6 +2391,7 @@ export class Orchestrator {
       run.inflightTurns ||= {};
       if (preparedAttempt) {
         preparedAttempt.updatedAt = new Date().toISOString();
+        preparedAttempt.providerBinding = providerBinding;
       } else {
         run.round += 1;
         run.interactionStep += 1;
@@ -2259,6 +2412,7 @@ export class Orchestrator {
           protocol: null,
           clientUserMessageId: null,
           nativeTurnId: null,
+          providerBinding,
           sourceWorkItemId,
           sourceBusMessageId,
           createdAt: new Date().toISOString(),
@@ -2275,6 +2429,7 @@ export class Orchestrator {
         maxStepsPerInteraction: this.maxStepsForInteraction(run),
         agentId,
         resumedPrepared: Boolean(preparedAttempt),
+        providerBinding,
       }, { runId: run.id, sessionId: run.sessions[agentId] || null, agentId });
     });
 
@@ -2287,7 +2442,136 @@ export class Orchestrator {
         protocol: data.protocol || null,
         clientUserMessageId: data.clientUserMessageId || null,
         nativeTurnId: data.turnId || null,
+        providerBinding: data.providerBinding ?? providerBinding,
+        ...(Object.hasOwn(data, "failureCostUsd") ? { failureCostUsd: data.failureCostUsd } : {}),
+        ...(Object.hasOwn(data, "failureTokens") ? { failureTokens: data.failureTokens } : {}),
+        ...(Object.hasOwn(data, "failureUsageAccounted") ? { failureUsageAccounted: data.failureUsageAccounted } : {}),
+        ...(Object.hasOwn(data, "failureUsages") ? { failureUsages: data.failureUsages } : {}),
       }));
+    const accountFailureUsage = (error, failedAdapter, binding = providerBinding) => {
+      const attempt = (run.turnAttempts || []).find((item) => item.attemptId === attemptId) || null;
+      const costUsd = Number.isFinite(error?.costUsd) ? Math.max(0, Number(error.costUsd)) : null;
+      const tokens = Number.isFinite(error?.tokens) ? Math.max(0, Number(error.tokens)) : null;
+      if (!attempt || (costUsd === null && tokens === null)) {
+        return { attempt, costUsd, tokens, changed: false, usageKey: null };
+      }
+      const adapterId = failedAdapter?.id || runtimeProfileId;
+      const usageKey = createHash("sha256").update(JSON.stringify({
+        adapterId,
+        code: error?.code || null,
+        costUsd,
+        tokens,
+        providerBinding: binding ?? null,
+        sessionId: error?.sessionId ?? attempt.sessionId ?? null,
+        clientUserMessageId: error?.clientUserMessageId ?? attempt.clientUserMessageId ?? null,
+        nativeTurnId: error?.turnId ?? attempt.nativeTurnId ?? null,
+      })).digest("hex");
+      if (!Array.isArray(attempt.failureUsages)) {
+        const legacyCostUsd = Number.isFinite(attempt.failureCostUsd) ? Math.max(0, Number(attempt.failureCostUsd)) : null;
+        const legacyTokens = Number.isFinite(attempt.failureTokens) ? Math.max(0, Number(attempt.failureTokens)) : null;
+        const hasLegacyUsage = attempt.failureUsageAccounted === true
+          && (legacyCostUsd !== null || legacyTokens !== null);
+        const sameAsCurrent = hasLegacyUsage && legacyCostUsd === costUsd && legacyTokens === tokens;
+        attempt.failureUsages = hasLegacyUsage ? [{
+          usageKey: sameAsCurrent ? usageKey : `legacy-${attemptId}`,
+          adapterId: null,
+          code: null,
+          costUsd: legacyCostUsd,
+          tokens: legacyTokens,
+          providerBinding: attempt.providerBinding ?? null,
+          accountedAt: attempt.updatedAt || attempt.createdAt || null,
+          legacy: true,
+        }] : [];
+      }
+      if (attempt.failureUsages.some((entry) => entry?.usageKey === usageKey)) {
+        return { attempt, costUsd, tokens, changed: false, usageKey };
+      }
+      attempt.failureUsages.push({
+        usageKey,
+        adapterId,
+        code: error?.code || null,
+        costUsd,
+        tokens,
+        providerBinding: binding ?? null,
+        accountedAt: new Date().toISOString(),
+      });
+      if (costUsd !== null) {
+        run.costUsdTotal = (run.costUsdTotal || 0) + costUsd;
+        run.interactionCostUsd = (run.interactionCostUsd || 0) + costUsd;
+      }
+      const costEntries = attempt.failureUsages.filter((entry) => Number.isFinite(entry?.costUsd));
+      const tokenEntries = attempt.failureUsages.filter((entry) => Number.isFinite(entry?.tokens));
+      attempt.failureCostUsd = costEntries.length
+        ? costEntries.reduce((total, entry) => total + Math.max(0, Number(entry.costUsd)), 0)
+        : null;
+      attempt.failureTokens = tokenEntries.length
+        ? tokenEntries.reduce((total, entry) => total + Math.max(0, Number(entry.tokens)), 0)
+        : null;
+      attempt.failureUsageAccounted = true;
+      return { attempt, costUsd, tokens, changed: true, usageKey };
+    };
+    const recordTurnFailure = async (error, { failedAdapter = adapter, phase = "failed" } = {}) => {
+      providerBinding = error?.providerBinding ?? providerBinding;
+      const attempt = (run.turnAttempts || []).find((item) => item.attemptId === attemptId);
+      const usage = accountFailureUsage(error, failedAdapter, providerBinding);
+      const failureCostUsd = usage.costUsd;
+      const failureTokens = usage.tokens;
+      const terminalPhases = new Set(["failed", "rejected", "ambiguous", "interrupted"]);
+      const currentPhase = attempt?.phase || null;
+      const bindingChanged = JSON.stringify(attempt?.providerBinding ?? null) !== JSON.stringify(providerBinding ?? null);
+      const identifiersChanged = [
+        ["sessionId", error?.sessionId],
+        ["tentativeSessionId", error?.tentativeSessionId],
+        ["protocol", error?.protocol],
+        ["clientUserMessageId", error?.clientUserMessageId],
+        ["nativeTurnId", error?.turnId],
+      ].some(([field, value]) => value != null && attempt?.[field] !== value);
+      const usageChanged = usage.changed;
+      const nativeSettlementUnknown = ["submitting", "submitted"].includes(currentPhase)
+        && error?.nativeTurnSettled !== true
+        && error?.submissionRejected !== true;
+      const settledPhase = terminalPhases.has(currentPhase) || nativeSettlementUnknown ? currentPhase : phase;
+      if (!terminalPhases.has(currentPhase) || bindingChanged || identifiersChanged || usageChanged) {
+        await checkpoint(settledPhase, {
+          sessionId: error?.sessionId ?? run.sessions[agentId] ?? null,
+          tentativeSessionId: error?.tentativeSessionId ?? null,
+          sessionResumable: error?.sessionResumable,
+          protocol: error?.protocol || null,
+          clientUserMessageId: error?.clientUserMessageId || null,
+          turnId: error?.turnId || null,
+          providerBinding,
+          ...(usage.attempt?.failureCostUsd !== undefined ? { failureCostUsd: usage.attempt.failureCostUsd } : {}),
+          ...(usage.attempt?.failureTokens !== undefined ? { failureTokens: usage.attempt.failureTokens } : {}),
+          ...(usage.attempt?.failureUsageAccounted === true ? { failureUsageAccounted: true } : {}),
+          ...(Array.isArray(usage.attempt?.failureUsages) ? { failureUsages: usage.attempt.failureUsages } : {}),
+        });
+      }
+      const settledAttempt = (run.turnAttempts || []).find((item) => item.attemptId === attemptId) || attempt;
+      await this.emitEvent(run, "agent.turn_failed", {
+        attemptId,
+        round: settledAttempt?.round || run.round,
+        interactionId: settledAttempt?.interactionId || run.activeInteractionId || null,
+        interactionSeq: settledAttempt?.interactionSeq || run.activeInteractionSeq || null,
+        interactionStep: settledAttempt?.interactionStep || run.interactionStep || null,
+        maxStepsPerInteraction: this.maxStepsForInteraction(run),
+        agentId,
+        phase: settledAttempt?.phase || settledPhase,
+        adapterId: failedAdapter?.id || runtimeProfileId,
+        code: error?.code || null,
+        message: error?.message || "provider turn failed",
+        protocol: error?.protocol || settledAttempt?.protocol || null,
+        costUsd: failureCostUsd,
+        tokens: failureTokens,
+        usageScope: "provider-failure",
+        attemptFailureCostUsd: settledAttempt?.failureCostUsd ?? null,
+        attemptFailureTokens: settledAttempt?.failureTokens ?? null,
+        attemptFailureUsageCount: Array.isArray(settledAttempt?.failureUsages)
+          ? settledAttempt.failureUsages.length
+          : 0,
+        failureUsageKey: usage.usageKey,
+        providerBinding,
+      }, { runId: run.id, sessionId: error?.sessionId || settledAttempt?.sessionId || null, agentId });
+    };
     const lifecycle = {
       onSessionStarted: (data) => checkpoint("session_ready", data),
       onTurnSubmitting: (data) => checkpoint("submitting", data),
@@ -2306,11 +2590,15 @@ export class Orchestrator {
       model: this.effectiveModelFor(run, agentId),
       effort: this.effectiveEffortFor(run, agentId),
       cwd: cwd ?? run.cwd ?? null,
+      nativeCommand,
       ...lifecycle,
     };
     try {
+      this.assertRemoteDispatchable(run);
       response = await adapter.send(sendInput);
+      providerBinding = response?.providerBinding ?? providerBinding;
     } catch (error) {
+      providerBinding = error?.providerBinding ?? providerBinding;
       const fallback = run.remote
         ? (remotePair?.fallback ?? null) // 远程 run 的 fallback 必须同样远程——本机 fallback 会把写盘落到错误机器
         : this.adapters.get(`${runtimeProfileId}-fallback`);
@@ -2367,14 +2655,25 @@ export class Orchestrator {
       if (allowAutoRecovery && replayBlocked(error) && !controller.signal.aborted) {
         const recovery = this.autoRecoveryDecision(run, agentId, error, effectivePermissionMode);
         if (recovery.ok) {
-          run.autoRecoveries = (run.autoRecoveries || 0) + 1;
-          run.interactionAutoRecoveries = (run.interactionAutoRecoveries || 0) + 1;
           await checkpoint("failed", {
             sessionId: error.sessionId || run.sessions[agentId] || null,
             protocol: error.protocol || null,
             clientUserMessageId: error.clientUserMessageId || null,
             turnId: error.turnId || null,
           });
+          await recordTurnFailure(error, { failedAdapter: adapter });
+          if (this.budgetExhausted(run)) {
+            await this.emitEvent(run, "run.budget_exhausted", {
+              interactionId: run.activeInteractionId,
+              interactionSeq: run.activeInteractionSeq,
+              interactionCostUsd: run.interactionCostUsd || 0,
+              source: "failed-turn",
+            }, { runId: run.id, sessionId: error.sessionId || run.sessions[agentId] || null, agentId });
+            error.autoRecoveryBlocked = "budget-exhausted";
+            throw error;
+          }
+          run.autoRecoveries = (run.autoRecoveries || 0) + 1;
+          run.interactionAutoRecoveries = (run.interactionAutoRecoveries || 0) + 1;
           await this.emitEvent(
             run,
             "run.auto_recovery",
@@ -2409,17 +2708,61 @@ export class Orchestrator {
           || !CODEX_TRANSPORT_FAILURES.has(error.code)
           || error.safeToFallback !== true
         ) {
+          if (!controller.signal.aborted && error.code !== "ABORTED") {
+            await recordTurnFailure(error, { failedAdapter: adapter });
+          }
           throw error;
         }
-        if (!fallback) throw error;
+        if (!fallback) {
+          await recordTurnFailure(error, { failedAdapter: adapter });
+          throw error;
+        }
+        const primaryProviderBinding = providerBinding;
+        const primaryUsage = accountFailureUsage(error, adapter, primaryProviderBinding);
+        if (this.budgetExhausted(run)) {
+          await recordTurnFailure(error, { failedAdapter: adapter });
+          await this.emitEvent(run, "run.budget_exhausted", {
+            interactionId: run.activeInteractionId,
+            interactionSeq: run.activeInteractionSeq,
+            interactionCostUsd: run.interactionCostUsd || 0,
+            source: "failed-turn-fallback",
+          }, { runId: run.id, sessionId: error.sessionId || run.sessions[agentId] || null, agentId });
+          error.fallbackBlocked = "budget-exhausted";
+          throw error;
+        }
+        providerBinding = this.providerBindingFor(fallback, runtimeProfileId, { remote: Boolean(run.remote) });
+        const fallbackAttempt = (run.turnAttempts || []).find((item) => item.attemptId === attemptId);
+        if (fallbackAttempt) {
+          fallbackAttempt.providerBinding = providerBinding;
+          await this.save(run);
+        }
         await this.emitEvent(
           run,
           "adapter.fallback",
-          { from: adapter.id || "codex-app-server", to: fallback.id || "codex-exec-json", reason: error.message },
+          {
+            from: adapter.id || "codex-app-server",
+            to: fallback.id || "codex-exec-json",
+            reason: error.message,
+            fromProviderBinding: primaryProviderBinding,
+            toProviderBinding: providerBinding,
+            fromCostUsd: primaryUsage.costUsd,
+            fromTokens: primaryUsage.tokens,
+            failureUsageKey: primaryUsage.usageKey,
+          },
           { runId: run.id, sessionId: run.sessions[agentId] || null, agentId },
         );
         this.assertLifecycleOwner(run, controller);
-        response = await fallback.send(sendInput);
+        this.assertRemoteDispatchable(run);
+        try {
+          response = await fallback.send(sendInput);
+          providerBinding = response?.providerBinding ?? providerBinding;
+        } catch (fallbackError) {
+          providerBinding = fallbackError?.providerBinding ?? providerBinding;
+          if (!controller.signal.aborted && fallbackError?.code !== "ABORTED") {
+            await recordTurnFailure(fallbackError, { failedAdapter: fallback });
+          }
+          throw fallbackError;
+        }
       }
     }
     // provider 返回 end 事件不等于交付完成：Grok 会用 exit 0 + stopReason=cancelled 表示
@@ -2457,6 +2800,7 @@ export class Orchestrator {
         permissionMode: effectivePermissionMode,
         requestedModel: response.requestedModel ?? null,
         effectiveModel: response.effectiveModel ?? null,
+        providerBinding,
         costUsd: response.costUsd ?? null,
         tokens: response.tokens ?? null, // 状态栏累计用量
         text: response.text,
@@ -2470,6 +2814,7 @@ export class Orchestrator {
           sessionId: response.sessionId,
           protocol: response.protocol,
           clientUserMessageId: (run.turnAttempts || []).find((item) => item.attemptId === attemptId)?.clientUserMessageId || null,
+          providerBinding,
         });
         await this.emitEvent(run, "agent.turn_unproductive", {
           round: run.round,
@@ -2482,6 +2827,7 @@ export class Orchestrator {
           stopReason,
           hasPartialOutput,
           tokens: response.tokens ?? null,
+          providerBinding,
         }, { runId: run.id, sessionId: response.sessionId, agentId });
         const reason = stopReason ? `provider stopReason=${stopReason}` : "empty provider response";
         incompleteError = Object.assign(
@@ -2501,6 +2847,7 @@ export class Orchestrator {
         sessionId: response.sessionId,
         protocol: response.protocol,
         clientUserMessageId: (run.turnAttempts || []).find((item) => item.attemptId === attemptId)?.clientUserMessageId || null,
+        providerBinding,
       });
       this.assertLifecycleOwner(run, controller);
       await this.emitEvent(run, "agent.turn_completed", {
@@ -2514,6 +2861,7 @@ export class Orchestrator {
         permissionMode: effectivePermissionMode,
         requestedModel: response.requestedModel ?? null,
         effectiveModel: response.effectiveModel ?? null,
+        providerBinding,
         costUsd: response.costUsd ?? null,
         tokens: response.tokens ?? null,
       }, { runId: run.id, sessionId: response.sessionId, agentId });
@@ -2705,7 +3053,8 @@ export class Orchestrator {
 
   async execute(id) {
     const run = this.get(id);
-    if (TERMINAL.has(run.status) || run.status === "recovery_required") return run;
+    if (TERMINAL.has(run.status) || run.status === "recovery_required" || run.status === "interrupted") return run;
+    if (run.buildApproval?.status === "withdrawn") return run;
     const controller = new AbortController();
     this.controllers.set(id, controller);
     run.status = "running";
@@ -3171,10 +3520,11 @@ ${rosterLine}
 - 你只按既有权限行动，禁止声称已写入、已部署或未验证的完成；证据优先。
 对话快照（bus 有界尾部）：
       ${snapshot}`;
-      const allowWrite = next.to === executionOwnerIdOf(run);
+      const writeGrant = this.continuationWriteGrant(run, next.to);
+      await this.emitWriteDegraded(run, next.to, writeGrant.reason);
       const text = await this.turn(run, next.to, prompt, {
-        allowWorkspaceWrite: allowWrite,
-        cwd: allowWrite && run.worktreePath ? run.worktreePath : null,
+        allowWorkspaceWrite: writeGrant.allow,
+        cwd: writeGrant.allow && run.worktreePath ? run.worktreePath : null,
         sourceWorkItemId: next.itemId || null,
         sourceBusMessageId: next.busMessageId || null,
       });
@@ -3633,6 +3983,7 @@ ${rosterLine}
           }],
           run.resumeQueue,
         );
+        if (!candidate.interactionId) Object.assign(candidate, this.allocateInteraction(run));
         this.activateInteraction(run, candidate);
         try {
           await this.save(run);
@@ -3747,6 +4098,7 @@ ${rosterLine}
       cwd: writeGrant.allow && run.worktreePath ? run.worktreePath : null,
       sourceWorkItemId: steer.id,
       sourceBusMessageId: steerMessage?.id || run.activeSteer?.busMessageId || null,
+      nativeCommand: steer.nativeCommand === true,
     });
     await project(async () => {
       // 空回复不进 bus：空气泡既骗人（看着像回答了）又污染后续轮的对话快照。无产出本身
@@ -3836,6 +4188,9 @@ ${rosterLine}
     const admissionEpoch = this.cancelEpoch(id);
     this.assertContinuationAdmission(id, admissionEpoch);
     const explicitAgentTarget = typeof request.agentId === "string" && request.agentId.trim().length > 0;
+    // HTTP 必须 waitForTurn:false：准入落盘后立刻返回，turn 走 executions/SSE。
+    // 进程内测试默认仍等整轮，避免把上百个结算断言改成轮询。
+    const waitForTurn = request.waitForTurn !== false;
     let {
       prompt,
       agentId = null,
@@ -3843,6 +4198,7 @@ ${rosterLine}
       messageIntent = null,
       acknowledgeRecovery = false,
       sources = [],
+      nativeCommand = false,
     } = request;
     sources = normalizeRunSources(sources);
     answerToAskId = answerToAskId == null ? null : String(answerToAskId).trim();
@@ -3872,6 +4228,19 @@ ${rosterLine}
     if (!nextPrompt) throw Object.assign(new Error("prompt is required"), { code: "INVALID_PROMPT" });
     if (Buffer.byteLength(nextPrompt, "utf8") > 256 * 1024) throw Object.assign(new Error("prompt exceeds 256 KiB"), { code: "INVALID_PROMPT" });
     if (findSecretCandidates(nextPrompt).length) throw Object.assign(new Error("prompt contains secret-like material"), { code: "SENSITIVE_PROMPT" });
+    // 原生斜杠命令轮（/compact 等）：整条消息就是命令本身，CLI 原样执行（与 Desktop 同通道）。
+    // 只接受显式标记 + 严格单行命令形态——消息内容里的 "/" 不会隐式触发，防提示注入伪造命令轮。
+    if (nativeCommand) {
+      if (answerToAskId || messageIntent === "answer") {
+        throw Object.assign(new Error("native commands cannot answer a pending ask"), { code: "VALIDATION_FAILED" });
+      }
+      if (sources.length) {
+        throw Object.assign(new Error("native commands cannot carry attachments"), { code: "VALIDATION_FAILED" });
+      }
+      if (!/^\/[A-Za-z0-9_-]+([ \t]+\S+){0,8}$/.test(nextPrompt)) {
+        throw Object.assign(new Error("nativeCommand prompt must be a single-line slash command like /compact"), { code: "VALIDATION_FAILED" });
+      }
+    }
     // 重复提交幂等门：同一 run、同一收件人、同一段文本，在它还没被处理时再次提交没有语义——
     // 客户端在途锁被 UI 同步冲掉时会把同一句话派成两轮（LO 2026-08-14 报障：同一条 19 字消息
     // 占掉第 3、4 两轮，同一个问题被回答两遍还给出互相矛盾的结论，各烧一轮预算）。
@@ -3923,7 +4292,7 @@ ${rosterLine}
         throw Object.assign(new Error("an answer for this ask is already being persisted"), { code: "ANSWER_IN_PROGRESS" });
       }
       if (messageIntent === "steer") {
-        await this.queueSteer(run, { prompt: nextPrompt, agentId, sources, admissionEpoch, acknowledgeRecovery });
+        await this.queueSteer(run, { prompt: nextPrompt, agentId, sources, admissionEpoch, acknowledgeRecovery, nativeCommand });
         return this.get(id);
       }
     }
@@ -3937,6 +4306,7 @@ ${rosterLine}
         answerCandidate: messageIntent == null && !answerToAskId && !run.pendingAsk && !explicitAgentTarget,
         admissionEpoch,
         acknowledgeRecovery,
+        nativeCommand,
       });
       return this.get(id);
     }
@@ -3952,6 +4322,17 @@ ${rosterLine}
     // 在途记账与 controller 同 tick 建立（首个 await 前）：晚一步就留出「同一句话第二次提交
     // 已经过了幂等门」的窗口
     this.inflightContinuations.set(continuationKey, nextPrompt);
+    let admitContinuation;
+    const admissionGate = new Promise((resolve, reject) => {
+      admitContinuation = { resolve, reject };
+    });
+    const settleAdmission = (error) => {
+      if (!admitContinuation) return;
+      const pending = admitContinuation;
+      admitContinuation = null;
+      if (error) pending.reject(error);
+      else pending.resolve(this.get(id));
+    };
     const directInteractionId = randomUUID();
     const directPromptMessageId = run.orchestrationMode === "social"
       ? operationMessageId("steer", randomUUID())
@@ -3973,7 +4354,8 @@ ${rosterLine}
             const previous = { status: run.status, ...this.abandonmentSnapshot(run) };
             const previousInteraction = this.interactionSnapshot(run);
             const preparedSources = this.prepareInteractionSources(run, sources);
-            if (run.status === "recovery_required") {
+            const acknowledgedRecovery = run.status === "recovery_required";
+            if (acknowledgedRecovery) {
               directRefund = this.acknowledgeAbandonedWork(run);
             } else if (this.canRefundAbandonedRound(run)) {
               // A definitively rejected/pre-submit attempt needs no ambiguous-recovery acknowledgement.
@@ -3986,6 +4368,8 @@ ${rosterLine}
             };
             this.activateInteraction(run, interaction);
             run.status = "running";
+            // 中断粘性注记随新一轮清掉；确认放弃的 audit 注记必须留下（refund 可能为空）。
+            if (!acknowledgedRecovery) run.recoveryNote = null;
             try {
               await this.save(run);
               admissionCommitted = true;
@@ -3999,6 +4383,7 @@ ${rosterLine}
             }
           }),
         });
+        settleAdmission();
         if (directRefund) await this.emitRoundRefund(run, directRefund);
         await this.withProjectionEffect(run, controller, async () => {
           if (run.orchestrationMode === "social") {
@@ -4026,6 +4411,7 @@ ${rosterLine}
         const text = await this.turn(run, agentId, nextPrompt, {
           allowWorkspaceWrite: writeGrant.allow,
           cwd: writeGrant.allow && run.worktreePath ? run.worktreePath : null,
+          nativeCommand,
         });
         await this.withProjectionEffect(run, controller, async () => {
           // 同上：空回复不伪造成一条发言（LO 那次的空白气泡就是从这里 append 的）
@@ -4077,6 +4463,7 @@ ${rosterLine}
         }
         return this.get(id);
       } catch (error) {
+        settleAdmission(error);
         if (controller.signal.aborted || ["ABORTED", "RUN_CANCELLED", "CONTROL_PLANE_CLOSING"].includes(error.code)) {
           if (admissionCommitted && !this.interruptingRuns.has(id) && this.controllers.get(id) === controller && run.status === "running") {
             await this.withRunTransition(id, async () => {
@@ -4137,7 +4524,7 @@ ${rosterLine}
       this.ensureSteerDrained(id); // 直接续聊的收尾窗兜底（同 startExecution 链）；同步 no-op 不阻塞 HTTP 返回
     });
     this.executions.set(executionKey, tracked);
-    return tracked;
+    return waitForTurn ? tracked : admissionGate;
   }
 
   async addSources(id, value) {
@@ -4452,6 +4839,37 @@ ${rosterLine}
   }
 
   /**
+   * 审批挂起时的停止：撤回尚未开始的执行，而不是假装 interrupt 成功。
+   * 必须先翻走 waiting_approval，再 deny broker——否则 deny 回唤醒 awaitBuildApproval 把 run 写成 cancelled。
+   */
+  async withdrawPendingApproval(id) {
+    const run = this.get(id);
+    let withdrawn = false;
+    await this.withRunTransition(id, async () => {
+      if (run.status !== "waiting_approval" && run.status !== "waiting_for_approval") return;
+      run.status = "interrupted";
+      run.error = null;
+      run.recoveryNote = "Build approval was withdrawn before execution started. Send another message to continue in the same session.";
+      if (run.buildApproval && run.buildApproval.status === "pending") {
+        run.buildApproval.status = "withdrawn";
+      }
+      run.result = { ...(run.result || {}), interrupted: true, approvalWithdrawn: true };
+      await this.save(run);
+      withdrawn = true;
+    });
+    if (!withdrawn) return this.get(id);
+    await this.approvalBroker.denyRun(id, "operator withdrew pending build approval");
+    await this.emitEvent(run, "run.interrupted", {
+      round: run.round,
+      interactionId: run.activeInteractionId || null,
+      interactionSeq: run.activeInteractionSeq || null,
+      approvalWithdrawn: true,
+      sessionPreserved: true,
+    }, { runId: id });
+    return this.get(id);
+  }
+
+  /**
    * 只中断当前 provider turn。与 cancel 的关键区别：保留原生 session、worktree、build approval、
    * capability lease、pending ask 与 durable queue；待子进程确认退出后进入可续聊的 interrupted 状态。
    */
@@ -4459,6 +4877,9 @@ ${rosterLine}
     const run = this.get(id);
     if (this.interruptingRuns.has(id)) {
       throw Object.assign(new Error("the current provider turn is already being interrupted"), { code: "RUN_INTERRUPTING" });
+    }
+    if (run.status === "waiting_approval" || run.status === "waiting_for_approval") {
+      return this.withdrawPendingApproval(id);
     }
     const controller = this.controllers.get(id) || null;
     const activeExecutions = [
@@ -4475,11 +4896,14 @@ ${rosterLine}
     this.interruptingRuns.add(id);
     controller?.abort();
     let settled = false;
+    let interruptTimer = null;
     const settlement = Promise.allSettled(activeExecutions).then(() => { settled = true; });
     try {
       await Promise.race([
         settlement,
-        new Promise((resolveTimeout) => setTimeout(resolveTimeout, this.interruptTimeoutMs)),
+        new Promise((resolveTimeout) => {
+          interruptTimer = setTimeout(resolveTimeout, this.interruptTimeoutMs);
+        }),
       ]);
       if (!settled) {
         let timeoutCommitted = false;
@@ -4517,6 +4941,11 @@ ${rosterLine}
           interruptedAttempts.push(attempt.attemptId);
         }
         run.inflightTurns = {};
+        if (run.resumeClaim?.itemId) {
+          const claimedId = run.resumeClaim.itemId;
+          run.resumeQueue = (run.resumeQueue || []).filter((item) => item.itemId !== claimedId);
+          run.resumeClaim = null;
+        }
         run.status = "interrupted";
         run.error = null;
         run.recoveryNote = "Current provider turn was interrupted and confirmed stopped. Send another message to continue in the same native session.";
@@ -4537,6 +4966,10 @@ ${rosterLine}
       }, { runId: id });
       return this.get(id);
     } finally {
+      if (interruptTimer) {
+        clearTimeout(interruptTimer);
+        interruptTimer = null;
+      }
       if (settled) this.interruptingRuns.delete(id);
     }
   }
@@ -4634,7 +5067,7 @@ ${rosterLine}
 
   async revokeBuildGrants(reason = "runtime policy changed") {
     for (const run of this.runs.values()) {
-      if (run.permissionMode !== "build" || !run.buildApproval || ["revoked", "denied", "expired"].includes(run.buildApproval.status)) continue;
+      if (run.permissionMode !== "build" || !run.buildApproval || ["revoked", "denied", "expired", "withdrawn"].includes(run.buildApproval.status)) continue;
       run.buildApproval.status = "revoked";
       this.revokeCapabilityLease(run, reason);
       run.recoveryNote = `Build authorization revoked: ${reason}`;
@@ -4645,34 +5078,39 @@ ${rosterLine}
     }
   }
 
-  close() {
+  close({ deadlineMs = null } = {}) {
     if (this.closePromise) return this.closePromise;
     this.closing = true;
     this.closePromise = Promise.resolve().then(async () => {
+      // 统一 shutdown deadline（烛 wave-shutdown 复审）：每阶段只拿剩余预算，
+      // adapter 关闭不再各自独占 10s 叠加超时；超期只降级留证，不拖住整条关闭链。
+      const remainingMs = (fallback) => (deadlineMs == null ? fallback : Math.max(1, deadlineMs - Date.now()));
       for (const controller of this.controllers.values()) controller.abort();
       const initialExecutions = [...this.executions.values()];
       if (initialExecutions.length) {
         let drainTimer;
         await Promise.race([
           Promise.allSettled(initialExecutions),
-          new Promise((resolveTimeout) => { drainTimer = setTimeout(resolveTimeout, 2_000); }),
+          new Promise((resolveTimeout) => { drainTimer = setTimeout(resolveTimeout, Math.min(2_000, remainingMs(2_000))); }),
         ]);
         clearTimeout(drainTimer);
       }
-      const closeErrors = await Promise.all([...new Set(this.adapters.values())].map((adapter) => closeWithin(adapter)));
+      const closeErrors = await Promise.all([...new Set(this.adapters.values())].map((adapter) => closeWithin(adapter, remainingMs(10_000))));
       for (const error of closeErrors.filter(Boolean)) {
         await this.eventStore.emit("adapter.close_degraded", { message: error.message }, { agentId: "control-plane" }).catch(() => {});
       }
-      // 远程 run 专用 adapter 一并关闭（控制面关停绝不把远端常驻进程留成孤儿）
+      // 远程 run 专用 adapter 一并关闭（控制面关停绝不把远端常驻进程留成孤儿）；
+      // 与主 adapter 共享同一剩余预算，迟到的远端关闭同样降级留证而不是无限等待。
       const remotePending = [...this.remoteAdapters.values()];
       this.remoteAdapters.clear();
       for (const pending of remotePending) {
         const pair = await pending.catch(() => null);
         for (const adapter of [pair?.adapter, pair?.fallback]) {
           if (typeof adapter?.close === "function") {
-            await adapter.close().catch(async (error) => {
-              await this.eventStore.emit("adapter.close_degraded", { message: `remote: ${error.message}` }, { agentId: "control-plane" }).catch(() => {});
-            });
+            const remoteError = await closeWithin(adapter, remainingMs(10_000));
+            if (remoteError) {
+              await this.eventStore.emit("adapter.close_degraded", { message: `remote: ${remoteError.message}` }, { agentId: "control-plane" }).catch(() => {});
+            }
           }
         }
       }
@@ -4680,10 +5118,43 @@ ${rosterLine}
       // Fixed-point drain: shutdown admission is closed, so every chain that appears here
       // was spawned by work already in flight. Waiting snapshots until all maps are empty
       // covers successor chains without deleting a newer owner under the same run key.
+      // The shared shutdown deadline bounds this loop: overdue chains are reported and
+      // left to their own abort semantics instead of stalling the whole close chain.
       const chainMaps = [this.executions, this.transitionChains, this.projectionChains, this.lifecycleChains, this.saveChains];
       while (chainMaps.some((map) => map.size)) {
+        if (deadlineMs != null && Date.now() >= deadlineMs) {
+          const pendingChains = chainMaps.reduce((total, map) => total + map.size, 0);
+          void this.eventStore.emit("adapter.close_degraded", {
+            message: `orchestrator close chain drain exceeded the shutdown deadline (${pendingChains} chain(s) still pending)`,
+          }, { agentId: "control-plane" }).catch(() => {});
+          break;
+        }
         const snapshot = chainMaps.flatMap((map) => [...map.entries()].map(([key, chain]) => ({ map, key, chain })));
-        await Promise.allSettled(snapshot.map(({ chain }) => chain));
+        let settled = true;
+        if (deadlineMs != null) {
+          const remaining = deadlineMs - Date.now();
+          if (remaining <= 0) {
+            settled = false;
+          } else {
+            let timer;
+            settled = await Promise.race([
+              Promise.allSettled(snapshot.map(({ chain }) => chain)).then(() => true),
+              new Promise((resolveTimeout) => {
+                timer = setTimeout(() => resolveTimeout(false), remaining);
+              }),
+            ]);
+            clearTimeout(timer);
+          }
+        } else {
+          await Promise.allSettled(snapshot.map(({ chain }) => chain));
+        }
+        if (!settled) {
+          const pendingChains = chainMaps.reduce((total, map) => total + map.size, 0);
+          void this.eventStore.emit("adapter.close_degraded", {
+            message: `orchestrator close chain drain exceeded the shutdown deadline (${pendingChains} chain(s) still pending)`,
+          }, { agentId: "control-plane" }).catch(() => {});
+          break;
+        }
         for (const { map, key, chain } of snapshot) {
           if (map.get(key) === chain) map.delete(key);
         }

@@ -1,0 +1,17 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "window-chrome",
+  "description": "Console-form wave 7: the frameless main window lets the loopback control-center page drive window controls (minimize/toggle-maximize/close) and manual drag regions. Kept separate from ccswitch-native so the native bridge capability stays exactly in sync with the invoke handler.",
+  "local": false,
+  "windows": ["main"],
+  "remote": {
+    "urls": ["http://127.0.0.1:51400/*"]
+  },
+  "permissions": [
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close",
+    "core:window:allow-start-dragging",
+    "core:window:allow-is-maximized"
+  ]
+}

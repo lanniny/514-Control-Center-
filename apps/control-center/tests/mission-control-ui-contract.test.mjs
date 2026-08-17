@@ -135,7 +135,9 @@ test("continue payload keeps owned answers explicit and idless asks on the legac
   const blockEnd = appSource.indexOf("\nasync function continueSelectedRun", blockStart);
   assert.ok(blockStart >= 0 && blockEnd > blockStart, "continue message builder is missing");
 
-  const context = {};
+  // buildContinueMessage 现在读模块态 state.pendingNativeCommand（原生斜杠命令轮）——
+  // 沙箱补一个诚实桩，eval 合同只验证 payload 形状，不验证全局依赖
+  const context = { state: { pendingNativeCommand: false } };
   runInNewContext(`${appSource.slice(blockStart, blockEnd)}\n`
     + "globalThis.__buildContinueMessage = buildContinueMessage;", context);
   const buildContinueMessage = context.__buildContinueMessage;

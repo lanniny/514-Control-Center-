@@ -1,7 +1,20 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { encodeJsonLine } from "../src/jsonl.mjs";
-import { buildOpencodeArgs, OpencodeCliAdapter } from "../src/adapters/opencode-cli.mjs";
+import { buildOpencodeArgs, extractOpencodeEventError, formatOpencodeExitError, OpencodeCliAdapter } from "../src/adapters/opencode-cli.mjs";
+
+test("OpenCode JSON error events flatten provider messages", () => {
+  assert.equal(extractOpencodeEventError({
+    type: "error",
+    error: { name: "UnknownError", data: { message: "Unexpected server error" } },
+  }), "Unexpected server error");
+  assert.equal(formatOpencodeExitError({
+    code: 1,
+    sessionId: "ses_1",
+    eventError: "Unexpected server error",
+  }), "opencode exited 1 (session ses_1): Unexpected server error");
+  assert.equal(formatOpencodeExitError({ code: 1 }), "opencode exited 1 without a session id");
+});
 
 test("OpenCode args map permission/model/effort/session onto documented flags", () => {
   assert.deepEqual(buildOpencodeArgs({ prompt: "inspect" }), [
@@ -75,6 +88,50 @@ test("OpenCode adapter surfaces process failure after draining event persistence
   } finally {
     process.off("unhandledRejection", onUnhandled);
   }
+});
+
+test("OpenCode adapter prefers JSON error events over empty stderr", async () => {
+  const adapter = new OpencodeCliAdapter({
+    cwd: "C:/repo",
+    eventStore: { emit: async () => {} },
+    runProcessImpl: async (command, args, options) => {
+      options.onStdout(encodeJsonLine({
+        type: "error",
+        sessionID: "ses_opened",
+        error: { name: "UnknownError", data: { message: "Unexpected server error. Check server logs for details." } },
+      }));
+      return { code: 1, stdout: "", stderr: "" };
+    },
+  });
+  await assert.rejects(
+    () => adapter.send({ prompt: "ping", runId: "run-opencode" }),
+    (error) => error.code === "OPENCODE_FAILED"
+      && /ses_opened/.test(error.message)
+      && /Unexpected server error/.test(error.message)
+      && !/without a session id/.test(error.message),
+  );
+});
+
+test("OpenCode adapter explains Windows certificate verification failures", async () => {
+  const adapter = new OpencodeCliAdapter({
+    cwd: "C:/repo",
+    eventStore: { emit: async () => {} },
+    runProcessImpl: async (command, args, options) => {
+      options.onStdout(encodeJsonLine({
+        type: "error",
+        sessionID: "ses_cert",
+        error: { name: "UnknownError", data: { message: "unknown certificate verification error" } },
+      }));
+      return { code: 1, stdout: "", stderr: "" };
+    },
+  });
+  await assert.rejects(
+    () => adapter.send({ prompt: "ping", runId: "run-opencode" }),
+    (error) => error.code === "OPENCODE_FAILED"
+      && /certificate verification/.test(error.message)
+      && /NODE_USE_SYSTEM_CA/.test(error.message)
+      && !/NODE_TLS_REJECT_UNAUTHORIZED/.test(error.message),
+  );
 });
 
 test("OpenCode adapter rejects non-zero exits without a session id", async () => {

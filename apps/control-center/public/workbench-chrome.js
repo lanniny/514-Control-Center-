@@ -3,8 +3,7 @@
  *
  * 对齐 codeg / LiveAgent 的工作区 DNA：
  *   ① 底部终端抽屉（2026-08-08 图4）——不设常驻条，默认隐藏，由右上角角位开关 /
- *      Ctrl+` / 右栏工具菜单打开后懒挂载，与终端视图共享 PTY 台账（createTerminalPanel
- *      工厂实例，stream 订阅制双挂安全）；关闭只隐藏，不销毁会话
+ *      Ctrl+` 打开后懒挂载；右栏「终端」是另一份侧栏实例。关闭只隐藏，不销毁会话
  *   ② Mission Control 右栏折叠（codeg aux-panel / LiveAgent RightDock）——收起成
  *      34px 细条，展开恢复拖前宽度；右 splitter 折叠期自动失效
  *   ③ run-rail 分组折叠（两家共同的侧栏特征）——chevron 注入各 rail-block 头，
@@ -22,8 +21,8 @@ import { createTerminalPanel } from "./terminal-panel.js";
 /* ── ① 底部终端抽屉（2026-08-08 图4：左图标开下侧终端）───────
 
    与上一版的区别：不再有常驻折叠条——抽屉默认隐藏，只由右上角角位开关、
-   Ctrl+\` 或右栏工具菜单的「终端」打开，关闭走抽屉右上角的 ×。
-   PTY 实例懒挂载且不随关闭销毁，与终端视图共享同一台账。 */
+   Ctrl+\` 打开，关闭走抽屉标题栏的 ×。右栏「终端」不再转发到这里。
+   PTY 实例懒挂载且不随关闭销毁。 */
 
 const TERM_KEYS = { open: "514cc-wb-term-open", height: "514cc-wb-term-height" };
 const TERM_DEFAULT_HEIGHT = 240;
@@ -52,7 +51,9 @@ function bootTerminalDrawer() {
     return clamped;
   };
 
-  const isOpen = () => !drawer.hidden;
+  const isOpen = () => drawer.classList.contains("is-open");
+  let closeTimer = 0;
+  let openGeneration = 0;
 
   function syncGlobalToggle() {
     if (!globalToggle) return;
@@ -63,14 +64,29 @@ function bootTerminalDrawer() {
   let panel = null;
 
   function setOpen(open, { persist = true } = {}) {
-    drawer.hidden = !open;
-    if (open && !panel) {
-      // 懒挂载：没打开过就不提前占 PTY 会话；ResizeObserver 会在可见时自动 fit
-      panel = createTerminalPanel(body);
-      void panel.mount().then(() => panel?.focusActive?.());
-    } else if (open) {
-      // 重新展开：xterm 在隐藏容器里的焦点会丢，不重新聚焦用户就得先点一下才能打字
-      panel.focusActive?.();
+    const generation = ++openGeneration;
+    window.clearTimeout(closeTimer);
+    if (open) {
+      drawer.hidden = false;
+      const reveal = () => {
+        if (generation !== openGeneration || !open) return;
+        drawer.classList.add("is-open");
+        if (!panel) {
+          panel = createTerminalPanel(body);
+          void panel.mount().then(() => panel?.focusActive?.());
+        } else {
+          panel.focusActive?.();
+        }
+      };
+      requestAnimationFrame(() => requestAnimationFrame(reveal));
+    } else {
+      drawer.classList.remove("is-open");
+      const hide = () => {
+        if (!drawer.classList.contains("is-open")) drawer.hidden = true;
+      };
+      const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+      if (reduceMotion) hide();
+      else closeTimer = window.setTimeout(hide, 240);
     }
     if (persist) localStorage.setItem(TERM_KEYS.open, open ? "1" : "0");
     syncGlobalToggle();
@@ -122,12 +138,19 @@ function bootTerminalDrawer() {
     applyHeight(current + (event.key === "ArrowUp" ? 16 : -16), { persist: true });
   });
 
-  // Ctrl+\` 切换（codeg toggle_terminal 等价）；与 Ctrl+K 面板无冲突
+  // Ctrl+\` 切换底部抽屉；Ctrl+Alt+T 由右栏自己开侧栏终端
   document.addEventListener("keydown", (event) => {
     if (!event.ctrlKey || event.shiftKey || event.altKey || event.key !== "\`") return;
     if (!drawer.closest(".view")?.classList.contains("is-active")) return;
     event.preventDefault();
     setOpen(!isOpen());
+  });
+
+  window.addEventListener("forge:open-bottom-terminal", () => {
+    if (!drawer.closest(".view")?.classList.contains("is-active")) {
+      document.querySelector('.settings-rail-back[data-view="workbench"], [data-view="workbench"]')?.click();
+    }
+    setOpen(true);
   });
 }
 
@@ -191,6 +214,7 @@ function bootMissionControlCollapse() {
   });
 
   setCollapsed(localStorage.getItem(MC_KEYS.collapsed) !== "0", { persist: false });
+  window.addEventListener("forge:expand-mission-control", () => setCollapsed(false));
 
   document.addEventListener("keydown", (event) => {
     if (event.key !== "Escape" || event.defaultPrevented || shell.classList.contains("mc-collapsed")) return;
@@ -203,12 +227,13 @@ function bootMissionControlCollapse() {
 /* ── ③ run-rail 分组折叠 ─────────────────────────────── */
 
 const RAIL_GROUPS_KEY = "514cc-rail-groups";
+// 注意：.rail-block-team（团队）不在此列——它由 app.js 的 team-tree-toggle 自管折叠
+// （aria-expanded + tree.hidden + 同 key 的 team 字段持久化），与「已归档」块同例；
+// 曾在此列时双控件读写两套状态（class vs hidden/aria）互相打架，刷新后 aria 失同步
 const RAIL_GROUPS = [
-  { selector: ".rail-block-team", key: "team", label: "团队" },
   { selector: "#rail-pinned", key: "pinned", label: "置顶" },
   { selector: ".rail-block-runs", key: "runs", label: "会话" },
   { selector: "#rail-working", key: "working", label: "正在工作" },
-  { selector: "#rail-automations", key: "automations", label: "自动化" },
 ];
 
 function loadRailGroupState() {
@@ -358,7 +383,8 @@ function bootStreamChrome() {
       body.insertAdjacentElement("afterend", toggle);
     });
   };
-  // ⑤c 消息行 hover 复制钮：一次性注入，处理过打 data 标记
+  // ⑤c 消息行 hover 操作钮：一次性注入，处理过打 data 标记——
+  // 复制（全行）；编辑铅笔（仅用户行，LO 2026-08-16「编辑历史返回继续」：回填 composer 续聊追加）
   const processRowActions = () => {
     stream.querySelectorAll(".message-row:not([data-actions-checked])").forEach((row) => {
       row.dataset.actionsChecked = "1";
@@ -370,9 +396,26 @@ function bootStreamChrome() {
       copyButton.setAttribute("aria-label", "复制消息");
       copyButton.innerHTML = '<svg class="icon lucide" aria-hidden="true"><use href="#lucide-copy"></use></svg>';
       row.appendChild(copyButton);
+      if (row.classList.contains("is-user")) {
+        const editButton = document.createElement("button");
+        editButton.type = "button";
+        editButton.className = "msg-row-copy msg-row-edit";
+        editButton.title = "编辑这条消息并重新发送（作为续聊追加，不改写历史）";
+        editButton.setAttribute("aria-label", "编辑这条消息");
+        editButton.innerHTML = '<svg class="icon lucide" aria-hidden="true"><use href="#lucide-pencil"></use></svg>';
+        row.appendChild(editButton);
+      }
     });
   };
   stream.addEventListener("click", (event) => {
+    // 编辑铅笔：行上有 data-stream-key（事件 id），交给 app.js 反查原文回填（本模块无 state 通道）
+    const editButton = event.target.closest(".msg-row-edit");
+    if (editButton) {
+      const row = editButton.closest(".message-row");
+      const streamKey = row?.dataset.streamKey ?? "";
+      document.dispatchEvent(new CustomEvent("514cc:edit-message", { detail: { streamKey } }));
+      return;
+    }
     const copyButton = event.target.closest(".msg-row-copy");
     if (copyButton) {
       const body = copyButton.closest(".message-row")?.querySelector(".message-body");
@@ -412,6 +455,57 @@ function bootStreamChrome() {
   syncJump();
 }
 
+/* ── ⑥ 窄屏会话轨抽屉（2026-08-15 布局波）────────────────
+   ≤820 时 run-rail 不再占 22vh 把聊天挤成一条缝，改成会话标题旁的列表钮
+   拉开的覆盖抽屉；选会话 / 点遮罩 / Escape 即收。桌面不介入。 */
+
+const RAIL_DRAWER_QUERY = "(max-width: 820px)";
+
+function bootMobileSessionRail() {
+  const shell = document.querySelector(".workbench-shell");
+  const rail = document.querySelector(".run-rail");
+  const button = document.getElementById("rail-session-toggle");
+  if (!shell || !rail || !button) return;
+
+  const isCompact = () => window.matchMedia(RAIL_DRAWER_QUERY).matches;
+
+  const setOpen = (open) => {
+    shell.classList.toggle("is-rail-open", open);
+    button.setAttribute("aria-expanded", String(open));
+    button.title = open ? "收起会话列表" : "打开会话列表";
+    button.setAttribute("aria-label", button.title);
+  };
+
+  button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    setOpen(!shell.classList.contains("is-rail-open"));
+  });
+
+  document.addEventListener("click", (event) => {
+    if (!isCompact() || !shell.classList.contains("is-rail-open")) return;
+    if (event.target.closest(".run-rail, #rail-session-toggle")) return;
+    setOpen(false);
+  });
+
+  rail.addEventListener("click", (event) => {
+    if (!isCompact()) return;
+    if (event.target.closest("[data-run-select], .session-link, .newtask-button")) {
+      setOpen(false);
+    }
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || event.defaultPrevented) return;
+    if (!shell.classList.contains("is-rail-open")) return;
+    event.preventDefault();
+    setOpen(false);
+  });
+
+  window.matchMedia(RAIL_DRAWER_QUERY).addEventListener("change", (event) => {
+    if (!event.matches) setOpen(false);
+  });
+}
+
 /* ── 自举 ────────────────────────────────────────────── */
 
 function boot() {
@@ -422,6 +516,7 @@ function boot() {
     bootRailGroupCollapse();
     bootRailFilters();
     bootStreamChrome();
+    bootMobileSessionRail();
   };
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start, { once: true });
   else start();

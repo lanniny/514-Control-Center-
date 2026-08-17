@@ -248,7 +248,7 @@ token 驱动（277 处 var）→ 重写 :root 自动流转全站 + 末尾精修�
 ### v3.7 codeg 对标 P1（2026-07-20 第四轮，Cursor 主驾）
 > LO「参考 github.com/xintaofei/codeg 全面优化完善体系」。当时的 17 项粗粒度盘点见 `proposals/v37-codeg-parity-design.md`；它已被 2026-07-23 的 85 行 capability ledger 取代，不作为 parity 或优越性证据。
 
-- **Automations（核心缺口落地）**：src/automations.mjs——composer 全配置快照（prompt/团队/起始/权限/模型/effort/cwd）存为命名自动化；`manual` / `every:<n>m|h|d` 简化间隔制（不为 v1 自研 cron 的月末/DST 边界）；60s tick 调度器（并发防护：上一 run 未终态不叠跑；失败落 lastError+事件不崩调度；**定时基线=创建时刻**——实测踩到"every:1d 刚保存就立即执行"的最小惊讶反例后修正）；产生的 run 走 orchestrator 全治理链（审批/预算/轮次/事件全继承，**定时 build 照挂审批门不静默升权**）；prompt 过 findSecretCandidates（自动化是定时执行的持久载体，密钥字面量=定时泄漏器）；原子写盘 + close() 先停调度。API：GET/POST/PATCH/DELETE `/api/automations` + `/:id/run`。UI：composer 书签「存为自动化」（promptDialog 两问：名称+计划）+ 左栏「自动化」分区（计划/上次运行/失败红点/立即跑/启停/删除/点击跳上次 run）+ SSE automation.* 事件驱动刷新。
+- **Automations（核心缺口落地）**：src/automations.mjs——composer 全配置快照（prompt/团队/起始/权限/模型/effort/cwd）存为命名自动化；`manual` / `idle` / `every:<n>m|h|d` 简化间隔制（不为 v1 自研 cron 的月末/DST 边界）；闲时接电（v4.x）：`idle` 项在控制面空闲（无活跃 run 且最近活动超静默窗 idleQuietMs=10min）时排水，每 tick 至多一条、最久未跑先跑、单条冷却 idleCooldownMs=4h，orchestrator 无 list() 无法证实空闲时 fail-closed 不跑；60s tick 调度器（并发防护：上一 run 未终态不叠跑；失败落 lastError+事件不崩调度；**定时基线=创建时刻**——实测踩到"every:1d 刚保存就立即执行"的最小惊讶反例后修正）；产生的 run 走 orchestrator 全治理链（审批/预算/轮次/事件全继承，**定时 build 照挂审批门不静默升权**）；prompt 过 findSecretCandidates（自动化是定时执行的持久载体，密钥字面量=定时泄漏器）；原子写盘 + close() 先停调度。API：GET/POST/PATCH/DELETE `/api/automations` + `/:id/run`。UI：composer 书签「存为自动化」（promptDialog 两问：名称+计划）+ 左栏「自动化」分区（计划/上次运行/失败红点/立即跑/启停/删除/点击跳上次 run）+ SSE automation.* 事件驱动刷新。
 - **会话聚合扩源 Kimi/Pi**（基础要求补缺）：Kimi＝session_index.jsonl 索引制（state.json 元数据 + 自定义标题透出 + wire.jsonl turn.prompt 摘要；**sessionDir 来自文件内容→realpath 限根到 sessions 根，索引被篡改指向根外时 fail-closed 跳过**，测试含篡改样本）；Pi＝jsonl 首行 `{type:"session",cwd}` meta（与 codex rollout 同构，复用 cwd 归并管线）。两家格式均 2026-07-20 本机实测（kimi 0.27.0 / pi v3），非猜测；`#foldSessionGroups` 抽共用折叠（codex/kimi/pi 三源同一管线）。codeg 支持的 OpenCode/Cline/Hermes/CodeBuddy/OpenClaw 本机未装无数据可测——**不做假接口**（Integrity Gate）；Gemini 本机无会话存储如实跳过。
 - **锁域修复（顺带清烛 v3.6 建议2 债）**：实例锁从 `repoRoot/.ai-shared/control-center` 固定路径改为 **dataRoot 域**——锁与 children.json 台账同命名空间（默认路径不变生产零影响；测试/多实例显式分 dataRoot 自然分域）。实测收益：http-e2e 不再与 live server 撞锁（146/146 从此可与开发服务共存跑）。
 - **验证**：新增 7 测试（automations×6：CRUD 回环/密钥拒绝/触发快照/AUTOMATION_BUSY 防叠/调度 tick 到期与停用跳过/失败留痕不崩；kimi-pi×1：三源合并+索引篡改限根+pi 合成项目+摘要提取）；全量 146/146；qa:ui ok:true；Playwright 实测（创建自动化→左栏行渲染「每日巡检 · 每 1 天」+ 调度器真实触发过一轮 plan run=调度链端到端实锤）。
@@ -878,3 +878,307 @@ token 驱动（277 处 var）→ 重写 :root 自动流转全站 + 末尾精修�
   `sources.json` 里是 `deploy-only + exposeContent:false`，属既有安全设计，本波未改）；本波把**回退**
   这一条对齐了，其余不一致处未动，也不假装已对齐。observability-sessions 有一条扫描合流计时断言在
   全量并行下偶发红（隔离重跑 3/3 绿），非本波引入。
+
+## 控制台形态收敛层（2026-08-16 · 模仿桌面 agent 台形态）
+> LO 供图（深色桌面 agent 台：左栏导航行+kbd、扁平时间线「已编辑 file +1 −1」、pill 底栏 composer），
+> 指令"模仿此界面形式完善优化协作台 UI"。落地为新终层 `forge/console-form.css`（最后加载）+ app.js 三处 markup + 一处快捷键。
+
+- **时间线扁平单行**：`processCardMarkup` 过程卡去卡片壳——summary 行改为「图标 + 动词（已编辑/已新增/已删除/已重命名/已改动/已执行）+ mono 目标 + 右侧彩色 diff 统计 + 时间」；`+添/−删` 统计从 change.diff 文本数行（跳过 +++/--- 头）现算，无 diff 不显示。展开体改左缘细线串父子，去卡片顶分隔。旁白/推理摘要 label 与首段同行（`p:first-of-type` inline）。治理注记/内联审批去 40px 头像槽缩进，贴齐时间线左缘。
+- **左栏**：操作行（新建任务/搜索/自动化/技能）加 kbd 提示（`.rail-kbd`，Ctrl N / Ctrl K）并真补 Ctrl+N 绑定（workbench 内 → openSessionDialog；浏览器保留该键时自然落空，桌面壳生效）。会话行单行化：状态点 + 标题 + 右侧 mono 相对时间徽章（状态词由状态点色调表达，`.rail-run-state` 视觉隐藏，`railRunMarkup` 拆出 `.rail-run-sub/.rail-run-time`）。
+- **会话头**：拍成 slim 标题栏（13px/600），`#conversation-meta` 改右置状态 pill（mono 10.5px 胶囊，对标参考「后端：…」）。
+- **Composer**：壳圆角 12px、模型/Effort/权限选择器统一 pill 化（发丝边 + hover 浮底）、发送/附加钮 28px 正圆、藏底栏键位文字（tooltip 仍在）。颜色全走 tokens 令牌，亮暗双主题自动跟随；窄屏（≤900px）状态 pill 让位标题。
+- **顺手修真 bug**：离线 sprite 漏了 `file-pen-line`（过程卡文件行图标一直是空白）与静态引用的 `arrow-left`/`wand-sparkles`——`vendor-lucide.mjs` 清单补齐 3 个并重生成（134 symbols ↔ manifest ↔ 静态引用三方对齐）。`lucide-sprite-contract` 测试从假绿变真红再变绿，再次证明机械扳机的价值。
+- **验证**：全量 **1331 测试 1330 pass / 0 fail / 1 skipped**；vm 沙箱抽真 `processCardMarkup` + 全量真实 CSS 静态预览页实拍（亮/暗、展开/收起/错误态）；Playwright 实拍工作台 + 会话树页（亮/暗）无 pageerror。
+
+## 控制台形态收敛层·第二轮（2026-08-16 · 参考图标红处细节）
+> LO 二轮供图（同一桌面 agent 台），标红四处：①顶栏 标题+项目/分支 chip+「…」②顶栏右「更改 +N −N」pill
+> ③时间线左缘折叠沟槽 ④欢迎态（时段问候/composer chip 行/可关提示条/模板卡）。全部落在 console-form.css 终层 + app.js 渲染层。
+
+- **会话头 chips**：标题下随「📁 项目 ▾」「🌿 分支」「…」溢出菜单。数据源统一走 `GET /api/workbench/environment`
+  （run→任务工作树，无 run→控制面仓库根），按 runId/"idle" 分键 30s TTL 缓存，回填只写 chip 局部 DOM 不触发整树重绘。
+  溢出菜单复用既有 `showContextMenuFromTrigger`，只放复制类安全动作 + 产物 diff 入口（破坏性动作留在顶栏停止键）。
+  「…」放在 `#conversation-chips` 容器内、`innerHTML` 重建后 appendChild 挂回——heading-main 是纵向 flex（styles.css:9605），
+  chips 行与标题行分层，不与 meta pill 抢一行。
+- **更改 pill**：终态 + worktree run 在顶栏右显示「更改 +A −D」。数字优先级：已展开的 runDiffView stat（权威，
+  解析 `git diff --stat` 末行，缺子句按 0）> 环境 numstat（changes.additions/deletions，顺手就有）；都没有就纯「更改」。
+  点击与「产物 diff」按钮同路 toggleRunDiff。环境端点对不合规 worktree 返 422（attestRunWorkspace 围栏），前端静默降级为无数字。
+- **折叠沟槽**：VSCode folding gutter 式——消息行/过程卡左 -15px 小横杠，悬停显实（opacity 0→.55）。消息行折叠按
+  streamKey 记进会话级 Set（`collapsedStreamRows`，重渲不失、刷新还原）；过程卡翻 `details.open`（开态本就有
+  capture/restoreConversationStreamState 跨重渲保留）。折叠态 = 内容压一行 + 右渐隐 mask + 头像缩小，行还在可再点开。
+  `.row-gutter` 用 absolute 定位脱离 grid 流——`.message-row` 是 34px+1fr 的栅格，普通子元素会挤歪布局。
+- **欢迎区**：hero 改时段问候（早上/中午/下午/晚上/夜深五档，AEMEATH 口吻）；tip 条补 × 关闭（localStorage
+  `514cc-welcome-tip-dismissed` 持久化）；**tip 抽签种子会话内固定**——原先每次 renderSelectedRun 都重抽 tip 文本，
+  欢迎区签名随之抖动、DOM 反复被替换（× 在 SSE 活跃时几乎点不中，Playwright 实录超时确诊）。
+- **composer chip 行**：项目地址 chip 取消"无 pendingCwd 即隐藏"——新任务模式如实回读 idle 环境的默认仓名/根
+  （服务端默认 cwd 就是 repoRoot，不是猜的占位），可点击时补 ▾ caret；旁边新增只读「🌿 分支」chip
+  （pendingCwd 指往别处时如实隐藏——环境端点反映的是默认仓，不假装知道别人的分支）。新任务占位文案改
+  「向 X 提问或下达目标——@ 点名成员，/ 选择命令或模式」（`syncComposerTargetUi` 才是占位文案的终写点，
+  `setComposerMode` 里那处在它之前跑、会被盖掉——两处同步改）。
+- **补回被隐藏波次吃掉的欢迎区**：`codex-desktop.css:416-441` 曾把 welcome-tip/星图/模板卡整体
+  `display:none !important`（极简 compact 决策）。本轮以更后加载 + 更高优先级 !important 恢复 tip/分类页签/模板卡
+  （参考形态即"问候+提示条+快捷卡"）；星图保持隐藏——composer 成员条已承担团队呈现，欢迎区高度向参考收敛。
+- **sprite**：补 `ellipsis`（会话头溢出菜单图标），135 symbols 三方对齐。
+- **验证**：隔离实例（CONTROL_CENTER_DATA_DIR=.scratch/qa-ui-data）+ 种一个终态 worktree QA run
+  （id 必须纯 hex——`/api/runs/:id/diff` 路由只认 `[0-9a-fA-F-]`，否则 404；worktreePath 必须过
+  attestRunWorkspace 命名边界，否则环境端点 422）。Playwright 实拍：欢迎态（问候/双 chip/新占位/tip × 点击消失
+  且 localStorage 落 1）、run 会话头（双 chip + …菜单 5 项 + 更改 pill +0 −0）、沟槽折叠、diff 面板开合，亮/暗双主题无 pageerror。
+
+## 控制台形态收敛层·第三轮（2026-08-16 · LO 真实实例实拍修复）
+> LO 用真实实例跑新 UI 拍回两张图：「动作审批 · 待处理」卡把 control/runBuild/requestApproval 的
+> params（runId/promptSha256/三组 member-uuid/coordinatorId/policySha256…）平铺成 20+ 行裸字段墙；
+> meta pill 横贯顶栏且与会话头 chips 重复。两处定点修复。
+
+- **runBuild 审批卡摘要化**：`approvalParamsMarkup` 新增 runBuild 分支（排在 commandExecution/fallback 之前）→
+  `approvalRunBuildMarkup`：正面一行 4 项人话事实（工作区 basename+全路径 title / 隔离 / 协作模式·最多 N 轮 /
+  执行成员短码），全量字段原样收进 `<details class="approval-tech">「技术详情 · N 字段」`——审计可见性不丢，
+  首屏不再被哈希淹没。成员运行实例 id 由 `approvalMemberShort` 截到 18 字符（全量留 title 与技术详情）。
+  commandExecution/fileChange 两条既有分支不动（命令块/路径列表本来就是人话）。
+- **meta pill 砍重复段**：`renderSelectedRun` 不再推入「独立页 · 只看 X」（成员身份 tab 条+会话标题已表达）与
+  「wt …」（会话头分支 chip 已显示；chip 数据缺失时 `#conversation-meta` 的 title 悬停仍给出 worktree 全路径）。
+  「总轮次 / 交互 · 本次步骤」保留——codex-process-visibility 有源码断言，是步骤预算的唯一可见面。
+- **composer 底栏高度不动**：实拍里操作台展开占屏是用户自己的展开态——`composerCliOpen` 默认 false
+  且 localStorage 持久化，不替 LO 改他的面板状态。
+- **验证**：新源码契约测试 `tests/approval-runbuild-card.test.mjs`（3 项：runBuild 分支位序+四要素+details、
+  console-form.css 样式、meta 段裁剪）3/3 过；全量 **1337 测试 1336 pass / 0 fail / 1 skipped**
+  （ccswitch-proxy failover 熔断用例在全量并行下偶发一次 2!==1，单跑 37/37 复跑全绿，确认 flaky 与本改动无关）。
+  隔离实例实拍：state.approvals 是服务端内存 broker 无持久化，pending 审批造不出来——DOM 注入同结构卡片
+  验证呈现（折叠/展开 × 亮/暗 四态），markup 生成逻辑由源码契约测试兜底。
+
+## 控制台形态收敛层·第四轮（2026-08-16 · 居中回归修复）
+> LO 真实实例实拍：审批卡 / 「已创建隔离工作树」系统卡 / 「第 N 轮」轮次分隔全部贴左而非居中。
+> Playwright 探针实测（ml/mr/maxW/x）定位两个破口，均修复于 console-form.css。
+
+- **破口①（本轮新引入）**：第一轮写的 `.gov-note, .approval-inline { margin-left: 0 }`——与
+  codex-desktop.css `.conversation-stream > * { margin-inline: auto }` 同特异性但更晚加载，
+  盖掉 auto 的左半（右 auto 残留），元素被挤到内容区左缘。改回 `margin-inline: auto`；
+  头像槽 40px 缩进在居中阅读列里本就无意义，不恢复。
+- **破口②（存量 bug）**：styles.css `.conversation-stream .turn-divider { margin: 14px 0 10px }`
+  特异性 (0,2,0) 高于居中层的 (0,1,0)，shorthand 一直把左右 margin 钉 0。console-form.css 以
+  同特异性 + 最后加载补 `.conversation-stream .turn-divider { margin-inline: auto }`。
+- **居中机制本身保持三层**：流 padding 固定 20px（console-form 第一轮）+ 子元素
+  `width:100%; max-width:768px; margin-inline:auto`（codex-desktop 提供 width/auto，console-form 收 768）。
+  实测修复后 gov-note/turn-divider/approval-inline 与 message-row 完全同列（x=731, ml=mr=471px auto）。
+- **验证**：新契约测试 `tests/stream-centering.test.mjs`（3 项：两类 margin-inline:auto 在场、
+  margin-left:0 不再出现、上游居中机制完好）3/3 过；全量回归 0 fail（automations/ccswitch-domain
+  在 Windows 并行下偶发 EPERM rename flaky，单跑 32/32 复跑全绿）；隔离实例注入三元素实拍
+  亮/暗双主题居中确认（SSE tick 会重建 innerHTML 冲掉注入——interval 守卫重注后截图）。
+
+## 控制台形态收敛层·第五轮（2026-08-17 · 活跃过程与步进可见性）
+
+> LO 供图（Codex 桌面 App 实拍：流内「运行了命令」转圈行 +「第 1 / 4 步 · 2 个文件已更改
+> +150 −24」进度条），指令"参考此图继续完善桌面端协作台"。纯前端波：数据面（codex
+> item/started 的结构化 command/file progress）早在 SSE 流里，此前只折算成呼吸行一句文案
+> （trackCodexActivity → codexActivityText），时间线本体没有实体——本轮补上。
+
+- **进行态过程行 `liveProcessRowsMarkup`**（app.js，渲染层零后端改动）：codexActivity 里
+  started 未核销的 command/file 项逐条成行——转圈（loader-circle + forge-spin，reduced-motion
+  由 motion.css 既有层全灭）+「正在执行/正在编辑」+ mono 目标 + 已运行时长。时长复用
+  `data-live-since` + `tickLiveElapsed` 秒级走时，不靠重渲。completed 到达即核销消失、
+  完成态扁平单行（第一轮 processCardMarkup 形态）自然落位——一行两态，不另造完成形态。
+  reasoning 不进这里；waiting_approval/recovery_required/pendingAsk 时不挂转圈（等的是人，
+  在途 item 已暂停，转圈=假活）。
+- **呼吸行去重**：command/file 活跃项独立成行后，`liveTurnMarkup` 只为 reasoning 保留
+  「正在思考」，其余退回相位文案——此前同一活跃项会在呼吸行与过程行各说一遍。
+  `codexActivityText` 契约锚点（codex-process-visibility 断言行）原样保留。
+- **流尾步进进度条 `turnProgressMarkup`**：「◌ 第 X / Y 步 · N 个文件已更改 +A −D」。
+  步进口径与顶栏 meta 同源（interactionStep/maxStepsPerInteraction）；文件统计走新累加器
+  `turnFileStats`（只收 completed 的 file progress——started 的 diff 为空；数行复用
+  `diffLineStats` 不造第二份；user.message 开新交互即重置；run 收尾清账）。有文件段时整条
+  是 details，展开 per-file 明细（修改/新增 chip + mono 路径 + per-file +x −y），开态靠
+  `data-stream-key="tail:progress"` 走既有 capture/restoreConversationStreamState 跨重渲保留。
+- **居中纪律落进契约**：两个新类都是会话流直接子级，margin 只写 `margin-block`——
+  inline 方向留给上游 `margin-inline:auto`（第四轮 .gov-note 破口同款教训的预防性固化，
+  契约测试带负向断言）。
+- **诚实边界**：kimi/gemini/claude 等席位无 item 级信号，没有进行态过程行与文件段
+  （只显示步进或全隐），不猜不编；刷新页面后累加器从空起步（只收 live SSE，不回放历史
+  补齐），新交互随 user.message 重置自然对齐。截图里「已查看 N 张图像」是 agent 侧图像
+  查看信号，codex app-server 无此 item 类型，不伪造。
+- **验证**：新契约 `tests/stream-live-progress-contract.test.mjs` 6/6（渲染路径/呼吸行去重/
+  累加器重置与复用数行/tail 与 pushEvent 接线/样式在场+居中负向断言/sprite 四方对齐）；
+  vm 沙箱抽真 `liveProcessRowsMarkup`/`turnProgressMarkup`/`trackTurnFileStats` 生成静态预览页
+  （`.scratch/gen-preview-5.mjs` + `shot-wave5.mjs`），亮/暗 × 收起/展开四态实拍
+  （`.qa-ui-wave5/`）：进行态两行转圈 + 进度条「第 1 / 4 步 · 2 个文件已更改 +246 −24」
+  （150+96 两文件聚合正确）+ 展开 per-file 明细，无 pageerror；`node --check` 过；全量
+  **1351 测试 1350 pass / 0 fail / 1 skipped**（基线 1337 + 本轮契约 6 + 工作树在途改动 8）。
+
+## 控制台形态收敛层·第六轮（2026-08-17 · 会话头单行 slim 标题栏）
+
+> LO 供图（Codex 桌面顶栏红圈：图标+标题单行 + 下发丝分隔线）+ 本机实拍（标题两行、
+> meta pill 横贯），指令"关注红色标记的视觉处理"。落点：index.html 一处 glyph +
+> console-form.css 第六轮区块 + app.js meta 构造压缩。
+
+- **单行标题栏**：heading-main 从纵向 flex 改行向（wrap 仅留给极少显示的参与 CLI 行）；
+  标题压单行 nowrap+ellipsis（覆盖 styles.css 存量两行 line-clamp）；标题前加
+  `conversation-title-glyph`（messages-square，class-only 无 id——不进 elements 清单，
+  第七波漏登坑的主动规避）；chips/溢出菜单随行；右侧只剩「本次步骤 X/Y」pill + 图标钮。
+- **meta pill 压缩**：可见文本从「run e8afa36d · 08/14 20:33:09 · 总轮次 4 · 交互 1 ·
+  本次步骤 4/6」收成「本次步骤 4/6」（maxSteps 缺失回落「总轮次 N」）；run id 全码/创建
+  时间/总轮次/交互序号/worktree 全路径收进同一元素 tooltip——审计可见性不丢。
+  codex-process-visibility / approval-runbuild-card 两处契约同步改写（口径不变：
+  总轮次与本次步骤都必须说清，只是一处在可见面一处在悬停面）。
+- **实机抓获存量暗伤**：`--line` token 从未定义——console-form 前四轮 9 处 + styles.css
+  2 处 `border: 1px solid var(--line)` 全部静默失效（var() 未定义使整条 border shorthand
+  无效，borderBottomWidth 实测 0px），会话头发丝线、过程卡展开体左缘线等其实一直没渲染。
+  全量改 `var(--border)`（tokens.css 亮暗双主题都有定义），契约测试加全局负向断言。
+- **窄屏 wrap 坑**：flex-wrap 的换行判定用 flex base size（标题未收缩的全文宽），长标题
+  会把 chips 挤到第二行（heading 42→72px）。窄屏（≤900px）禁 wrap + 隐藏参与 CLI 行
+  （团队呈现由 composer 成员条承担），标题照常省略、chips 裁剪到只剩 …。
+- **验证**：新契约 `tests/conversation-heading-slim.test.mjs` 4/4（glyph 无 id/单行省略/
+  tooltip 审计段/--line 负向）；实机探针 `.scratch/verify-wave6-heading.mjs`（隔离实例
+  51483 + 种 run）：flexDir=row、glyph 可见、标题 17px 单行、chips 同行（中心线判定——
+  盒高差不是换行）、meta=「本次步骤 4/6」+ tooltip 四段全、发丝线 1px、窄屏 600px
+  标题省略且 heading 回 42px；截图 `.qa-ui-wave6/heading-{light,dark,narrow}.png`；
+  全量 **1356 测试 1355 pass / 0 fail / 1 skipped**（基线 1351 + 本轮契约 4，余 1 为工作树在途改动）。
+
+## 控制台形态收敛层·第七轮（2026-08-17 · 窗口框与 topbar 合一）
+
+> LO 供图（Codex 桌面：窗口标题栏与顶栏合一的一条 slim 横带）+ 本机实拍红圈（Tauri 原生
+> 标题栏「514 Forge · Control Center」与应用 topbar 两层横条），指令"关注红色标记的视觉处理"。
+> 落点：main.rs 一处 builder 链 + 新 capability（window-chrome.json）五条窗口权限 + index.html
+> 三钮 + app.js initializeWindowChrome + console-form.css 第七轮区块。
+
+- **去原生装饰**：`WebviewWindowBuilder` 加 `.decorations(false)`——窗口框交给 topbar 兼任。
+  网页资产先行可用（旧壳仍带原生栏时三钮只是冗余，不致命）；装饰移除需重新构建桌面端生效。
+- **窗口控制条**：topbar-actions 末尾 `.window-controls`（minus/square/x，默认 hidden）；
+  仅 Tauri 壳内由 `initializeWindowChrome()` 摘除 hidden 并加 `is-desktop-shell`，浏览器模式零渲染。
+  命令走 `__TAURI_INTERNALS__.invoke("plugin:window|…")`（minimize/toggle_maximize/close），
+  关窗仍触发 native.rs CloseRequested → 关窗进托盘语义不变；五条 core:window 权限独立落
+  `capabilities/window-chrome.json`——ccswitch-native 的权限集被 native.rs 回归锁死与 invoke
+  handler 精确相等，平台权限混进去会炸精确匹配，分离后两边都不动。
+- **手动拖拽区**：弃用 `data-tauri-drag-region`（壳内注入脚本对子元素的命中判定随版本漂移），
+  改在 topbar mousedown 手动判定——命中 button/a/input/nav/actions 放行，否则 detail===2 双击
+  toggle_maximize、单击 start_dragging。语义落在应用层，契约可测、探针可演。
+- **slim 收敛**：`is-desktop-shell` 下 `--topbar-height: 44px`（浏览器基线 52px 归
+  codex-desktop.css:9 所有，不动）；topbar 空白区 user-select:none 防拖动误选；
+  关闭钮 hover 用既有 --rose-bright（Windows 惯例），不新造颜色 token。
+- **图标**：vendor-lucide.mjs 清单补 `minus` 重生成（135→136 symbols，manifest 同步）。
+- **验证**：新契约 `tests/window-chrome-contract.test.mjs` 7/7（标记位置+hidden 默认/id 登记/
+  Tauri 守卫与四条窗口命令/拖拽排除选择器/capabilities/decorations(false)/图标 manifest，
+  含 data-tauri-drag-region 负向断言）；实机探针 `.scratch/verify-wave7-chrome.mjs` 双实例
+  （bootstrap nonce 一次性，51484/51485 各起一实例）：浏览器模式无 shell class、钮 hidden、
+  52px 基线不变；注入桥桩模拟壳后 44px 收敛、三钮三命令、面包屑单击 start_dragging、
+  双击 toggle_maximize、theme-toggle 豁免拖拽、双主题零 pageerror；截图
+  `.qa-ui-wave7/chrome-{light,dark}.png`；`cargo check` + `cargo test`（21/21，含
+  ccswitch-native 精确匹配回归）通过；
+  全量 **1363 测试 1362 pass / 0 fail / 1 skipped**（基线 1356 + 本轮契约 7）。
+
+## 控制台形态收敛层·第八轮（2026-08-17 · rail/会话栏交界圆角卡片）
+
+> LO 小图圈点 rail 与会话栏交界的生硬直角（发丝线 + 直角相交），指令"这里做圆角处理"。
+> 纯 CSS 一轮：console-form.css 第八轮区块，无 JS/标记改动。
+
+- **圆角卡片**：`.atelier .conversation-pane` 左上 `border-top-left-radius: 10px`，凹口透出
+  rail 磨砂底色（pane 本就 `overflow:hidden`，子元素随曲线裁切，实测无直角漏出）；
+  `.atelier .conv-tabs` 补同款圆角当保险丝（防未来 bg 改动越界）。
+- **去发丝线**：rail 右缘 `border-right` 与 `1px inset 高光` 一并移除，分隔交给色差——
+  Codex 桌面交界无线，靠侧栏/内容底色差。候选 A（只圆角留线）与 B（圆角+去线）探针
+  双截图对比后取 B。
+- **CSP 预览技法**：`page.addStyleTag` 被 `style-src 'self'` 拦——候选样式预览改走
+  Playwright route 拦截 `console-form.css` 追加响应体，同源样式表合规、工作区零污染。
+- **验证**：新契约 `tests/junction-radius-contract.test.mjs` 3/3（圆角+保险丝/去线/
+  console-form 晚于 codex-desktop 加载的源序断言）；实机探针 `.scratch/verify-wave8-junction.mjs`
+  4 断言（pane 10px / rail borderRight 0px / shadow none / tabs 10px）+ 双主题交界与全景截图
+  `.qa-ui-wave8/junction-final-{light,dark}.png`，零 pageerror；
+  全量 **1366 测试 1365 pass / 0 fail / 1 skipped**（基线 1363 + 本轮契约 3）。
+
+### 第八轮追加（同日）：壳内热重载
+
+LO 反馈"桌面端没看到改动"：静态资源 `no-store` + 每请求读盘，服务端无缓存——唯一滞后层是
+WebView 里已加载的旧页面；壳无地址栏/刷新键，而 bootstrap nonce 一次性曾让人以为不能 reload。
+查实令牌兑换后存 sessionStorage（app.js initializeAccessToken），**reload 安全**。
+`initializeWindowChrome` 补壳内 Ctrl+R → `location.reload()`（浏览器模式不受影响）。
+探针 `.scratch/verify-wave7-reload.mjs` 实证：Ctrl+R 后页面重载、badge 回 is-ok、
+壳形态与窗口钮恢复。此后网页资产迭代，壳内 Ctrl+R 即生效，不必重启应用。
+全量 **1366 测试 1365 pass / 0 fail / 1 skipped**。
+
+### 第八轮二轮修正（同日）：圆角看不见 + 页签带割裂
+
+LO 重启后反馈"还是不对"，分无标签页/有标签页两态供图。逐像素取证：
+
+- **圆角一直在，只是看不见**：pane 是 78% 半透明玻璃，圆角裁出的缺口直接透出 atelier
+  舞台（近白），与 rail/卡片色差不超 3 级灰度——无标签页态（conv-tabs display:none，
+  顶行换成 conversation-heading）弧外点采样 (242,54)=(250,249,245) 与卡内同色，弧线隐形。
+- **修**：`.workbench-shell::before` 在 (var(--codex-task-rail), 0) 垫 12×12
+  rail 同配方玻璃色（color-mix sidebar 62%），z-index:-1 沉到 grid 子项下，只从缺口露出；
+  移动端 rail 100% 时自然出屏。修后缺口 (246,244,238) ≈ rail (244,241,234)，双主题成立。
+- **页签带并入卡片**：conv-tabs 的 muted 横带（codex-desktop 时代"自成一带"的决定）把卡片
+  割裂成两段，与 Codex"标签行与内容同一张卡面"不符——背景改透明透出 pane 玻璃底，
+  圆角保险丝保留。
+- **取证技法**：elementFromPoint 角点回溯 DOM 链（heading bg 卡进角）+ PIL 沿弧心
+  对角线采样定弧存在性 + route 拦截预览候选。结论先行于改动。
+- **验证**：契约 `tests/junction-radius-contract.test.mjs` 4/4（新增垫底三断言：跟随
+  --codex-task-rail / z-index:-1 / 62% 同配方）；探针 verify-wave8-junction.mjs 6 断言
+  （含垫底挂载、conv-tabs 透明）+ 无标签页态截图；全量 **1367 测试 1366 pass / 0 fail /
+  1 skipped**（基线 1366 + 契约 +1）。
+
+## 控制台形态收敛层·第九轮（2026-08-17 · 应用菜单列 + L 形 chrome 统一色 + 卡片浮起）
+
+> LO 供 Codex 桌面左上角截图（≡ ‹ › 文件/编辑/视图/帮助），指令三连：补回这些菜单功能；
+> 左边栏与上边栏统一颜色；协作台对话区用立体效果与 chrome 区别。第七轮 `.decorations(false)`
+> 把原生菜单栏一并带走，本轮在 web 层补回（浏览器/壳内共用，不锁壳）。
+
+- **菜单列**：topbar 的 `.topbar-title` 前插入 `.chrome-menus` 簇（index.html，7 控件：
+  rail 开合 / ‹ / › 图标钮 + 文件/编辑/视图/帮助 文字菜单）。逻辑在 app.js
+  `initializeChromeMenus`：复用既有 `showContextMenuFromTrigger` 弹层；文件=新建任务/
+  重载界面/关窗进托盘（浏览器模式关窗禁用）；编辑=撤销/重做/剪切/复制/粘贴/全选
+  （`execCommand`，粘贴被 Chromium 拦时诚实 toast 提示 Ctrl+V）；视图=左栏开合/主题/
+  字号±/重置/底部终端/环境信息；帮助=体系观测/关于（confirmAction 弹 getVersion()）。
+- **焦点归还**：HTML 菜单会抢走输入框焦点（原生菜单不会）——`focusin` 捕获
+  `lastEditableField`，编辑命令先 `focus()` 归还再 `execCommand`，探针实证全选落回
+  `#task-input`。
+- **视图历史**：setView 全程 `history.replaceState`（浏览器栈不涨），自养双栈
+  `viewHistoryBack/Forward` 供 ‹ ›；`recordViewHistory` 挂在 `FORGE_VIEW_TITLES` 守卫之后
+  只记真实切换，`chromeNavigate` 用 `viewHistoryMute` 抑制回写防死循环，上限 50。
+- **rail 收起**：`applyRailCollapsed` 切 `.workbench-shell.rail-collapsed`（grid 列宽归零 +
+  rail visibility:hidden + 卡片左缝补齐 8px），localStorage `514cc:workbench-rail-collapsed`
+  持久化，入口双份（≡ 钮与视图菜单，aria-pressed 同步）。
+- **统一色比色卡点（本轮根因教训）**：初版给 topbar/shell 写 62% color-mix 磨砂，探针比色
+  永远 FAIL——`experience-polish.css:38` 早已把 rail 压成实色 `var(--sidebar)`（特异性
+  (0,2,0) 后于 codex-desktop 的磨砂配方），同一 token 一边带 alpha 一边不带，任何归一化
+  都比不齐。统一只能向实色对齐：topbar/shell 改实色 `var(--sidebar)`（backdrop-filter
+  不再声明，自然回落 polish 的 none），磨砂纵深改由卡片浮起承担。亮 rgb(244,241,234) /
+  暗 rgb(23,20,15) 三面一致。
+- **卡片浮起**：`.atelier .conversation-pane` `margin: 8px 8px 8px 0`（左缘贴 rail 保留
+  Codex 式交界）+ `border-radius: 12px` 全圆角 + 双层柔和投影（暗色加深变体）；壳铺同色
+  底色后第八轮 `::before` 凹口补丁成死代码，退役（junction-radius 契约改负向断言）。
+- **图标**：vendor-lucide.mjs 清单补 `panel-left` 重生成（136→137 symbols，manifest 同步）；
+  MENU_ICONS 补 13 个菜单图标键。
+- **验证**：新契约 `tests/chrome-menus-contract.test.mjs` 6/6 + junction-radius 4/4 +
+  window-chrome 7/7 = 17/17；实机探针 `.scratch/verify-wave9-chrome.mjs`（51496，真实文件
+  无拦截）25 断言全绿：7 控件挂载/sprite/初始禁用/三面比色×2/几何×4/文件菜单项数与关窗禁用/
+  新建任务触发/编辑 6 项/全选焦点归还/收起三态/左缝补齐/toggle 恢复/帮助切视图/‹ › 三断言/
+  暗色三面一致/暗色投影，零 pageerror；截图 `.qa-ui-wave9/wave9-{light,dark}.png` +
+  `wave9-junction-{light,dark}.png`。探针一处误判自修：首载 hash 空串是 boot 态，‹ 断言改比
+  激活面板。另修复既有陈旧断言 1 条：sidebar-nav-ui.test.mjs 没跟上 `#view-market` 加进
+  `#view-appearance,#view-browser` 选择器列表（两个文件均 untracked，LO 既有工作树漂移）。
+  全量 **1376 测试 1375 pass / 0 fail / 1 skipped**（基线 1367 + 本轮契约 6 + 树内既有 +3）。
+  备注：ccswitch-proxy.test.mjs 两个计时敏感用例（309 熔断/1146 close restore）全量并发下
+  各抖一次，单跑 37/37 绿、第三次全量 0 fail，与本轮 UI 变更无关。
+
+### 第九轮追加（同日）：细节打磨（LO 全屏截图后 "继续优化细节"）
+
+2 倍放大审计探针 `.scratch/audit-wave9-details.mjs`（deviceScaleFactor 2，13 张区域截图 +
+边框计算样式取证），只动有证据的粗糙点：
+
+- **topbar 底发丝线切断 L**：计算样式实锤 `border-bottom: 1px solid oklch(0.912 0.007 85)`
+  （codex-desktop.css 时代遗留），统一色 L 形 chrome 下这条线把上栏与左栏/壳切成两层，
+  Codex 参照此处无线——`body.atelier .topbar` 补 `border-bottom: 0`。
+- **rail 快捷键提示减重**：`.rail-kbd` 去边框盒（1px border + padding 5px → 0），对齐参照图
+  纯 muted 文本；hover 行只提 opacity，不再描边。
+- ** phantom 排除**：≡ 钮疑似"静止态带底盒"，计算样式取证 bg/border/shadow 全空——是
+  panel-left 字形本身的圆角矩形，非缺陷，未动。先取证后动手的典型一例。
+- **验证**：探针 verify-wave9-chrome.mjs 25/25 保持全绿；契约 17/17；
+  全量 **1381 测试 1380 pass / 0 fail / 1 skipped**。备注：mission-control-http.test.mjs:392
+  （服务器夹具关停生命周期）首轮全量抖一次，单跑 5/5 绿、二轮全量 0 fail——与 CSS 无关。
+
+### 第九轮追加二（同日）：卡片右/下不留空
+
+LO 圈图指出对话卡片右边与下边"不用留空"。`.atelier .conversation-pane` 由
+`margin: 8px 8px 8px 0` + 全圆角改为 `margin: 8px 0 0`（只留顶部缝）+
+`border-radius: 12px 0 0 0`（只留左上签名角）——右缘贴齐窗缘、下缘贴齐状态栏顶，
+右/下圆角会在窗缘与状态栏上切出底色缺口，故一并取方。rail 收起态 `margin-left: 8px`
+维持不变（切换态的左缝是功能反馈，非装饰留空）。契约与探针同步：chrome-menus 契约
+改断言 margin/radius 新值；verify-wave9-chrome.mjs 新增"右缘贴窗缘（pane.right ==
+viewport宽）""下缘贴状态栏（pane.bottom == .global-statusbar.top）"两条几何断言，
+圆角断言改 12/0/0/0。探针 27/27 全绿；契约 17/17；全量 **1381 测试 1380 pass /
+0 fail / 1 skipped**（本轮一次通过）。

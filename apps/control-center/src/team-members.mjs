@@ -36,6 +36,7 @@ const PERSISTED_KEYS = new Set([
   "createdAt",
   "updatedAt",
   "mainBrainAllowed",
+  "avatar",
   ...METADATA_KEYS,
 ]);
 const MUTATION_CHAINS = new Map();
@@ -72,6 +73,8 @@ async function restrictPrivateFile(file) {
         if (!sid) fail("current Windows SID is unavailable", "SID_UNAVAILABLE");
         return `*${sid}`;
       });
+      // 失败不缓存 rejected promise：一次瞬时 whoami/网络故障不应让后续所有写操作挂到重启
+      windowsPrincipalPromise.catch(() => { windowsPrincipalPromise = null; });
       const principal = await windowsPrincipalPromise;
       await execFileAsync(windowsSystemTool("icacls.exe"), [file, "/grant:r", `${principal}:(F)`], {
         windowsHide: true,
@@ -146,6 +149,15 @@ function cleanText(value, label, max, {
 function cleanOptionalText(value, label, max, options = {}) {
   if (value === undefined) return undefined;
   return cleanText(value, label, max, options);
+}
+
+function cleanAvatar(value, label = "avatar", code = "VALIDATION_FAILED") {
+  if (value == null || value === "") return "";
+  if (typeof value !== "string") fail(`${label} must be a string`, code);
+  const text = value.trim();
+  if (!text) return "";
+  if (text !== "custom") fail(`${label} must be empty or custom`, code);
+  return "custom";
 }
 
 function cleanBoolean(value, label, { code = "VALIDATION_FAILED", nullable = false } = {}) {
@@ -449,6 +461,9 @@ export class TeamMemberStore {
         record[key] = cleanText(raw[key], `persisted builtin ${key}`, OPTION_MAX, { code: "MEMBER_STORE_INVALID", nullable: true });
       }
     }
+    if (Object.hasOwn(raw, "avatar")) {
+      record.avatar = cleanAvatar(raw.avatar, "persisted builtin avatar", "MEMBER_STORE_INVALID");
+    }
     return record;
   }
 
@@ -473,6 +488,9 @@ export class TeamMemberStore {
       mainBrainAllowed: Object.hasOwn(raw, "mainBrainAllowed")
         ? cleanBoolean(raw.mainBrainAllowed, "persisted custom mainBrainAllowed", { code: "MEMBER_STORE_INVALID" })
         : true,
+      avatar: Object.hasOwn(raw, "avatar")
+        ? cleanAvatar(raw.avatar, "persisted custom avatar", "MEMBER_STORE_INVALID")
+        : "",
       builtin: false,
       createdAt: cleanTimestamp(raw.createdAt, "persisted custom createdAt"),
       updatedAt: cleanTimestamp(raw.updatedAt, "persisted custom updatedAt"),
@@ -617,7 +635,10 @@ export class TeamMemberStore {
       metadata.defaultEffort = boundRuntime.defaultEffort;
       if (override) {
         for (const key of METADATA_KEYS) {
-          if (Object.hasOwn(override, key)) metadata[key] = key === "capabilities" ? [...override[key]] : override[key];
+          if (!Object.hasOwn(override, key)) continue;
+          metadata[key] = key === "capabilities"
+            ? [...(Array.isArray(override[key]) ? override[key] : [])]
+            : override[key];
         }
       }
       const member = {
@@ -625,6 +646,7 @@ export class TeamMemberStore {
         ...metadata,
         runtimeProfileId: override?.runtimeProfileId ?? runtime.id,
         mainBrainAllowed: override?.mainBrainAllowed ?? true,
+        avatar: override?.avatar === "custom" ? "custom" : "",
         builtin: true,
         createdAt: override?.createdAt ?? null,
         updatedAt: override?.updatedAt ?? null,
@@ -645,7 +667,7 @@ export class TeamMemberStore {
         defaultModel: override.defaultModel ?? null,
         defaultEffort: override.defaultEffort ?? null,
       };
-      const member = { ...override, ...metadata };
+      const member = { ...override, ...metadata, avatar: override.avatar === "custom" ? "custom" : "" };
       members.push({ ...member, ...runtimeStatus(member, byId) });
       seen.add(override.id);
     }
@@ -655,7 +677,7 @@ export class TeamMemberStore {
     ));
     for (const stored of custom) {
       if (seen.has(stored.id)) fail(`runtime catalog collides with custom member id: ${stored.id}`, "RUNTIME_CATALOG_INVALID");
-      const member = cloneMember(stored);
+      const member = { ...cloneMember(stored), avatar: stored.avatar === "custom" ? "custom" : "" };
       members.push({ ...member, ...runtimeStatus(member, byId) });
       seen.add(stored.id);
     }
@@ -722,6 +744,7 @@ export class TeamMemberStore {
         mainBrainAllowed: input.mainBrainAllowed === undefined
           ? true
           : cleanBoolean(input.mainBrainAllowed, "mainBrainAllowed"),
+        avatar: "",
         builtin: false,
         createdAt: now,
         updatedAt: now,
@@ -834,7 +857,8 @@ export class TeamMemberStore {
       const overrides = new Map(this.overrides);
       const hasOverride = METADATA_KEYS.some((key) => Object.hasOwn(override, key))
         || Object.hasOwn(override, "mainBrainAllowed")
-        || override.runtimeProfileId !== memberId;
+        || override.runtimeProfileId !== memberId
+        || override.avatar === "custom";
       if (hasOverride) overrides.set(memberId, override);
       else overrides.delete(memberId);
       const affectsCatalog = bindingChanged
@@ -846,6 +870,46 @@ export class TeamMemberStore {
         });
       }
       else await this.#commit(overrides, new Map(this.custom));
+      return this.get(memberId);
+    });
+  }
+
+  setAvatar(id, avatar) {
+    return serializeMutation(this.path, async () => {
+      await this.#refresh();
+      const memberId = cleanIdentifier(id, "member id");
+      const next = cleanAvatar(avatar, "avatar");
+      const existingCustom = this.custom.get(memberId);
+      if (existingCustom) {
+        const member = cloneMember(existingCustom);
+        if (next) member.avatar = next;
+        else delete member.avatar;
+        member.updatedAt = nextTimestamp(existingCustom.updatedAt);
+        const custom = new Map(this.custom);
+        custom.set(memberId, member);
+        await this.#commit(new Map(this.overrides), custom);
+        return this.get(memberId);
+      }
+      const { byId } = this.#runtime();
+      const existingOverride = this.overrides.get(memberId);
+      if (!byId.has(memberId) && !existingOverride) fail(`team member not found: ${memberId}`, "SOURCE_NOT_FOUND");
+      const now = nextTimestamp(existingOverride?.updatedAt);
+      const override = existingOverride
+        ? { ...existingOverride }
+        : { id: memberId, runtimeProfileId: memberId, builtin: true, createdAt: now, updatedAt: now };
+      if (Array.isArray(override.capabilities)) override.capabilities = [...override.capabilities];
+      else delete override.capabilities;
+      if (next) override.avatar = next;
+      else delete override.avatar;
+      override.updatedAt = now;
+      const overrides = new Map(this.overrides);
+      const hasOverride = METADATA_KEYS.some((key) => Object.hasOwn(override, key))
+        || Object.hasOwn(override, "mainBrainAllowed")
+        || override.runtimeProfileId !== memberId
+        || override.avatar === "custom";
+      if (hasOverride) overrides.set(memberId, override);
+      else overrides.delete(memberId);
+      await this.#commit(overrides, new Map(this.custom));
       return this.get(memberId);
     });
   }

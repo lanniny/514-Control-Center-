@@ -374,6 +374,75 @@ test("concurrent trigger is rejected per automation while different automations 
   assert.equal(created.length, 2, "concurrent duplicate must not create or charge a third run");
 });
 
+test("idle automations drain only when the control plane is quiet and not busy", async (t) => {
+  const root = await mkdtemp(resolve(appRoot, ".test-autom-idle-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const orchestrator = fakeOrchestrator();
+  orchestrator.list = () => [...orchestrator.runs.values()];
+  const store = await new AutomationStore({
+    dataRoot: root,
+    orchestrator,
+    eventStore: noopEvents,
+    tickMs: 10,
+    idleQuietMs: 60,
+    idleCooldownMs: 60,
+  }).init();
+  const first = await store.create({ name: "闲时一", prompt: "a", schedule: "idle" });
+  const second = await store.create({ name: "闲时二", prompt: "b", schedule: "idle" });
+  await store.create({ name: "手动", prompt: "c", schedule: "manual" });
+  // 定时基线=创建时刻：拨回冷却期外，模拟"早就该跑"
+  store.get(first.id).lastRunAt = new Date(Date.now() - 600_000).toISOString();
+  // second 留在冷却期内：冷却未到的闲时任务不得放量
+  store.get(second.id).lastRunAt = new Date().toISOString();
+  // 有非终态 run = 控制面繁忙，闲时任务一律不跑
+  orchestrator.runs.set("busy-run", { id: "busy-run", status: "running", createdAt: new Date().toISOString() });
+  store.start();
+  t.after(() => store.stop());
+  await new Promise((resolveTimer) => setTimeout(resolveTimer, 60));
+  assert.equal(orchestrator.created.length, 0, "控制面繁忙时不得跑闲时任务");
+  // run 刚结束=最近活动，静默窗未满仍不跑
+  orchestrator.runs.get("busy-run").status = "succeeded";
+  orchestrator.runs.get("busy-run").createdAt = new Date().toISOString();
+  await new Promise((resolveTimer) => setTimeout(resolveTimer, 30));
+  assert.equal(orchestrator.created.length, 0, "静默窗未满不得跑闲时任务");
+  // 静默窗过后放量最久未跑的 first；second 冷却未到继续压着
+  await waitFor(() => orchestrator.created.length >= 1);
+  assert.equal(store.get(first.id).lastRunId, "run-1");
+  assert.equal(store.get(second.id).lastRunId, null, "冷却期内的闲时任务不得放量");
+  // second 拨出冷却期后继续排水
+  store.get(second.id).lastRunAt = new Date(Date.now() - 600_000).toISOString();
+  await waitFor(() => orchestrator.created.length >= 2);
+  assert.equal(store.get(second.id).lastRunId, "run-2");
+  // 手动任务全程不被闲时排水触碰
+  assert.equal(store.list().find((item) => item.name === "手动").lastRunId, null);
+  await store.stop();
+  // idle 计划持久化回环
+  const reloaded = await new AutomationStore({ dataRoot: root, orchestrator, eventStore: noopEvents }).init();
+  assert.equal(reloaded.get(first.id).schedule, "idle");
+});
+
+test("idle drain stays closed when the orchestrator cannot prove quietness", async (t) => {
+  const root = await mkdtemp(resolve(appRoot, ".test-autom-idle-closed-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  // 无 list() 的 orchestrator = 无法证实空闲，fail-closed 不跑
+  const orchestrator = fakeOrchestrator();
+  const store = await new AutomationStore({
+    dataRoot: root,
+    orchestrator,
+    eventStore: noopEvents,
+    tickMs: 10,
+    idleQuietMs: 10,
+    idleCooldownMs: 10,
+  }).init();
+  const item = await store.create({ name: "闲时", prompt: "a", schedule: "idle" });
+  store.get(item.id).lastRunAt = new Date(Date.now() - 600_000).toISOString();
+  store.start();
+  t.after(() => store.stop());
+  await new Promise((resolveTimer) => setTimeout(resolveTimer, 60));
+  await store.stop();
+  assert.equal(orchestrator.created.length, 0, "无法证实空闲时不得放量闲时任务");
+});
+
 test("scheduler tick fires due automations and skips disabled/manual ones", async (t) => {
   const root = await mkdtemp(resolve(appRoot, ".test-autom-tick-"));
   t.after(() => rm(root, { recursive: true, force: true }));

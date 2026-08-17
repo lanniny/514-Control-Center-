@@ -175,6 +175,22 @@ test("grok resolves to ~/.grok/bin when PATH omits it (Phase 3 dispatch)", { ski
   assert.equal(resolved.prefixArgs.length, 0);
 });
 
+test("opencode prefers the npm exe over the PowerShell shim", { skip: process.platform !== "win32" }, async (t) => {
+  const root = await mkdtemp(resolve(appRoot, ".test-opencode-shim-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const bin = resolve(root, "node_modules", "opencode-ai", "bin");
+  await import("node:fs/promises").then(({ mkdir, writeFile }) =>
+    mkdir(bin, { recursive: true }).then(() => Promise.all([
+      writeFile(resolve(root, "opencode.ps1"), "exit 0\n"),
+      writeFile(resolve(bin, "opencode.exe"), "stub"),
+    ])),
+  );
+  const resolved = resolveCommand("opencode", { PATH: root });
+  assert.match(resolved.resolvedPath, /node_modules[\\/]opencode-ai[\\/]bin[\\/]opencode\.exe$/i);
+  assert.equal(resolved.prefixArgs.length, 0);
+  assert.notEqual(resolved.command.toLowerCase(), "powershell.exe");
+});
+
 test("kimi resolves to ~/.kimi-code/bin when PATH omits it (stale parent env block)", { skip: process.platform !== "win32" }, async (t) => {
   const home = await mkdtemp(resolve(appRoot, ".test-kimi-home-"));
   t.after(() => rm(home, { recursive: true, force: true }));
@@ -237,6 +253,9 @@ test("agent child environments expose only the selected provider allowlist", () 
     for (const key of ownKeys) assert.equal(env[key], base[key], `${provider} keeps ${key}`);
     for (const key of allSecrets.filter((key) => !ownKeys.includes(key))) {
       assert.equal(Object.hasOwn(env, key), false, `${provider} must not receive ${key}`);
+    }
+    if (provider === "opencode" && process.platform === "win32") {
+      assert.equal(env.NODE_USE_SYSTEM_CA, "1", "OpenCode on Windows must see the system CA flag");
     }
     assert.equal(Object.keys(env).some((key) => key.toLowerCase().startsWith("control_center_")), false);
     assert.equal(Object.hasOwn(env, "CODEX_THREAD_ID"), false);

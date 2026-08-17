@@ -155,11 +155,12 @@ test("the conversation stream renders completed items and tracks the running one
 });
 
 // round 只做全会话审计序号；真正的防跑飞闸是每条用户消息独立的 interaction step。
-// UI 必须同时说清总轮次与本次步骤，达到上限后仍允许在原会话发送下一条消息。
+// UI 必须同时说清总轮次与本次步骤：第六轮 slim 顶栏后，可见 pill 留「本次步骤 X/Y」，
+// 总轮次/交互序号收进同一元素的 tooltip（信息不丢，形态收敛），达到上限后仍允许在原会话发送下一条消息。
 test("the interaction budget is visible without presenting a session round cap", async () => {
   const app = await source("public/app.js");
-  assertIncludes(app, "metaParts.push(`总轮次 ${totalRounds}`);");
-  assertIncludes(app, "metaParts.push(`交互 ${interactionSeq} · 本次步骤 ${interactionStep}/${maxSteps}`);");
+  assertIncludes(app, "const metaParts = [maxSteps > 0 ? `本次步骤 ${interactionStep}/${maxSteps}` : `总轮次 ${totalRounds}`];");
+  assertIncludes(app, "`总轮次 ${totalRounds} · 交互 ${interactionSeq} · 本次步骤 ${interactionStep}/${maxSteps}`");
   assertIncludes(app, "function sendErrorText(error, run)");
   assertIncludes(app, 'if (code === "INTERACTION_STEP_LIMIT" || code === "ROUND_LIMIT")');
   assertIncludes(app, "会话没有封顶；请直接发送下一条消息继续");

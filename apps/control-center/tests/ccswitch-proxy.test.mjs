@@ -337,11 +337,16 @@ test("请求级 failover + 熔断：503 供应商打开断路器并切到下一�
   });
   let response = await call();
   assert.equal(response.status, 200);
+  const firstRequestId = response.headers.get("x-514cc-proxy-request-id");
+  assert.match(firstRequestId, /^request-[0-9a-f-]{36}$/);
+  assert.equal(response.headers.get("x-514cc-upstream-provider-id"), second.id);
   assert.equal((await response.json()).content[0].text, "fallback");
   assert.equal(failedCalls, 1);
   assert.equal(healthyCalls, 1);
   await waitFor(() => providers.current.claude === second.id, "successful failover did not persist the current provider");
   assert.equal(providers.current.claude, second.id);
+  assert.equal(proxy.requestDetail(firstRequestId).providerId, second.id);
+  assert.equal(proxy.requestDetail(firstRequestId).attempts.length, 2);
   assert.equal(proxy.health("claude").find((item) => item.providerId === first.id).state, "open");
 
   response = await call();
@@ -1421,6 +1426,52 @@ test("手动 stop 的绝对 deadline 覆盖阻塞的 stopped 事件，超时后�
   releaseStoppedEvent();
 });
 
+test("手动 stop 将已提交 rename 的 deadline 信号归一为可恢复超时", async (t) => {
+  let injectCommittedDeadline = false;
+  const { proxy } = await fixture(t, {
+    shutdownTimeoutMs: 500,
+    beforeConfigPublish() {
+      if (!injectCommittedDeadline) return;
+      throw Object.assign(new Error("injected committed publication deadline"), {
+        code: "RENAME_DEADLINE_EXCEEDED",
+        renameCommitted: true,
+      });
+    },
+  });
+  await proxy.updateConfig({ listenPort: 0 });
+  await proxy.start();
+
+  injectCommittedDeadline = true;
+  const stopped = await proxy.stop({ restore: false });
+  injectCommittedDeadline = false;
+  assert.equal(stopped.running, false);
+  assert.equal(stopped.stopped, false);
+  assert.ok(stopped.warnings.some((item) => item.code === "PROXY_STOP_TIMEOUT"));
+
+  const restarted = await proxy.start({ listenPort: 0 });
+  assert.equal(restarted.running, true);
+});
+
+test("手动 stop 不吞掉未提交 rename 的 deadline 错误", async (t) => {
+  let injectUncommittedDeadline = false;
+  const { proxy } = await fixture(t, {
+    beforeConfigPublish() {
+      if (!injectUncommittedDeadline) return;
+      throw Object.assign(new Error("injected pre-publication deadline"), {
+        code: "RENAME_DEADLINE_EXCEEDED",
+      });
+    },
+  });
+  await proxy.updateConfig({ listenPort: 0 });
+  await proxy.start();
+
+  injectUncommittedDeadline = true;
+  await assert.rejects(
+    proxy.stop({ restore: false }),
+    (error) => error?.code === "RENAME_DEADLINE_EXCEEDED" && error.renameCommitted !== true,
+  );
+});
+
 test("requestTimeoutMs 只取消当次上游并计入 provider failure，仍可 failover", async (t) => {
   const { providers, proxy } = await fixture(t, {
     fetchImpl: (url, options) => {
@@ -1457,6 +1508,53 @@ test("requestTimeoutMs 只取消当次上游并计入 provider failure，仍可 
   assert.equal(fallbackBreaker.failures, 0);
 });
 
+test("early proxy rejection exposes the same request id as its audit log", async (t) => {
+  const { proxy } = await fixture(t);
+  await proxy.updateConfig({ listenPort: 0 });
+  await proxy.start();
+
+  const response = await fetch(`${proxy.origin}/claude/v1/messages`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: "Bearer invalid-token" },
+    body: "{}",
+  });
+  assert.equal(response.status, 401);
+  const requestId = response.headers.get("x-514cc-proxy-request-id");
+  assert.match(requestId, /^request-[0-9a-f-]{36}$/);
+  assert.equal((await response.json()).error.code, "PROXY_UNAUTHORIZED");
+  const detail = proxy.requestDetail(requestId);
+  assert.equal(detail.id, requestId);
+  assert.equal(detail.success, false);
+  assert.equal(detail.errorCode, "PROXY_UNAUTHORIZED");
+  assert.equal(proxy.status().activeRequests, 0);
+});
+
+test("early proxy rejects method, JSON and app boundaries with auditable request ids", async (t) => {
+  const { proxy } = await fixture(t);
+  await proxy.updateConfig({ listenPort: 0 });
+  await proxy.start();
+  const cases = [
+    { label: "method", path: "/claude/v1/messages", method: "GET", body: undefined, status: 405, code: "METHOD_NOT_ALLOWED" },
+    { label: "json", path: "/claude/v1/messages", method: "POST", body: "{", status: 400, code: "INVALID_JSON" },
+    { label: "app", path: "/unsupported/v1/messages", method: "POST", body: "{}", status: 404, code: "UNKNOWN_PROXY_APP" },
+  ];
+  for (const item of cases) {
+    const response = await fetch(`${proxy.origin}${item.path}`, {
+      method: item.method,
+      headers: { "content-type": "application/json", "x-api-key": proxy.config.token },
+      ...(item.body === undefined ? {} : { body: item.body }),
+    });
+    assert.equal(response.status, item.status, item.label);
+    const requestId = response.headers.get("x-514cc-proxy-request-id");
+    assert.match(requestId, /^request-[0-9a-f-]{36}$/, item.label);
+    assert.equal((await response.json()).error.code, item.code, item.label);
+    const detail = proxy.requestDetail(requestId);
+    assert.equal(detail.id, requestId, item.label);
+    assert.equal(detail.success, false, item.label);
+    assert.equal(detail.errorCode, item.code, item.label);
+  }
+});
+
 test("限额在发请求前执行：0 USD 日限额直接拒绝且不触达上游", async (t) => {
   let calls = 0;
   const upstream = await listen((request, response) => {
@@ -1476,6 +1574,71 @@ test("限额在发请求前执行：0 USD 日限额直接拒绝且不触达上�
     body: JSON.stringify({ model: "m", messages: [{ role: "user", content: "x" }], max_tokens: 1 }),
   });
   assert.equal(response.status, 429);
+  const requestId = response.headers.get("x-514cc-proxy-request-id");
+  assert.match(requestId, /^request-[0-9a-f-]{36}$/);
   assert.equal(calls, 0);
   assert.equal((await response.json()).error.code, "PROVIDER_LIMIT_REACHED");
+  const detail = proxy.requestDetail(requestId);
+  assert.equal(detail.id, requestId);
+  assert.equal(detail.success, false);
+  assert.equal(detail.errorCode, "PROVIDER_LIMIT_REACHED");
+});
+
+test("usage overview counts failures and does not drop successful request totals", async (t) => {
+  const { proxy } = await fixture(t);
+  const now = Date.now();
+  proxy.logs.push(
+    {
+      id: "ok-1",
+      startedAt: new Date(now - 3_600_000).toISOString(),
+      success: true,
+      app: "claude",
+      model: "claude-sonnet",
+      providerId: "prov-a",
+      inputTokens: 100,
+      outputTokens: 50,
+      costUsd: 0.02,
+      durationMs: 400,
+    },
+    {
+      id: "fail-1",
+      startedAt: new Date(now - 1_800_000).toISOString(),
+      success: false,
+      app: "claude",
+      model: "claude-sonnet",
+      providerId: "prov-a",
+      durationMs: 1200,
+    },
+  );
+  const summary = proxy.usageSummary({ days: 1 });
+  assert.equal(summary.requests, 1);
+  assert.equal(summary.failedRequests, 1);
+  assert.equal(summary.totalRequests, 2);
+  assert.equal(summary.tokens, 150);
+  assert.equal(summary.costUsd, 0.02);
+  assert.ok(Math.abs(summary.successRate - 0.5) < 1e-9);
+  assert.ok(summary.avgDurationMs > 0);
+  const overview = proxy.usageOverview({ days: 1 });
+  assert.equal(overview.source, "ccswitch-proxy");
+  assert.ok(overview.trends.length >= 20);
+  assert.equal(overview.models[0].key, "claude-sonnet");
+  assert.equal(overview.models[0].failed, 1);
+  assert.equal(overview.logs.length, 2);
+  assert.equal(overview.logs[0].id, "fail-1");
+  assert.equal(overview.logs[1].inputTokens, 100);
+  assert.equal(overview.logs[1].secret, undefined);
+  assert.deepEqual(Object.keys(overview.logs[1]).sort(), [
+    "app",
+    "costUsd",
+    "durationMs",
+    "httpStatus",
+    "id",
+    "inputTokens",
+    "model",
+    "outputTokens",
+    "providerId",
+    "providerName",
+    "startedAt",
+    "success",
+  ]);
 });

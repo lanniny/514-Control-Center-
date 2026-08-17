@@ -268,18 +268,33 @@ async function inspect(name, viewport, theme) {
   const { page, errors } = await openPage({ viewport, theme, route: "config/providers" });
   await waitForTopology(page);
   const screenshots = [];
-  for (const surface of ["providers", "capabilities", "sources"]) {
+  for (const surface of ["providers", "local-runtime", "capabilities", "hooks", "sources"]) {
     await page.locator(`[data-config-surface="${surface}"]`).click();
     await assertSurface(page, surface);
+    if (surface === "local-runtime") await page.waitForSelector("#ccswitch-workbench .ccs-tabs");
+    if (surface === "hooks") await page.waitForSelector("#hooks-workbench .hooks-heading");
     if (surface === "capabilities") await page.waitForSelector("#cap-skills-body tr");
     const file = `${name}-${theme}-${surface}.png`;
     await page.screenshot({ path: resolve(outputRoot, file), fullPage: true, animations: "disabled" });
     screenshots.push(file);
+    if (surface === "capabilities") {
+      await page.locator("#cap-workspace-mcp-tab").click();
+      await page.waitForSelector("#cap-workspace-mcp:not([hidden])");
+      const mcpFile = `${name}-${theme}-capabilities-mcp.png`;
+      await page.screenshot({ path: resolve(outputRoot, mcpFile), fullPage: true, animations: "disabled" });
+      screenshots.push(mcpFile);
+      await page.locator("#cap-workspace-skills-tab").click();
+      await page.waitForSelector("#cap-workspace-skills:not([hidden])");
+    }
   }
 
   await page.locator('[data-config-surface="capabilities"]').focus();
   await page.keyboard.press("ArrowRight");
+  await assertSurface(page, "hooks");
+  await page.keyboard.press("ArrowRight");
   await assertSurface(page, "sources");
+  await page.keyboard.press("ArrowLeft");
+  await assertSurface(page, "hooks");
   await page.keyboard.press("ArrowLeft");
   await assertSurface(page, "capabilities");
 
@@ -372,6 +387,8 @@ async function inspectFaultDomainIsolation() {
     requireQa(skillDegraded.skillToggleCount > 0 && skillDegraded.enabledSkillToggleCount === 0, "corrupt Skill configuration did not disable every Skill checkbox", skillDegraded);
     requireQa(skillDegraded.mcpOperation?.disabled === false, "Skill fault incorrectly froze the writable MCP operation", skillDegraded);
 
+    await page.locator("#cap-workspace-mcp-tab").click();
+    await page.waitForSelector("#cap-workspace-mcp:not([hidden]) .cap-mcp-card, #cap-workspace-mcp:not([hidden]) .cap-empty");
     const mcpToggle = page.locator(`[data-mcp-toggle="${QA_MCP_NAME}::disable"]`);
     requireQa(await mcpToggle.count() === 1, "writable MCP fixture action is missing", skillDegraded);
     await mcpToggle.click();

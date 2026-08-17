@@ -8,6 +8,13 @@ import { createControlCenter, validateRuntimeGraph } from "../src/app.mjs";
 const appRoot = fileURLToPath(new URL("..", import.meta.url));
 const sourceRepo = resolve(appRoot, "../..");
 
+test("runtime reload only commits a catalog transition after a live swap", async () => {
+  const source = await readFile(resolve(appRoot, "src/app.mjs"), "utf8");
+  assert.match(source, /const catalogCommitted = Boolean\(activation\?\.status === "reloaded" \|\| swapped\);/);
+  assert.match(source, /catalogGuard\?\.release\(\{\s*\n\s*committed: catalogCommitted,/);
+  assert.match(source, /activation: activation \?\? \(swapped \? \{ status: "reloaded" \} : null\)/);
+});
+
 test("runtime graph rejects unauditable or unknown routing references", async () => {
   const [models, routing, permissions] = await Promise.all([
     readFile(resolve(sourceRepo, "config/control-center/models.json"), "utf8").then(JSON.parse),

@@ -1,0 +1,1361 @@
+/**
+ * 控制台形态收敛层（console-form）
+ * 参考桌面 agent 台形态（2026-08-16 LO 供图）：扁平单行时间线（动词 + mono 目标 +
+ * 彩色 diff 统计 + 右置时间）、紧凑左栏（导航行 + kbd 提示）、pill 化 composer 底栏。
+ * 颜色一律走 tokens.css 令牌，亮暗双主题自动跟随；本层只改形态与密度。
+ * 加载顺序固定在 experience-polish.css 之后——同优先级靠后声明覆盖。
+ */
+
+/* ==========================================================================
+ * 左栏：操作行（新建任务 / 搜索 / 自动化 / 技能）+ kbd 提示
+ * ========================================================================== */
+
+.run-rail .rail-newtask {
+  display: grid;
+  gap: 1px;
+}
+
+.run-rail .rail-newtask .newtask-button {
+  min-height: 30px;
+  padding: 0 10px;
+  gap: 9px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+.run-rail .rail-newtask .newtask-button .icon {
+  width: 15px;
+  height: 15px;
+}
+
+.run-rail .rail-newtask .newtask-button span {
+  flex: 1 1 auto;
+  text-align: left;
+}
+
+.rail-kbd {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 1px 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-soft);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 9.5px;
+  line-height: 1.4;
+  opacity: 0.75;
+}
+
+.run-rail .newtask-button:hover .rail-kbd {
+  opacity: 1;
+}
+
+/* ==========================================================================
+ * 左栏：会话行单行化（参考：状态点 + 标题 + 右侧相对时间）+ 底部署名行拍平
+ * ========================================================================== */
+
+.run-rail .rail-run-button {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  padding-top: 5px;
+  padding-bottom: 5px;
+  border-radius: 8px;
+}
+
+.run-rail .rail-run-button > strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 状态词由状态点表达（色调=语义），行尾只留相对时间——参考形态的时间徽章 */
+.run-rail .rail-run-sub {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  font-size: 10.5px;
+}
+
+.run-rail .rail-run-sub .rail-run-state {
+  display: none;
+}
+
+.run-rail .rail-run-sub .rail-run-time {
+  color: var(--text-soft);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px;
+}
+
+.run-rail .account-dock {
+  border-radius: 8px;
+}
+
+/* ==========================================================================
+ * 会话头：拍成一条 slim 标题栏——标题左、状态 pill 右（参考顶栏形态）
+ * ========================================================================== */
+
+#view-workbench .conversation-heading {
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+#view-workbench .conversation-heading .conversation-heading-main {
+  min-width: 0;
+}
+
+#view-workbench .conversation-heading h2 {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+/* 状态 pill：路由/后端近况右置，mono 小字（参考「后端：…」胶囊） */
+#view-workbench #conversation-meta {
+  margin-left: auto;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 46%;
+  padding: 2px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-muted);
+  color: var(--text-soft);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#view-workbench .conversation-heading .icon-button,
+#view-workbench .conversation-heading .account-heading-chip {
+  width: 26px;
+  height: 26px;
+}
+
+/* ==========================================================================
+ * 时间线：居中阅读栏 + 行距收紧
+ * ========================================================================== */
+
+.conversation-stream {
+  padding: 14px 20px 20px;
+}
+
+.conversation-stream > * {
+  max-width: 768px;
+}
+
+/* 消息行：头像缩小、行距收紧——参考形态无头像槽，这里保留多 agent 身份但降噪 */
+.conversation-stream .message-row {
+  margin-bottom: 14px;
+}
+
+.conversation-stream .message-avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  font-size: 11px;
+}
+
+.conversation-stream .message-head {
+  font-size: 12px;
+}
+
+.conversation-stream .message-body {
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+/* ==========================================================================
+ * 过程行：卡片 → 扁平单行（参考「已编辑 file +1 −1」「已执行 cmd」形态）
+ * ========================================================================== */
+
+.process-card {
+  margin: 0 0 1px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  font-size: 12px;
+}
+
+.process-card.is-error {
+  background: color-mix(in srgb, var(--rose-soft, rgba(224, 24, 77, 0.08)) 55%, transparent);
+}
+
+.process-card > summary {
+  gap: 7px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.process-card > summary:hover {
+  background: var(--surface-hover, rgba(127, 127, 127, 0.08));
+}
+
+/* 动词（已编辑/已执行/已新增…）：正文字重，与 mono 目标形成层次 */
+.process-verb {
+  flex: 0 0 auto;
+  color: var(--text);
+  font-weight: 560;
+}
+
+.process-card .process-summary-text {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.process-card.is-error .process-summary-text {
+  color: var(--text);
+}
+
+/* diff 统计：+添绿 / −删红，mono 小号，跟随 summary 右缘 */
+.process-diffstat {
+  flex: 0 0 auto;
+  display: inline-flex;
+  gap: 6px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  font-style: normal;
+  line-height: 1.5;
+}
+
+.process-diffstat em {
+  font-style: normal;
+}
+
+.process-diffstat .is-add {
+  color: var(--emerald, #2fa37c);
+}
+
+.process-diffstat .is-del {
+  color: var(--rose, #d95f4b);
+}
+
+/* 展开体：左缘细线串起父子（参考展开缩进线），去掉卡片顶分隔 */
+.process-card .process-body {
+  margin: 2px 0 6px 20px;
+  padding: 4px 10px 8px;
+  border-top: 0;
+  border-left: 1px solid var(--border);
+  border-radius: 0 0 0 6px;
+}
+
+.process-card[open] > summary {
+  border-radius: 8px;
+}
+
+/* 旁白/推理摘要：同形拍平（label 与首段同行） */
+.process-note {
+  margin: 0 0 1px;
+  padding: 3px 8px;
+  border-radius: 8px;
+  font-size: 12px;
+}
+
+.process-note-body > p:first-of-type,
+.process-note-body > *:first-child > p:first-of-type {
+  display: inline;
+  margin: 0;
+}
+
+.process-note-body > p + p {
+  margin-top: 4px;
+}
+
+/* 治理注记 / 内联审批：随阅读栏居中（LO 2026-08-16 实拍纠偏——第一轮写的 margin-left:0
+ * 盖掉了 .conversation-stream > * 的 margin-inline:auto 左半，元素被挤成贴左；头像槽 40px
+ * 缩进在居中列里同样无意义，统一 auto 居中） */
+.gov-note,
+.approval-inline {
+  margin-inline: auto;
+}
+
+/* 轮次分隔：styles.css 的 margin shorthand（14px 0 10px）特异性高于 > * 层的 margin-inline:auto，
+ * 一直把左右 margin 钉成 0——贴左是存量 bug，这里按特异性和加载顺序双优纠回居中 */
+.conversation-stream .turn-divider {
+  margin-inline: auto;
+}
+
+/* ==========================================================================
+ * Composer：参考底栏形态——圆角壳 + pill 选择器 + 圆形发送钮
+ * ========================================================================== */
+
+.task-composer {
+  padding: 8px 20px 14px;
+  border-top: 0;
+  background: transparent;
+}
+
+.task-composer .composer-shell {
+  width: min(var(--codex-reading-width, 780px), 100%);
+  padding: 10px 12px 8px;
+  border-radius: 12px;
+  box-shadow: var(--shadow-low, 0 1px 3px rgba(0, 0, 0, 0.08));
+}
+
+.composer-shell .composer-footer {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding-top: 6px;
+}
+
+.composer-attach {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.attach-menu {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 6px);
+  z-index: 30;
+  min-width: 168px;
+  padding: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: var(--shadow-menu);
+}
+
+.attach-menu-row {
+  display: flex;
+  width: 100%;
+  min-height: 32px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.attach-menu-row:hover {
+  background: var(--surface-hover, rgba(127, 127, 127, 0.08));
+}
+
+.attach-menu-row .icon {
+  width: 14px;
+  height: 14px;
+  color: var(--text-soft);
+}
+
+/* 模型 / Effort / 权限：宿主不描边，可见边只画在 pill 上，避免双层幽灵框 */
+.composer-footer .pick-menu-host,
+.composer-footer .permission-pick {
+  position: relative;
+  flex: 1 1 140px;
+  min-width: 0;
+  max-width: 240px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.composer-footer .permission-pick {
+  flex: 0 1 auto;
+  max-width: none;
+}
+
+.composer-footer .pick-menu-host:hover,
+.composer-footer .permission-pick:hover {
+  border-color: transparent;
+  background: transparent;
+}
+
+.pick-pill,
+.composer-footer .permission-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  width: 100%;
+  min-width: 0;
+  min-height: 26px;
+  padding: 2px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  font-size: 11.5px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.pick-pill:hover:not(:disabled),
+.composer-footer .permission-pill:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--surface-hover, rgba(127, 127, 127, 0.08));
+}
+
+.pick-pill:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.pick-pill-kicker {
+  flex: 0 0 auto;
+  color: var(--text-soft);
+  font-size: 10.5px;
+}
+
+.pick-pill-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pick-pill .chevron,
+.composer-footer .permission-pill .chevron {
+  flex: 0 0 auto;
+  width: 12px;
+  height: 12px;
+  color: var(--text-muted);
+}
+
+.pick-menu {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 6px);
+  z-index: 32;
+  min-width: max(100%, 240px);
+  max-width: min(420px, 82vw);
+  max-height: min(320px, 50vh);
+  overflow: auto;
+  padding: 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--shadow-menu);
+}
+
+.pick-menu-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  margin: 2px 0;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12.5px;
+  line-height: 1.35;
+  text-align: left;
+  cursor: pointer;
+}
+
+.pick-menu-row:hover,
+.pick-menu-row:focus-visible {
+  border-color: var(--rose-line);
+  background: var(--rose-soft);
+  outline: none;
+}
+
+.pick-menu-row.is-active {
+  border-color: var(--rose-line);
+}
+
+.pick-menu-copy {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pick-menu-check {
+  flex: 0 0 auto;
+  display: inline-flex;
+  color: var(--rose);
+}
+
+.composer-footer .composer-session-controls {
+  flex: 0 0 auto;
+  gap: 4px;
+  min-height: 26px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-soft);
+  font-size: 11px;
+}
+
+.composer-footer .composer-session-controls .icon {
+  width: 12px;
+  height: 12px;
+}
+
+/* 参考底栏无键位说明——藏掉文字提示（title tooltip 仍在） */
+.composer-footer .key-hint {
+  display: none;
+}
+
+.composer-shell .send-button {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+}
+
+/* 附加钮与发送钮视觉对齐 */
+.composer-footer .attach-button {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+}
+
+/* ==========================================================================
+ * 窄屏回退：状态 pill 让位标题
+ * ========================================================================== */
+
+@media (max-width: 900px) {
+  #view-workbench #conversation-meta {
+    display: none;
+  }
+
+  .conversation-stream > * {
+    max-width: 100%;
+  }
+}
+
+@media (max-width: 560px) {
+  .composer-shell .composer-footer {
+    flex-wrap: wrap;
+  }
+
+  .composer-footer .model-pick,
+  .composer-footer .permission-pick {
+    flex: 1 1 calc(50% - 8px);
+    max-width: none;
+  }
+
+  .composer-footer .composer-session-controls {
+    order: 5;
+  }
+}
+
+/* ==========================================================================
+ * 会话头 chips + 更改 pill（参考桌面 agent 台顶栏，LO 2026-08-16 供图第二轮）
+ * 标题后随「📁 项目 🌿 分支 …」，右侧「更改 +N −N」——全部发丝边胶囊 + mono 小字
+ * ========================================================================== */
+
+#view-workbench .conversation-chips {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.conv-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 180px;
+  min-height: 22px;
+  padding: 1px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-soft);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10.5px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+button.conv-chip {
+  cursor: pointer;
+}
+
+button.conv-chip:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-hover, rgba(127, 127, 127, 0.08));
+  color: var(--text);
+}
+
+.conv-chip .icon {
+  width: 11px;
+  height: 11px;
+  flex: 0 0 auto;
+}
+
+.conv-chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.conv-chip.is-loading {
+  border-style: dashed;
+  color: var(--text-soft);
+  opacity: 0.7;
+}
+
+#view-workbench .conversation-overflow {
+  flex: 0 0 auto;
+  margin-left: 2px;
+}
+
+/* 更改 pill：顶栏右侧的产物 diff 总览（参考「更改 +20399 −1997」） */
+#changes-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  min-height: 24px;
+  padding: 2px 11px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface-muted);
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+#changes-pill:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+#changes-pill .icon {
+  width: 12px;
+  height: 12px;
+}
+
+#changes-pill em {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10.5px;
+  font-style: normal;
+}
+
+#changes-pill .is-add {
+  color: var(--emerald, #2fa37c);
+}
+
+#changes-pill .is-del {
+  color: var(--rose, #d95f4b);
+}
+
+/* ==========================================================================
+ * Composer 顶行：项目 chip 补 ▾ 形（可点击更换）；分支 chip 同形只读（参考「🌿 main」）
+ * ========================================================================== */
+
+.composer-cwd .chip-caret {
+  width: 10px;
+  height: 10px;
+  opacity: 0.6;
+}
+
+.composer-branch {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 160px;
+  overflow: hidden;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 99px;
+  background: transparent;
+  color: var(--text-soft);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-branch .icon {
+  width: 10px;
+  height: 10px;
+  flex: 0 0 auto;
+}
+
+/* ==========================================================================
+ * 时间线左缘折叠沟槽（VSCode folding gutter 式）：
+ * 行左 -16px 的小横杠，悬停显实；消息行折叠后内容收一行 + 渐隐；过程卡翻 details.open
+ * ========================================================================== */
+
+.conversation-stream .message-row,
+.conversation-stream .process-card {
+  position: relative;
+}
+
+.row-gutter {
+  position: absolute;
+  top: 8px;
+  left: -15px;
+  width: 12px;
+  height: 14px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+/* 横杠本体：居中 8px 发丝线 */
+.row-gutter::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 2px;
+  width: 8px;
+  height: 1.5px;
+  border-radius: 1px;
+  background: var(--text-soft);
+  transform: translateY(-50%);
+}
+
+.message-row:hover .row-gutter,
+.process-card:hover > .row-gutter,
+.message-row.is-collapsed .row-gutter {
+  opacity: 0.55;
+}
+
+.row-gutter:hover {
+  opacity: 1 !important;
+}
+
+/* 折叠态：内容压成一行并渐隐，头像缩小——行还在（可再点开），但不再占阅读面 */
+.message-row.is-collapsed .message-avatar {
+  transform: scale(0.82);
+  opacity: 0.75;
+}
+
+.message-row.is-collapsed .message-content {
+  max-height: 22px;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to right, #000 62%, transparent);
+  mask-image: linear-gradient(to right, #000 62%, transparent);
+}
+
+.message-row.is-collapsed .message-head time {
+  display: none;
+}
+
+/* ==========================================================================
+ * 欢迎区 tip 可关闭（参考形态 tip 条右侧 ×）
+ * ========================================================================== */
+
+/* 参考欢迎态（LO 2026-08-16 供图：问候 + 提示条 + 快捷卡）补回 tip 与模板卡——
+ * codex-desktop.css 曾整体 display:none !important 走极简风；本层以更后加载 + 更高
+ * 优先级恢复。星图保持隐藏：composer 成员条已承担团队呈现，欢迎区高度向参考形态收敛。 */
+.welcome-state .welcome-tip {
+  display: inline-flex !important;
+}
+
+.welcome-state .welcome-section-label {
+  display: block !important;
+}
+
+.welcome-state .welcome-cats {
+  display: flex !important;
+}
+
+.welcome-state .welcome-templates {
+  display: flex !important;
+}
+
+.welcome-tip {
+  position: relative;
+}
+
+.welcome-tip-dismiss {
+  flex: 0 0 auto;
+  align-self: center;
+  margin-left: 4px;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-soft);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.55;
+}
+
+.welcome-tip-dismiss:hover {
+  opacity: 1;
+  background: var(--surface-hover, rgba(127, 127, 127, 0.12));
+  color: var(--text);
+}
+
+/* ==========================================================================
+ * 审批卡 runBuild 摘要 + 技术详情折叠（LO 2026-08-16 实拍第三轮：
+ * 20+ 行裸字段墙收成 4 项人话摘要，全量字段进 details 保持审计可见）
+ * ========================================================================== */
+
+.approval-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin: 0 0 8px;
+}
+
+.approval-fact {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 11.5px;
+}
+
+.approval-fact > span {
+  flex: 0 0 auto;
+  color: var(--text-soft);
+}
+
+.approval-fact > code {
+  font-family: var(--mono);
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.approval-tech {
+  margin: 0 0 8px;
+}
+
+.approval-tech > summary {
+  cursor: pointer;
+  color: var(--text-soft);
+  font-size: 11px;
+  user-select: none;
+}
+
+.approval-tech > summary:hover {
+  color: var(--text);
+}
+
+.approval-tech[open] > summary {
+  margin-bottom: 4px;
+}
+
+/* ==========================================================================
+ * 收敛层·第五轮：进行态过程行 + 流尾步进进度条（2026-08-17）
+ * 参考 Codex 桌面「运行了命令…」转圈行与「第 1/4 步 · 2 个文件已更改 +150 −24」。
+ * 数据 = codex item/started 活跃记账 + per-interaction 文件变更累加，无卡片壳、无假活。
+ * 居中纪律（第四轮教训）：直接子级只调 margin-block，inline 方向留给上游
+ * .conversation-stream > * 的 margin-inline:auto，绝不写 margin-left/right。
+ * ========================================================================== */
+
+.live-process-rows {
+  margin-block: 2px;
+}
+
+.live-process-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.live-process-row .process-summary-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.live-process-row .live-elapsed {
+  flex: 0 0 auto;
+  color: var(--text-soft);
+  font-size: 11px;
+}
+
+.live-process-spin {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-soft);
+}
+
+/* 步进进度条：与过程行同律的扁平行；有文件段时可展开 per-file 明细 */
+.turn-progress {
+  margin-block: 2px;
+  font-size: 12px;
+}
+
+.turn-progress-line,
+.turn-progress > summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  line-height: 1.5;
+  color: var(--text-muted);
+  list-style: none;
+}
+
+.turn-progress > summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.turn-progress > summary::-webkit-details-marker {
+  display: none;
+}
+
+.turn-progress > summary:hover {
+  background: var(--surface-hover, rgba(127, 127, 127, 0.08));
+}
+
+.turn-progress-text {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.turn-progress-sep {
+  color: var(--text-soft);
+}
+
+.turn-progress > summary .process-diffstat {
+  margin-left: 2px;
+}
+
+.turn-progress-caret {
+  flex: 0 0 auto;
+  display: inline-flex;
+  margin-left: auto;
+  color: var(--text-soft);
+  transition: transform var(--dur-fast, 100ms) ease;
+}
+
+.turn-progress-caret .icon {
+  width: 12px;
+  height: 12px;
+}
+
+.turn-progress[open] .turn-progress-caret {
+  transform: rotate(90deg);
+}
+
+/* per-file 明细：左缘细线串父子，与过程卡展开体同形态（嵌套层，非居中直接子级） */
+.turn-progress-files {
+  margin: 2px 0 6px 20px;
+  padding: 2px 10px 6px;
+  border-left: 1px solid var(--border);
+  display: grid;
+  gap: 2px;
+}
+
+.turn-progress-file {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.turn-progress-file > code {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.turn-progress-file .process-diffstat {
+  margin-left: auto;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .turn-progress-caret {
+    transition: none;
+  }
+}
+
+/* ==========================================================================
+ * 收敛层·第六轮：会话头单行 slim 标题栏（2026-08-17，LO 供图 Codex 桌面顶栏：
+ * 图标 + 标题 + … 一条行，下发丝分隔线，右侧只有图标）
+ * 标题/项目/分支 chips/步骤 pill 同一行；总轮次等审计段收进 pill tooltip。
+ * ========================================================================== */
+
+#view-workbench .conversation-heading .conversation-heading-main {
+  flex-direction: row;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0 8px;
+}
+
+/* 参考顶栏的线程图标（红圈标记处）：无色小 glyph，与标题同基线 */
+#view-workbench .conversation-title-glyph {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-soft);
+}
+
+#view-workbench .conversation-title-glyph .icon {
+  width: 14px;
+  height: 14px;
+}
+
+/* 标题压成单行省略：覆盖 styles.css 的两行 line-clamp 与衬线余量 */
+#view-workbench .conversation-heading h2 {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin: 0;
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  -webkit-line-clamp: unset;
+}
+
+/* chips 与溢出菜单随行（可压到只剩 … 按钮，container overflow 裁剪内部 chip）；
+   参与 CLI 行（极少显示）才换行 */
+#view-workbench .conversation-chips {
+  flex: 0 1 auto;
+  min-width: 26px;
+}
+
+#view-workbench .conversation-agents:not([hidden]) {
+  flex-basis: 100%;
+  margin-top: 4px;
+}
+
+/* 步骤 pill 收紧：文本只剩「本次步骤 X/Y」，上限收窄（audit 段在 tooltip） */
+#view-workbench #conversation-meta {
+  max-width: 30%;
+}
+
+/* 窄屏一行到底：wrap 的判定用 flex base size（标题未收缩前的全文宽），长标题会把 chips
+ * 挤到第二行——窄屏禁 wrap + 隐藏参与 CLI 行（团队呈现由 composer 成员条承担），
+ * 标题照常省略、chips 裁剪到只剩 …。meta 隐藏由上游 900px 既有规则承担。 */
+@media (max-width: 900px) {
+  #view-workbench .conversation-heading .conversation-heading-main {
+    flex-wrap: nowrap;
+  }
+
+  #view-workbench .conversation-heading .conversation-agents {
+    display: none;
+  }
+}
+
+/* ── 控制台形态 · 第七轮：窗口框与 topbar 合一（Codex 式 slim 横带） ──────────────────
+ * 桌面壳（is-desktop-shell 由 initializeWindowChrome 在 Tauri 环境注入）下：
+ * 原生标题栏已由构建期 .decorations(false) 移除，topbar 兼任窗口框——高度收敛，
+ * 右缘挂最小化/最大化/关闭三钮。浏览器模式不渲染三钮（hidden 优先），样式零影响。 */
+.is-desktop-shell {
+  --topbar-height: 44px;
+}
+
+.window-controls {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+  margin-left: 6px;
+}
+
+.window-controls[hidden] {
+  display: none;
+}
+
+.window-control-button {
+  display: inline-flex;
+  width: 34px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-soft);
+  cursor: default;
+}
+
+.window-control-button .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.window-control-button:hover {
+  background: var(--surface-muted);
+  color: var(--text-strong);
+}
+
+.window-control-button:active {
+  background: var(--border);
+}
+
+/* 关闭钮 hover 玫瑰红（Windows 惯例），其余两钮保持中性 */
+.window-control-button.is-close:hover {
+  background: var(--rose-bright);
+  color: #fff;
+}
+
+/* 拖拽区手感：topbar 空白处禁止文本选择，避免拖动时选中面包屑文字 */
+.is-desktop-shell .topbar {
+  user-select: none;
+}
+
+.is-desktop-shell .topbar-nav,
+.is-desktop-shell .topbar-actions {
+  user-select: auto;
+}
+
+/* ── 控制台形态 · 第八轮：rail/会话栏交界圆角卡片（LO 供图圈点，Codex 式） ─────────────
+ * 会话栏左上角 10px 圆角，凹口透出 rail 磨砂底色；rail 右缘发丝线与 inset 高光一并去掉，
+ * 分隔交给色差（与 Codex 桌面一致）。源序：本文件在 codex-desktop.css 之后，同特异性稳压。 */
+.atelier .conversation-pane {
+  border-top-left-radius: 10px;
+}
+
+/* 保险丝 + 并入卡片：页签条不再自成 muted 横带（同日二轮修正）；圆角值跟随 pane（第九轮 12px） */
+.atelier .conv-tabs {
+  border-top-left-radius: 12px;
+  background: transparent;
+}
+
+.atelier .run-rail {
+  border-right: 0;
+  box-shadow: none;
+}
+
+/* 注：第八轮曾在此垫 ::before 凹口补丁；第九轮工作台壳整体铺 chrome 底色后，
+ * 缺口天然透出同一色调，补丁删除（补丁与壳底色同配方，留着也是不可见的死代码）。 */
+
+/* ── 控制台形态 · 第九轮：L 形 chrome 统一色 + 对话卡片立体浮起 + 应用菜单列 ──────────
+ * LO 指令：左栏与上栏统一颜色；对话区用立体效果与 chrome 区别；补回 frameless 丢掉的
+ * 菜单栏功能（≡ ‹ › 文件/编辑/视图/帮助，标记在 index.html topbar，逻辑在 app.js
+ * initializeChromeMenus）。源序：本文件晚于 codex-desktop.css，同特异性稳压。 */
+.chrome-menus {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+}
+
+.chrome-icon-button {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-soft);
+  cursor: pointer;
+  transition:
+    background var(--dur-fast, 100ms) var(--ease-out, ease),
+    color var(--dur-fast, 100ms) var(--ease-out, ease),
+    transform var(--dur-fast, 100ms) var(--ease-out, ease),
+    opacity var(--dur-fast, 100ms) var(--ease-out, ease);
+}
+
+.chrome-icon-button .icon {
+  display: block;
+  transition: transform var(--dur-med, 150ms) var(--ease-out, ease);
+}
+
+.chrome-icon-button:hover:not(:disabled) {
+  background: var(--sidebar-hover);
+  color: var(--text-strong);
+}
+
+.chrome-icon-button:active:not(:disabled) {
+  transform: scale(0.92);
+}
+
+.chrome-icon-button:disabled {
+  opacity: 0.38;
+  cursor: default;
+}
+
+#chrome-nav-back:hover:not(:disabled) .icon {
+  transform: translateX(-1.5px);
+}
+
+#chrome-nav-forward:hover:not(:disabled) .icon {
+  transform: translateX(1.5px);
+}
+
+#chrome-rail-toggle .chrome-rail-glyph-bar,
+#chrome-rail-toggle .chrome-rail-glyph-hint {
+  transform-box: view-box;
+  transform-origin: 12px 12px;
+  transition:
+    transform 280ms cubic-bezier(0.32, 0.72, 0, 1),
+    opacity 200ms ease;
+}
+
+#chrome-rail-toggle .chrome-rail-glyph-hint {
+  opacity: 0;
+  transform: translateX(-3px);
+}
+
+#chrome-rail-toggle[aria-pressed="true"] .chrome-rail-glyph-bar {
+  opacity: 0;
+  transform: translateX(-6px);
+}
+
+#chrome-rail-toggle[aria-pressed="true"] .chrome-rail-glyph-hint {
+  opacity: 1;
+  transform: translateX(0);
+}
+
+#chrome-nav-back.is-fired .icon {
+  animation: chrome-nav-nudge-left 280ms var(--ease-out, ease);
+}
+
+#chrome-nav-forward.is-fired .icon {
+  animation: chrome-nav-nudge-right 280ms var(--ease-out, ease);
+}
+
+#chrome-rail-toggle.is-fired .chrome-rail-glyph {
+  animation: chrome-rail-pulse 280ms var(--ease-out, ease);
+}
+
+@keyframes chrome-nav-nudge-left {
+  0%, 100% { transform: translateX(0); }
+  45% { transform: translateX(-3px); }
+}
+
+@keyframes chrome-nav-nudge-right {
+  0%, 100% { transform: translateX(0); }
+  45% { transform: translateX(3px); }
+}
+
+@keyframes chrome-rail-pulse {
+  0%, 100% { transform: translateX(0); }
+  40% { transform: translateX(-2px) scale(0.94); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chrome-icon-button,
+  .chrome-icon-button .icon,
+  .atelier .workbench-shell,
+  .atelier .conversation-pane {
+    transition: none;
+  }
+
+  .chrome-icon-button:active:not(:disabled),
+  #chrome-nav-back:hover:not(:disabled) .icon,
+  #chrome-nav-forward:hover:not(:disabled) .icon {
+    transform: none;
+  }
+
+  #chrome-rail-toggle .chrome-rail-glyph-bar,
+  #chrome-rail-toggle .chrome-rail-glyph-hint {
+    transition: none;
+  }
+
+  #chrome-nav-back.is-fired .icon,
+  #chrome-nav-forward.is-fired .icon,
+  #chrome-rail-toggle.is-fired .chrome-rail-glyph {
+    animation: none;
+  }
+}
+
+.chrome-menu-label {
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-soft);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+.chrome-menu-label:hover {
+  background: var(--sidebar-hover);
+  color: var(--text-strong);
+}
+
+.chrome-menu-divider {
+  width: 1px;
+  height: 16px;
+  margin: 0 4px;
+  background: var(--border);
+}
+
+/* 上栏与左栏统一：实色 var(--sidebar)，与 experience-polish 压平后的 rail 完全一致
+ * （曾用 62% color-mix 磨砂，rail 却是实色，比色永远无法统一——统一优先于透光，
+ *  磨砂纵深改由对话卡片浮起承担）。backdrop-filter 不再声明，回落至 polish 的 none。 */
+body.atelier .topbar {
+  background: var(--sidebar);
+  /* L 形 chrome 一体化：底发丝线会把上栏与左栏/壳切成两层（Codex 参照无线），去掉 */
+  border-bottom: 0;
+}
+
+/* 工作台壳铺 chrome 底色：卡片三边缝隙与圆角缺口透出同一色调（取代八轮 ::before 补丁） */
+.atelier .workbench-shell {
+  background: var(--sidebar);
+  transition: grid-template-columns 280ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+/* 对话卡片立体浮起：顶部 8px 缝隙 + 投影；右/下不留空贴齐窗口边缘（LO 第九轮追加指令），
+ * 圆角只留左上 12px——Codex 式交界签名角；右/下圆角会在窗缘与状态栏上切出底色缺口，不用 */
+.atelier .conversation-pane {
+  margin: 8px 0 0;
+  border-radius: 12px 0 0 0;
+  box-shadow: 0 1px 2px rgba(59, 48, 38, 0.06), 0 10px 28px rgba(59, 48, 38, 0.10);
+  transition:
+    margin-left 280ms cubic-bezier(0.32, 0.72, 0, 1),
+    border-radius 280ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+[data-theme="dark"] .atelier .conversation-pane {
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.28), 0 10px 28px rgba(0, 0, 0, 0.38);
+}
+
+/* 左栏当抽屉：轨宽动画 + 内容贴右缘，收缩时从左边被裁掉（滑出而不是被会话框吞掉） */
+@media (min-width: 821px) {
+  .atelier .run-rail {
+    width: var(--codex-task-rail, 240px);
+    min-width: var(--codex-task-rail, 240px);
+    justify-self: end;
+  }
+}
+
+/* rail 收起：列宽归零，会话框顶到窗缘，不留 8px 奶油缝 */
+.workbench-shell.rail-collapsed {
+  grid-template-columns: 0px minmax(0, 1fr) !important;
+}
+
+.workbench-shell.rail-collapsed .run-rail {
+  pointer-events: none;
+}
+
+.workbench-shell.rail-collapsed .conversation-pane {
+  margin-left: 0;
+  border-top-left-radius: 0;
+}
+
+.workbench-shell.rail-collapsed > .forge-splitter-handle.is-left {
+  display: none;
+}

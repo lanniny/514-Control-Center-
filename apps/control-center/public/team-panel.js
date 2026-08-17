@@ -4,6 +4,7 @@
  * v4.0 Forge：Lucide 图标 + --agent-* 品牌变量（零硬编码 hex，色彩全走 forge tokens）。
  */
 import { lucideIcon } from "./lucide.js";
+import { memberAvatarMarkup, officialCliIconMarkup } from "./modules/avatars.js";
 
 const ACTIVE_RUN_STATES = new Set([
   "queued", "planning", "running", "waiting_agent", "executing", "integrating", "verifying", "active",
@@ -146,6 +147,7 @@ function memberMeta(id, coordinatorId, catalogById) {
     title: presentation.title,
     provider,
     brand: resolveCatalogBrand(catalog.provider, `${known.provider || ""} ${id}`),
+    avatar: catalog.avatar === "custom" ? "custom" : "",
     role: presentation.role,
     layer: id === coordinatorId ? "leader" : "member",
   };
@@ -282,7 +284,12 @@ export function teamAgentCardHtml(agent, index = 0) {
   return `
     <div class="tp-card forge-enter is-${status}" data-agent="${escapeHtml(agent.id)}" data-brand="${escapeHtml(brand)}">
       <div class="tp-card-head">
-        <div class="tp-avatar" aria-hidden="true">${lucideIcon("bot", "icon lucide tp-avatar-icon")}</div>
+        <div class="tp-avatar" aria-hidden="true">${memberAvatarMarkup(agent, {
+          className: "avatar-photo",
+          iconClass: "cli-logo tp-avatar-icon",
+          fallback: officialCliIconMarkup(brand, "cli-logo tp-avatar-icon")
+            || `<span class="tp-initials">${escapeHtml(String(agent.name || agent.id || "?").slice(0, 2))}</span>`,
+        })}</div>
         <div class="tp-id">
           <span class="tp-name">${escapeHtml(agent.name)}</span>
           <span class="tp-title">${escapeHtml(agent.title)} · ${escapeHtml(agent.provider)}</span>
@@ -336,12 +343,20 @@ function renderTeamPanel() {
     </div>
   `;
   applyLoadMeters(_panelEl);
+  applyTopologyPins(_panelEl);
 }
 
 /** CSP：负载条宽度走 CSSOM（内联 style 被 style-src 拦截）。collab-flow 复用卡片标记时也要调用。 */
 export function applyLoadMeters(root) {
   root?.querySelectorAll(".tp-load-fill[data-load-pct]").forEach((el) => {
     el.style.width = `${el.dataset.loadPct}%`;
+  });
+}
+
+export function applyTopologyPins(root) {
+  root?.querySelectorAll("[data-topo-x]").forEach((el) => {
+    el.style.left = `${Number(el.dataset.topoX) * 100}%`;
+    el.style.top = `${Number(el.dataset.topoY) * 100}%`;
   });
 }
 
@@ -371,42 +386,80 @@ function renderFlows(agents) {
   </div>`;
 }
 
-function renderTopology(agents) {
-  if (!agents.length) return `<div class="tp-empty tp-empty--small">暂无团队拓扑</div>`;
-  const cx = 120, cy = 80, r = 60;
-  const coordinator = agents.find((item) => item.id === _teamData?.coordinatorId) || agents[0];
-  const others = agents.filter((item) => item.id !== coordinator.id);
+export function satelliteAngle(index, count) {
+  if (count <= 1) return 0;
+  if (count === 2) return index === 0 ? (Math.PI * 5) / 6 : Math.PI / 6;
+  return (index / count) * Math.PI * 2 - Math.PI / 2;
+}
+
+export function layoutTeamTopology(agents, coordinatorId, { width = 720, height = 300 } = {}) {
+  const items = Array.isArray(agents) ? agents : [];
+  const coordinator = items.find((item) => item.id === coordinatorId) || items[0] || null;
+  if (!coordinator) return { width, height, cx: width / 2, cy: height / 2, positions: [] };
+  const others = items.filter((item) => item.id !== coordinator.id);
+  const cx = width / 2;
+  const cy = others.length === 2 ? 118 : height / 2 - 8;
+  const radius = others.length <= 2 ? 118 : Math.min(width / 2 - 88, height / 2 - 64);
   const positions = [
-    { ...coordinator, x: cx, y: cy },
-    ...others.map((agent, index) => {
-      const angle = (index / Math.max(1, others.length)) * Math.PI * 2 - Math.PI / 2;
-      return { ...agent, x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle) };
-    }),
+    { ...coordinator, x: cx, y: cy, role: "hub", labelDy: others.length === 2 ? -34 : 38 },
+    ...others.map((agent, index) => ({
+      ...agent,
+      x: cx + radius * Math.cos(satelliteAngle(index, others.length)),
+      y: cy + radius * Math.sin(satelliteAngle(index, others.length)),
+      role: "spoke",
+      labelDy: 38,
+    })),
   ];
+  return { width, height, cx, cy, positions };
+}
+
+export function nodeInitial(name) {
+  const chars = [...String(name || "").trim()];
+  if (!chars.length) return "?";
+  return /[\u4e00-\u9fff]/.test(chars[0]) ? chars[0] : chars.slice(0, 2).join("").toUpperCase();
+}
+
+function topologyFaceMarkup(agent) {
+  const brand = agent.brand || agentBrandKey(agent.provider || agent.id);
+  return memberAvatarMarkup(agent, {
+    className: "avatar-photo tp-topo-photo",
+    iconClass: "cli-logo tp-topo-icon",
+    fallback: officialCliIconMarkup(brand, "cli-logo tp-topo-icon")
+      || `<span class="tp-initials">${escapeHtml(nodeInitial(agent.name || agent.id))}</span>`,
+  });
+}
+
+export function renderTeamTopologyMarkup(agents, { coordinatorId = null, flows = [] } = {}) {
+  if (!agents.length) return `<div class="tp-empty tp-empty--small">暂无团队拓扑</div>`;
+  const { width, height, cx, cy, positions } = layoutTeamTopology(agents, coordinatorId);
+  const coordinator = positions.find((item) => item.role === "hub") || positions[0];
+  const others = positions.filter((item) => item.id !== coordinator.id);
   const byId = new Map(positions.map((item) => [item.id, item]));
-  const connected = new Set((_teamData?.flows || []).flatMap((flow) => [flow.from, flow.to]));
+  const connected = new Set(flows.flatMap((flow) => [flow.from, flow.to]));
   const lines = others.map((agent) => {
     const target = byId.get(agent.id);
-    const flow = (_teamData?.flows || []).find((item) =>
+    const flow = flows.find((item) =>
       (item.from === coordinator.id && item.to === agent.id) || (item.to === coordinator.id && item.from === agent.id));
     const brandKey = agent.brand || agentBrandKey(agent.provider);
-    const opacity = flow ? 0.7 : 0.25;
-    const width = flow ? 2 : 1;
-    return `<line x1="${cx}" y1="${cy}" x2="${target.x}" y2="${target.y}" class="tp-topo-link" data-brand="${escapeHtml(brandKey)}" stroke-width="${width}" opacity="${opacity}" stroke-dasharray="${flow ? "none" : "4 4"}" />`;
+    const opacity = flow ? 0.72 : 0.28;
+    const strokeWidth = flow ? 2.2 : 1.2;
+    return `<line x1="${cx.toFixed(1)}" y1="${cy.toFixed(1)}" x2="${target.x.toFixed(1)}" y2="${target.y.toFixed(1)}" class="tp-topo-link" data-brand="${escapeHtml(brandKey)}" stroke-width="${strokeWidth}" opacity="${opacity}" stroke-dasharray="${flow ? "none" : "5 5"}" />`;
   }).join("");
-
-  const nodes = positions.map((a) => {
-    const brandKey = a.brand || agentBrandKey(a.provider);
-    return `
-    <g class="tp-topo-node${connected.has(a.id) ? " is-connected" : ""}" data-agent="${escapeHtml(a.id)}" data-brand="${escapeHtml(brandKey)}">
-      <circle cx="${a.x}" cy="${a.y}" r="18" class="tp-topo-ring" />
-      <text x="${a.x}" y="${a.y + 1}" text-anchor="middle" dominant-baseline="central" font-size="9" font-weight="600">${escapeHtml(truncate(a.name, 10))}</text>
-    </g>`;
+  const pins = positions.map((agent) => {
+    const brandKey = agent.brand || agentBrandKey(agent.provider);
+    return `<div class="tp-topo-pin${connected.has(agent.id) ? " is-connected" : ""}${agent.role === "hub" ? " is-hub" : ""}${agent.labelDy < 0 ? " is-label-above" : ""}" data-agent="${escapeHtml(agent.id)}" data-brand="${escapeHtml(brandKey)}" data-topo-x="${(agent.x / width).toFixed(4)}" data-topo-y="${(agent.y / height).toFixed(4)}">
+      <span class="tp-topo-face" aria-hidden="true">${topologyFaceMarkup(agent)}</span>
+      <span class="tp-topo-name">${escapeHtml(truncate(agent.name, 8))}</span>
+    </div>`;
   }).join("");
+  return `<div class="tp-topology" role="img" aria-label="团队拓扑">
+    <svg class="tp-topology-svg" viewBox="0 0 ${width} ${height}" aria-hidden="true">${lines}</svg>
+    <div class="tp-topo-pins">${pins}</div>
+  </div>`;
+}
 
-  return `<svg class="tp-topology-svg" viewBox="0 0 240 160" width="100%" height="160" role="img" aria-label="团队拓扑">
-    ${lines}${nodes}
-  </svg>`;
+function renderTopology(agents) {
+  return renderTeamTopologyMarkup(agents, { coordinatorId: _teamData?.coordinatorId, flows: _teamData?.flows || [] });
 }
 
 // ─── 工具函数 ────────────────────────────────────────────────

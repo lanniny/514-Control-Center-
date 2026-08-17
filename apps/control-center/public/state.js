@@ -43,6 +43,19 @@ export function removeRequestedAgentMention(text, label) {
     .replace(/[ \t]+\n/g, "\n");
 }
 
+export function composerDraftMatches(left, right) {
+  if (!left || !right) return false;
+  const leftIds = Array.isArray(left.requestedAgentIds) ? left.requestedAgentIds.map(String) : [];
+  const rightIds = Array.isArray(right.requestedAgentIds) ? right.requestedAgentIds.map(String) : [];
+  return String(left.text ?? "").trim() === String(right.text ?? "").trim()
+    && leftIds.length === rightIds.length
+    && leftIds.every((id, index) => id === rightIds[index]);
+}
+
+export function emptyComposerDraft() {
+  return { text: "", requestedAgentIds: [] };
+}
+
 // 视图标题映射
 export const VIEW_TITLES = Object.freeze({
   overview: "系统总览",
@@ -56,10 +69,13 @@ export const VIEW_TITLES = Object.freeze({
   sessions: "会话聚合",
   bootstrapper: "项目启动器",
   office: "文档工坊",
+  automations: "自动化",
   terminal: "终端",
-  market: "市场",
+  market: "插件",
   hosts: "远程主机",
   hero: "协作星图",
+  appearance: "外观",
+  browser: "浏览器",
 });
 
 // 默认组件
@@ -153,12 +169,17 @@ export const state = {
   secrets: [...DEFAULT_SECRETS],
   approvals: [],
   leases: [],
+  remoteGates: null,
   diagnostics: [],
   diagnosticLog: [],
   diagnosticLogFilter: "all",
   capabilitiesData: null,
   capabilitiesError: null,
   capabilityFilter: "", // Skill 矩阵筛选词；只影响展示与批量作用域，覆盖率统计始终按全集
+  capabilityWorkspace: "skills",
+  settingsFocus: null,
+  capabilityMcpFilter: "all",
+  capabilityMcpQuery: "",
   capabilitiesLoading: false,
   providersData: null,
   providersLoading: false,
@@ -174,6 +195,9 @@ export const state = {
   providerPresetQuery: "",
   providerPresetSelected: null, // 预设带入的附加 meta（apiFormat/extraEnv/extraSettings/codexTop/codexProviderExtra/modelCatalog/icon/iconColor）
   providerCodexCatalog: [], // Codex 高级折叠区的模型映射编辑态
+  providerOpencodeHeaders: [], // OpenCode options.headers 编辑态 [{key,value}]
+  providerOpencodeOptions: [], // OpenCode options 额外项编辑态 [{key,value}]
+  providerOpencodeModels: [], // OpenCode models 表编辑态 [{id,name}]
   providerFetchedModels: [], // 当前 Base URL/Key 拉取到的模型建议，仅会话内存态
   providerDeeplinkPreview: null,
   providerDialogTab: "basic",
@@ -217,14 +241,19 @@ export const state = {
   expandedProjects: new Set(),
   collapsedRunGroups: new Set(), // 协作会话组默认展开；收起态只存内存（刷新归展开，不持久化噪音偏好）
   collapsedCliGroups: new Set(), // CLI 分组（Claude/Codex…）同纪律：键 `${projectId}:${cli}`，内存态不持久化
-  teamTreeCollapsed: false, // Codex 式「项目 ▾」分区头折叠态，内存不持久化
+  teamTreeCollapsed: false, // Codex 式「项目 ▾」分区头折叠态；持久化在 514cc-rail-groups.team（bindEvents 启动时读回）
   selectionClearedByUser: false, // 显式切新任务模式（selectedRunId=null）的记账：loadRuns 自动选择不得回盖用户意图（LO 2026-08-11）
   showAllSessions: new Set(), // Codex 式「展开显示」：项目 id 集合——在列的项目会话列表不受 TREE_SESSIONS_CAP 截断
   projectSummaries: false,
   showSubagents: false,
   recentOnly: true,
   sessionPreview: null,
+  pendingCwd: null,
+  pendingRemote: null,
+  focusedProjectId: null,
   composerDraftId: globalThis.crypto?.randomUUID?.() || `draft-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+  composerNewTaskDraft: { text: "", requestedAgentIds: [] },
+  composerRunDrafts: Object.create(null),
   attachmentContexts: new Map(),
   activeAttachmentContextKey: null,
   attachments: [],
@@ -248,6 +277,7 @@ export const state = {
   editingTeamId: null,
   teamSurface: "orchestration",
   memberCatalog: [],
+  operatorProfile: { label: "AEMEATH", avatar: "" },
   runtimeCatalog: [],
   adapterTemplatesData: null,
   runtimeSeatsData: null,
@@ -258,6 +288,7 @@ export const state = {
   recoveryAckRunId: null,
   automations: [],
   automationStatus: { state: "loading", writable: false, failClosed: false, code: null, message: null },
+  automationModelCatalogs: {}, // profileId → { source, models }：CLI 动态发现结果，静态 modelOptions 的补齐/覆盖
   commandPaletteQuery: "",
   commandPaletteActions: [],
   commandPaletteIndex: -1,
@@ -270,11 +301,19 @@ export const state = {
   slashCandidates: [],
   slashIndex: -1,
   slashRange: null,
+  pendingNativeCommand: false, // 显式标记下一提交为 CLI 原生斜杠命令轮（/compact 等，裸命令直进 CLI）
   agentControlCatalog: null,
   composerCliOpen: false,
   composerCliTab: "commands",
   composerControlDrafts: new Map(),
+  editingMessage: null, // 历史消息编辑态 { key, runId, priorDraft }：composer 顶条提示，取消恢复原草稿
   composerCliActionStates: new Map(),
   welcomeCategory: "all",
-  remoteGates: [],
+  usageDays: 7,
+  usageSource: "proxy",
+  usageChartKind: "bar",
+  usageChartMetric: "requests",
+  usageLedger: "logs",
+  usageModel: "",
+  usageProxy: null,
 };

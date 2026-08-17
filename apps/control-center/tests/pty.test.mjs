@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createPtyService, defaultShell } from "../src/pty.mjs";
+import { createPtyService, defaultShell, resolveSpawnCommand } from "../src/pty.mjs";
 import { createRemoteGateService } from "../src/security/remote-gates.mjs";
 import { registerPtyRoutes, setPtyServiceForTest, buildSshPtyArgs, sshShellCommand } from "../src/pty/routes.mjs";
 import { setSshServiceForTest } from "../src/ssh/routes.mjs";
@@ -80,6 +80,108 @@ test("pty: cwd sandbox rejects escape, accepts repo", async () => {
   assert.throws(() => service.assertCwd("C:/Windows/System32"), { code: "PTY_CWD_BOUNDARY" });
   assert.equal(service.assertCwd(REPO_ROOT), REPO_ROOT);
   assert.equal(service.assertCwd(null), REPO_ROOT);
+});
+
+test("pty: extraCwdRoots allow a sibling project directory", async (t) => {
+  const { mkdir } = await import("node:fs/promises");
+  const { resolve } = await import("node:path");
+  const parent = await mkdtemp(join(tmpdir(), "514cc-pty-cwd-"));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const repo = join(parent, "repo");
+  const sibling = join(parent, "other-project");
+  await mkdir(repo);
+  await mkdir(sibling);
+  const service = createPtyService({ repoRoot: repo, extraCwdRoots: [parent] });
+  assert.equal(service.assertCwd(sibling), resolve(sibling));
+  assert.throws(() => service.assertCwd("C:/Windows/System32"), { code: "PTY_CWD_BOUNDARY" });
+});
+
+test("pty: resolveSpawnCommand matches terminal semantics for npm .cmd shims", async (t) => {
+  const { writeFile } = await import("node:fs/promises");
+  const dir = await mkdtemp(join(tmpdir(), "514cc-pty-resolve-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(join(dir, "shimonly.cmd"), "@echo off\r\n");
+  await writeFile(join(dir, "real.exe"), "MZ");
+  await writeFile(join(dir, "both.cmd"), "@echo off\r\n");
+  await writeFile(join(dir, "both.exe"), "MZ");
+  const env = { PATH: dir, PATHEXT: ".COM;.EXE;.BAT;.CMD", COMSPEC: "C:\\Windows\\System32\\cmd.exe" };
+  const opts = { platform: "win32", env };
+
+  // 只命中 .cmd → cmd /d /c 裸名（cmd 自己做 PATH 解析，与手敲一致）
+  assert.deepEqual(resolveSpawnCommand("shimonly", opts), {
+    command: env.COMSPEC,
+    prefixArgs: ["/d", "/c", "shimonly"],
+  });
+  // 命中 .exe → 全路径直接 spawn
+  assert.deepEqual(resolveSpawnCommand("real", opts), { command: join(dir, "real.exe"), prefixArgs: [] });
+  // 同目录 .exe 优先于 .cmd（PATHEXT 序）
+  assert.deepEqual(resolveSpawnCommand("both", opts), { command: join(dir, "both.exe"), prefixArgs: [] });
+  // PATH 找不到 → 原样透传，spawn 错误如实冒泡
+  assert.deepEqual(resolveSpawnCommand("missing-cli", opts), { command: "missing-cli", prefixArgs: [] });
+  // 显式路径 / 显式扩展名 → 透传
+  assert.deepEqual(resolveSpawnCommand("C:\\tools\\x.cmd", opts), { command: "C:\\tools\\x.cmd", prefixArgs: [] });
+  assert.deepEqual(resolveSpawnCommand("tool.exe", opts), { command: "tool.exe", prefixArgs: [] });
+  // 非 Windows → 透传
+  assert.deepEqual(resolveSpawnCommand("shimonly", { platform: "linux", env }), { command: "shimonly", prefixArgs: [] });
+});
+
+test("pty: dedupeKey reuses a live session instead of spawning a twin", async (t) => {
+  const spawned = [];
+  const fakeProc = () => ({
+    pid: 40000 + spawned.length,
+    onData() {}, onExit() {}, write() {}, resize() {}, kill() {},
+  });
+  const service = createPtyService({
+    repoRoot: REPO_ROOT,
+    spawnImpl: (command, args) => { const proc = fakeProc(); spawned.push({ command, args }); return proc; },
+  });
+  t.after(() => service.closeAll());
+  const first = service.create({ shell: "cmd.exe", title: "t", dedupeKey: "run-cli:r1:a1", kind: "cli" });
+  assert.equal(first.kind, "cli");
+  const again = service.create({ shell: "cmd.exe", title: "t", dedupeKey: "run-cli:r1:a1" });
+  assert.equal(again.id, first.id);
+  assert.equal(again.reused, true);
+  assert.equal(again.kind, "cli", "复用归还也必须带 kind，否则通用面板的 CLI 过滤会漏");
+  assert.equal(service.list().find((session) => session.id === first.id)?.kind, "cli", "list 台账同样带 kind");
+  assert.equal(spawned.length, 1, "同一原生会话不得 spawn 第二个进程抢 session 文件");
+  const other = service.create({ shell: "cmd.exe", dedupeKey: "run-cli:r1:a2" });
+  assert.notEqual(other.id, first.id);
+  assert.equal(spawned.length, 2);
+  // 终态不复用：kill 之后同 key 照常新起
+  service.kill(first.id);
+  const fresh = service.create({ shell: "cmd.exe", dedupeKey: "run-cli:r1:a1" });
+  assert.notEqual(fresh.id, first.id);
+  assert.equal(spawned.length, 3);
+});
+
+test("pty: create wraps a win32 .cmd shim in cmd /d /c", async (t) => {
+  if (!isWin) { t.skip("windows-only"); return; }
+  const { writeFile } = await import("node:fs/promises");
+  const dir = await mkdtemp(join(tmpdir(), "514cc-pty-shim-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(join(dir, "shimcli.cmd"), "@echo off\r\n");
+  const spawned = [];
+  const fakeProc = {
+    pid: 43210,
+    onData() {},
+    onExit() {},
+    write() {},
+    resize() {},
+    kill() {},
+  };
+  const service = createPtyService({
+    repoRoot: REPO_ROOT,
+    spawnImpl: (command, args) => { spawned.push({ command, args }); return fakeProc; },
+  });
+  t.after(() => service.closeAll());
+  const originalPath = process.env.PATH;
+  process.env.PATH = `${dir};${originalPath}`;
+  t.after(() => { process.env.PATH = originalPath; });
+  const session = service.create({ shell: "shimcli", args: ["--session", "abc123"] });
+  assert.equal(session.shell, "shimcli"); // 会话身份仍是用户要的 CLI，cmd 只是载体
+  assert.equal(spawned.length, 1);
+  assert.equal(spawned[0].command.toLowerCase(), (process.env.COMSPEC || "cmd.exe").toLowerCase());
+  assert.deepEqual(spawned[0].args, ["/d", "/c", "shimcli", "--session", "abc123"]);
 });
 
 test("pty routes: gate blocks without grant, opens with grant", async (t) => {
@@ -268,6 +370,50 @@ function createPtySession(service) {
   // 默认 shell 的选择逻辑由下方 "default shell prefers PowerShell" 纯函数用例覆盖。
   return service.create(isWin ? { shell: "cmd.exe" } : { shell: "sh" });
 }
+
+test("pty: run-CLI handoff extraCwdRoots unlock run.cwd without widening the generic sandbox", async (t) => {
+  const outside = await mkdtemp(join(tmpdir(), "514cc-pty-handoff-"));
+  t.after(() => rm(outside, { recursive: true, force: true }));
+  // 假 spawn：本用例只验沙箱判定，不真起 shell（真进程会锁住临时目录导致清理 EBUSY）
+  const fakeProc = { pid: 424242, onData() {}, onExit() {} };
+  const service = createPtyService({ repoRoot: REPO_ROOT, spawnImpl: () => fakeProc });
+  t.after(() => service.closeAll());
+  // 通用面：沙箱外的 cwd 依然拒绝
+  assert.throws(
+    () => service.create({ shell: isWin ? "cmd.exe" : "sh", cwd: outside }),
+    { code: "PTY_CWD_BOUNDARY" },
+  );
+  // 专用接续路由：按次放行 run.cwd（adapter 子进程本就以 run.cwd 为工作目录，终端同权）
+  const session = service.create({
+    shell: isWin ? "cmd.exe" : "sh",
+    cwd: outside,
+    extraCwdRoots: [outside],
+    title: "claude-fable · CLI",
+  });
+  assert.equal(session.cwd, join(outside));
+  assert.equal(session.title, "claude-fable · CLI");
+});
+
+test("pty: session cap counts live sessions only — exited entries free capacity", () => {
+  let pid = 7000;
+  const exits = [];
+  // 假 spawn：登记 onExit 回调，测试手动触发退出来释放容量
+  const spawnFake = () => {
+    const proc = { pid: ++pid, onData() {}, onExit(cb) { exits.push(cb); } };
+    return proc;
+  };
+  const service = createPtyService({ repoRoot: REPO_ROOT, spawnImpl: spawnFake });
+  for (let index = 0; index < 16; index += 1) {
+    service.create({ shell: "cmd.exe", title: `s${index}` });
+  }
+  assert.throws(() => service.create({ shell: "cmd.exe" }), { code: "PTY_CAP" }, "16 live sessions hit the cap");
+  // 前两个会话退出：容量应释放，新会话可建——已退出条目只留观感不占额度
+  exits[0]({ exitCode: 0 });
+  exits[1]({ exitCode: 0 });
+  const revived = service.create({ shell: "cmd.exe", title: "revived" });
+  assert.ok(revived.id, "capacity freed after exits");
+  assert.equal(service.get(revived.id).exited, false);
+});
 
 // LO 2026-08-08：终端要和本机 PowerShell 一致，而不是 cmd。
 // Windows 依次探测 pwsh → powershell → COMSPEC，只认 PATH 中真实存在的可执行文件。

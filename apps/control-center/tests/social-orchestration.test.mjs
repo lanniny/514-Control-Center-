@@ -1322,7 +1322,7 @@ test("cancel save-chain barrier rejects a concurrent direct continue without a l
   const [cancelled, continuationOutcome] = await Promise.all([cancelling, continuing]);
   assert.equal(cancelled.status, "cancelled");
   assert.ok(
-    ["RUN_CANCELLED", "ABORTED"].includes(continuationOutcome.error?.code)
+    ["RUN_CANCELLED", "ABORTED", "RUN_TERMINAL"].includes(continuationOutcome.error?.code)
       || continuationOutcome.value?.status === "cancelled",
     `concurrent continuation escaped cancellation | ${continuationOutcome.error?.code || continuationOutcome.value?.status}`,
   );
@@ -2206,6 +2206,19 @@ test("structured multi-mention validates team ownership, mode and stable orderin
     () => orchestrator.create({ prompt: "legacy mode", execute: false, permissionMode: "plan", teamId: "team-514cc", orchestrationMode: "pipeline", requestedAgentIds: ["codex-technical"] }),
     { code: "VALIDATION_FAILED" },
   );
+  for (const budget of [{ maxStepsPerInteraction: 4 }, { maxRounds: 4 }]) {
+    await assert.rejects(
+      () => orchestrator.create({
+        prompt: "insufficient social budget",
+        execute: false,
+        permissionMode: "plan",
+        teamId: "team-514cc",
+        requestedAgentIds: ["codex-technical", "claude-fable"],
+        ...budget,
+      }),
+      { code: "INSUFFICIENT_ROUNDS", minimumRounds: 5 },
+    );
+  }
 
   const preview = await orchestrator.create({
     prompt: "dedupe mentions",
@@ -2213,11 +2226,12 @@ test("structured multi-mention validates team ownership, mode and stable orderin
     permissionMode: "plan",
     teamId: "team-514cc",
     requestedAgentIds: ["codex-technical", "codex-technical", "claude-fable"],
-    maxRounds: 3,
+    maxStepsPerInteraction: 5,
   });
   assert.deepEqual(preview.requestedAgentIds, ["codex-technical", "claude-fable"]);
   assert.equal(preview.startAgentId, "codex-technical");
-  assert.equal(preview.maxRounds, 3);
+  assert.equal(preview.maxStepsPerInteraction, 5);
+  assert.equal(preview.maxRounds, 5);
 });
 
 test("structured multi-mention dispatches every explicit target before leader finalization", async (t) => {

@@ -85,7 +85,8 @@ test("delete-sessions quarantines claude dir and cwd-matched codex rollouts", { 
   const sourceStatus = Object.fromEntries(result.sources.map((source) => [source.source, source]));
   assert.deepEqual(
     Object.fromEntries(Object.entries(sourceStatus).map(([source, status]) => [source, status.supported])),
-    { claude: true, codex: true, cursor: false, kimi: false, pi: false },
+    // 12 源全部显式列出：未支持删除的源如实报 supported:false，不再静默遗漏
+    { claude: true, codex: true, cursor: false, kimi: false, pi: false, bridge: false, grok: false, opencode: false, cline: false, openclaw: false, hermes: false, codebuddy: false },
   );
   assert.equal(sourceStatus.codex.remaining, 0);
   assert.deepEqual(sourceStatus.codex.limitations, []);

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createOfficeService } from "../src/office.mjs";
+import { createOfficeService, outlineOf, slugifyOfficeName } from "../src/office.mjs";
 
 async function fixture(t) {
   const dir = await mkdtemp(join(tmpdir(), "514cc-office-"));
@@ -100,5 +100,45 @@ test("office: templates catalog is non-empty and well-formed", async (t) => {
   const { service } = await fixture(t);
   const templates = service.templates();
   assert.equal(templates.length, 3);
-  assert.ok(templates.every((template) => template.id && template.kind && template.spec));
+  assert.ok(templates.every((template) => template.id && template.kind && template.spec && template.blurb));
+  const weekly = templates.find((template) => template.id === "weekly-report");
+  assert.ok(weekly.spec.sections.length >= 3);
+});
+
+test("office: Chinese titles stay in the planned file name", async (t) => {
+  const { service } = await fixture(t);
+  const result = await service.generate({ kind: "docx", title: "本周工作报告", spec: {} });
+  assert.equal(result.plan.fileName, "本周工作报告.docx");
+  assert.equal(slugifyOfficeName("本周工作报告", "docx"), "本周工作报告.docx");
+});
+
+test("office: dryRun plan includes an outline of the spec", async (t) => {
+  const { service } = await fixture(t);
+  const spec = { title: "大纲", sections: [{ heading: "甲", paragraphs: ["一"] }, { heading: "乙", table: { rows: [["a", "b"]] } }] };
+  const result = await service.generate({ kind: "docx", title: "大纲", spec });
+  assert.deepEqual(result.plan.outline, outlineOf("docx", spec, "大纲"));
+  assert.equal(result.plan.outline.sections.length, 2);
+  assert.equal(result.plan.outline.sections[1].tableRows, 1);
+});
+
+test("office: refuses overwrite unless force, then overwrites", async (t) => {
+  const { service } = await fixture(t);
+  await service.generate({ kind: "docx", fileName: "once", spec: { title: "一" }, dryRun: false });
+  await assert.rejects(
+    () => service.generate({ kind: "docx", fileName: "once", spec: { title: "二" }, dryRun: false }),
+    (error) => error.code === "OFFICE_FILE_EXISTS",
+  );
+  const forced = await service.generate({ kind: "docx", fileName: "once", spec: { title: "二" }, dryRun: false, force: true });
+  assert.equal(forced.ok, true);
+  const summary = (await service.inspect({ path: forced.plan.path })).summary;
+  assert.ok(summary.paragraphs >= 1);
+});
+
+test("office: readDocument returns bytes inside the fence and refuses escape", async (t) => {
+  const { service } = await fixture(t);
+  const created = await service.generate({ kind: "xlsx", fileName: "sheet", spec: { sheets: [{ name: "A", columns: [{ header: "x" }], rows: [[1]] }] }, dryRun: false });
+  const file = await service.readDocument(created.plan.path);
+  assert.equal(file.kind, "xlsx");
+  assert.equal(file.bytes.subarray(0, 2).toString("latin1"), "PK");
+  await assert.rejects(() => service.readDocument("C:/Windows/win.ini"), { code: "OFFICE_PATH_BOUNDARY" });
 });

@@ -80,6 +80,90 @@ function jsonClone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function inUsageWindow(entry, { app = null, since = 0 } = {}) {
+  if (app && entry.app !== app) return false;
+  const started = Date.parse(entry.startedAt);
+  return Number.isFinite(started) && started >= since;
+}
+
+function addUsageTotals(totals, entry) {
+  if (entry.success) {
+    totals.requests += 1;
+    totals.inputTokens += Number(entry.inputTokens) || 0;
+    totals.outputTokens += Number(entry.outputTokens) || 0;
+    totals.costUsd += Number(entry.costUsd) || 0;
+  } else {
+    totals.failed += 1;
+  }
+  const duration = Number(entry.durationMs);
+  if (Number.isFinite(duration) && duration >= 0) {
+    totals.durationMs += duration;
+    totals.durationCount += 1;
+  }
+  return totals;
+}
+
+function finalizeUsageSummary(totals, { windowDays, since }) {
+  const totalRequests = totals.requests + totals.failed;
+  const tokens = totals.inputTokens + totals.outputTokens;
+  const windowMinutes = Math.max(1, (Date.now() - since) / 60_000);
+  const avgDurationMs = totals.durationCount ? totals.durationMs / totals.durationCount : null;
+  const durationSeconds = totals.durationMs / 1000;
+  return {
+    requests: totals.requests,
+    failedRequests: totals.failed,
+    totalRequests,
+    successRate: totalRequests ? totals.requests / totalRequests : null,
+    inputTokens: totals.inputTokens,
+    outputTokens: totals.outputTokens,
+    tokens,
+    costUsd: totals.costUsd,
+    avgDurationMs,
+    windowDays,
+    windowMinutes,
+    rpm: totals.requests / windowMinutes,
+    tpm: tokens / windowMinutes,
+    throughputTps: durationSeconds > 0 ? totals.outputTokens / durationSeconds : null,
+  };
+}
+
+function usageBucketKey(startedAt, grain) {
+  const iso = String(startedAt || "");
+  return grain === "hour" ? iso.slice(0, 13) : iso.slice(0, 10);
+}
+
+function publicUsageLog(entry) {
+  return {
+    id: entry.id,
+    startedAt: entry.startedAt,
+    app: entry.app || null,
+    providerId: entry.providerId || null,
+    providerName: entry.providerName || entry.providerId || null,
+    model: entry.model || null,
+    inputTokens: Number(entry.inputTokens) || 0,
+    outputTokens: Number(entry.outputTokens) || 0,
+    costUsd: Number(entry.costUsd) || 0,
+    success: Boolean(entry.success),
+    httpStatus: entry.httpStatus ?? null,
+    durationMs: Number.isFinite(Number(entry.durationMs)) ? Number(entry.durationMs) : null,
+  };
+}
+
+function emptyTrendBucket(key, grain) {
+  const bucket = {
+    key,
+    day: key.slice(0, 10),
+    requests: 0,
+    failed: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    costUsd: 0,
+    models: {},
+  };
+  if (grain === "hour") bucket.hour = Number(key.slice(11, 13));
+  return bucket;
+}
+
 function defaultConfig() {
   return {
     listenAddress: "127.0.0.1",
@@ -785,9 +869,12 @@ export class CcSwitchProxyService {
         return { ...this.status(), stopped: false, warnings: [...warnings] };
       }
       if (settled.error) {
-        if (["PROXY_STOP_TIMEOUT", "PROXY_STOPPING"].includes(settled.error?.code)) {
-          this.#abortLifecycle(lifecycle, settled.error, { renew: true });
-          this.#addWarning(warnings, settled.error.code, String(settled.error.message || settled.error));
+        const publicationCommittedAfterDeadline = settled.error?.code === "RENAME_DEADLINE_EXCEEDED"
+          && settled.error?.renameCommitted === true;
+        if (["PROXY_STOP_TIMEOUT", "PROXY_STOPPING"].includes(settled.error?.code) || publicationCommittedAfterDeadline) {
+          const stopError = publicationCommittedAfterDeadline ? timeoutError : settled.error;
+          this.#abortLifecycle(lifecycle, stopError, { renew: true });
+          this.#addWarning(warnings, stopError.code, String(stopError.message || stopError));
           return { ...this.status(), stopped: false, warnings: [...warnings] };
         }
         throw settled.error;
@@ -931,6 +1018,7 @@ export class CcSwitchProxyService {
         signal: controller.signal,
         deadline,
         sidecarWrites: this.#takeoverSidecar(nextConfig),
+        queueIfProjectionHeld: true,
         onCommitted: () => {
           this.config = nextConfig;
           this.storeStatus = { state: "ready", message: null };
@@ -979,6 +1067,7 @@ export class CcSwitchProxyService {
               signal: lifecycle.controller.signal,
               deadline: () => this.#lifecycleDeadline(lifecycle),
               sidecarWrites: this.#takeoverSidecar(nextConfig),
+              queueIfProjectionHeld: true,
               onCommitted: () => {
                 this.config = nextConfig;
                 this.storeStatus = { state: "ready", message: null };
@@ -1228,7 +1317,7 @@ export class CcSwitchProxyService {
 
   #record(entry) {
     if (!this.acceptRequestLogs) return Promise.resolve(null);
-    const log = { id: `request-${randomUUID()}`, ...entry };
+    const log = { ...entry, id: entry.id || `request-${randomUUID()}` };
     const write = async () => {
       if (!this.acceptRequestLogs && (this.closing || this.closed)) return null;
       this.logs.push(log);
@@ -1270,22 +1359,28 @@ export class CcSwitchProxyService {
   }
 
   async #handle(request, response, signal) {
+    const requestId = `request-${randomUUID()}`;
+    response.setHeader("x-514cc-proxy-request-id", requestId);
     const startedAt = new Date().toISOString();
     const started = performance.now();
     const url = new URL(request.url, "http://127.0.0.1");
     const segments = url.pathname.split("/").filter(Boolean);
-    const app = segments.shift();
-    if (!PROVIDER_APPS.includes(app)) fail("proxy path must begin with a supported app id", "UNKNOWN_PROXY_APP", 404);
-    if (!this.#authorized(request, url)) fail("invalid local proxy token", "PROXY_UNAUTHORIZED", 401);
-    if (request.method !== "POST") fail("local model proxy only accepts POST", "METHOD_NOT_ALLOWED", 405);
-    const pathname = `/${segments.join("/")}`;
-    const clientProtocol = pathProtocol(pathname, app);
-    const clientBody = await readRequestBody(request);
-    const candidates = this.#candidates(app);
+    const app = segments.shift() ?? null;
     const attempts = [];
-    this.activeRequests += 1;
+    let clientProtocol = null;
+    let clientBody = {};
+    let activeRequestCounted = false;
     let lastError = null;
     try {
+      if (!PROVIDER_APPS.includes(app)) fail("proxy path must begin with a supported app id", "UNKNOWN_PROXY_APP", 404);
+      if (!this.#authorized(request, url)) fail("invalid local proxy token", "PROXY_UNAUTHORIZED", 401);
+      if (request.method !== "POST") fail("local model proxy only accepts POST", "METHOD_NOT_ALLOWED", 405);
+      const pathname = `/${segments.join("/")}`;
+      clientProtocol = pathProtocol(pathname, app);
+      clientBody = await readRequestBody(request);
+      const candidates = this.#candidates(app);
+      this.activeRequests += 1;
+      activeRequestCounted = true;
       for (const provider of candidates) {
         if (signal.aborted) throw abortReason(signal);
         const limits = this.checkLimits(provider);
@@ -1317,12 +1412,13 @@ export class CcSwitchProxyService {
             lastError = Object.assign(new Error(`upstream ${provider.name} returned HTTP ${upstream.status}: ${preview}`), { code: "UPSTREAM_FAILED", httpStatus: 502 });
             continue;
           }
+          response.setHeader("x-514cc-upstream-provider-id", provider.id);
           const usage = await this.#forward(upstream, response, { from: upstreamProtocol, to: clientProtocol, requestBody: clientBody, model, signal });
           this.#recordSuccess(app, provider.id);
           let persistenceWarning = null;
           if (provider.id !== this.providerStore.current[app]) {
             try {
-              await this.providerStore.markProxyCurrent(app, provider.id);
+              await this.providerStore.markProxyCurrent(app, provider.id, { proxyObserved: true });
             } catch (error) {
               persistenceWarning = `proxy-current: ${String(error?.message || error).slice(0, 240)}`;
               this.#notePersistenceWarning("proxy-current", error);
@@ -1332,6 +1428,7 @@ export class CcSwitchProxyService {
           const outputTokens = usage.outputTokens || 0;
           const costUsd = this.#cost(model || usage.model || "unknown", inputTokens, outputTokens, provider.meta?.costMultiplier ?? 1);
           await this.#recordSafely({
+            id: requestId,
             startedAt,
             completedAt: new Date().toISOString(),
             durationMs: Math.round(performance.now() - started),
@@ -1362,12 +1459,13 @@ export class CcSwitchProxyService {
     } catch (error) {
       const terminalError = signal.aborted ? abortReason(signal) : error;
       await this.#recordSafely({
+        id: requestId,
         startedAt,
         completedAt: new Date().toISOString(),
         durationMs: Math.round(performance.now() - started),
         app,
         providerId: attempts.at(-1)?.providerId ?? null,
-        model: clientBody.model ?? null,
+        model: clientBody?.model ?? null,
         clientProtocol,
         httpStatus: terminalError.httpStatus || 502,
         success: false,
@@ -1378,7 +1476,7 @@ export class CcSwitchProxyService {
       });
       throw terminalError;
     } finally {
-      this.activeRequests -= 1;
+      if (activeRequestCounted) this.activeRequests -= 1;
     }
   }
 
@@ -1481,46 +1579,109 @@ export class CcSwitchProxyService {
   }
 
   usageSummary({ app = null, days = 30 } = {}) {
-    const since = Date.now() - cleanInt(days, 1, 3650, 30, "days") * 86_400_000;
-    const items = this.logs.filter((entry) => entry.success && Date.parse(entry.startedAt) >= since && (!app || entry.app === app));
-    return items.reduce((summary, entry) => {
-      summary.requests += 1;
-      summary.inputTokens += Number(entry.inputTokens) || 0;
-      summary.outputTokens += Number(entry.outputTokens) || 0;
-      summary.costUsd += Number(entry.costUsd) || 0;
-      return summary;
-    }, { requests: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 });
-  }
-
-  usageTrends({ days = 30, app = null } = {}) {
-    const count = cleanInt(days, 1, 365, 30, "days");
-    const since = Date.now() - count * 86_400_000;
-    const buckets = new Map();
+    const windowDays = cleanInt(days, 1, 3650, 30, "days");
+    const since = Date.now() - windowDays * 86_400_000;
+    const totals = { requests: 0, failed: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, durationMs: 0, durationCount: 0 };
     for (const entry of this.logs) {
-      if (!entry.success || Date.parse(entry.startedAt) < since || (app && entry.app !== app)) continue;
-      const day = String(entry.startedAt).slice(0, 10);
-      const bucket = buckets.get(day) ?? { day, requests: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 };
-      bucket.requests += 1;
-      bucket.inputTokens += Number(entry.inputTokens) || 0;
-      bucket.outputTokens += Number(entry.outputTokens) || 0;
-      bucket.costUsd += Number(entry.costUsd) || 0;
-      buckets.set(day, bucket);
+      if (!inUsageWindow(entry, { app, since })) continue;
+      addUsageTotals(totals, entry);
     }
-    return [...buckets.values()].sort((a, b) => a.day.localeCompare(b.day));
+    return finalizeUsageSummary(totals, { windowDays, since });
   }
 
-  usageStats(groupBy) {
+  usageTrends({ days = 30, app = null, granularity = null } = {}) {
+    const count = cleanInt(days, 1, 365, 30, "days");
+    const grain = granularity === "hour" || granularity === "day"
+      ? granularity
+      : (count <= 1 ? "hour" : "day");
+    const since = Date.now() - count * 86_400_000;
+    const step = grain === "hour" ? 3_600_000 : 86_400_000;
+    const buckets = new Map();
+    const ensure = (key) => {
+      let bucket = buckets.get(key);
+      if (!bucket) {
+        bucket = emptyTrendBucket(key, grain);
+        buckets.set(key, bucket);
+      }
+      return bucket;
+    };
+    const aligned = grain === "hour"
+      ? Math.floor(since / step) * step
+      : Date.parse(`${new Date(since).toISOString().slice(0, 10)}T00:00:00.000Z`);
+    for (let ts = aligned; Number.isFinite(ts) && ts <= Date.now(); ts += step) {
+      ensure(usageBucketKey(new Date(ts).toISOString(), grain));
+    }
+    for (const entry of this.logs) {
+      if (!inUsageWindow(entry, { app, since })) continue;
+      const bucket = ensure(usageBucketKey(entry.startedAt, grain));
+      const modelKey = entry.model || "unknown";
+      const model = bucket.models[modelKey] ?? (bucket.models[modelKey] = { requests: 0, failed: 0, costUsd: 0, tokens: 0 });
+      if (entry.success) {
+        const tokens = (Number(entry.inputTokens) || 0) + (Number(entry.outputTokens) || 0);
+        const costUsd = Number(entry.costUsd) || 0;
+        bucket.requests += 1;
+        bucket.inputTokens += Number(entry.inputTokens) || 0;
+        bucket.outputTokens += Number(entry.outputTokens) || 0;
+        bucket.costUsd += costUsd;
+        model.requests += 1;
+        model.costUsd += costUsd;
+        model.tokens += tokens;
+      } else {
+        bucket.failed += 1;
+        model.failed += 1;
+      }
+    }
+    return [...buckets.values()].sort((left, right) => left.key.localeCompare(right.key));
+  }
+
+  usageStats(groupBy, { app = null, days = null } = {}) {
+    const windowDays = days == null || days === "" ? null : cleanInt(days, 1, 3650, 30, "days");
+    const since = windowDays == null ? 0 : Date.now() - windowDays * 86_400_000;
     const groups = new Map();
-    for (const entry of this.logs.filter((item) => item.success)) {
+    for (const entry of this.logs) {
+      if (!inUsageWindow(entry, { app, since })) continue;
       const key = groupBy === "model" ? entry.model || "unknown" : entry.providerId || "unknown";
-      const item = groups.get(key) ?? { key, requests: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 };
-      item.requests += 1;
-      item.inputTokens += Number(entry.inputTokens) || 0;
-      item.outputTokens += Number(entry.outputTokens) || 0;
-      item.costUsd += Number(entry.costUsd) || 0;
+      const item = groups.get(key) ?? { key, requests: 0, failed: 0, inputTokens: 0, outputTokens: 0, costUsd: 0 };
+      if (entry.success) {
+        item.requests += 1;
+        item.inputTokens += Number(entry.inputTokens) || 0;
+        item.outputTokens += Number(entry.outputTokens) || 0;
+        item.costUsd += Number(entry.costUsd) || 0;
+      } else {
+        item.failed += 1;
+      }
       groups.set(key, item);
     }
-    return [...groups.values()].sort((a, b) => b.costUsd - a.costUsd || b.requests - a.requests);
+    return [...groups.values()]
+      .map((item) => {
+        const totalRequests = item.requests + item.failed;
+        return {
+          ...item,
+          tokens: item.inputTokens + item.outputTokens,
+          totalRequests,
+          successRate: totalRequests ? item.requests / totalRequests : null,
+        };
+      })
+      .sort((left, right) => right.costUsd - left.costUsd || right.requests - left.requests || right.failed - left.failed);
+  }
+
+  usageOverview({ app = null, days = 7 } = {}) {
+    const windowDays = cleanInt(days, 1, 365, 7, "days");
+    const since = Date.now() - windowDays * 86_400_000;
+    const logs = this.logs
+      .filter((entry) => inUsageWindow(entry, { app, since }))
+      .slice()
+      .reverse()
+      .slice(0, 80)
+      .map(publicUsageLog);
+    return {
+      source: "ccswitch-proxy",
+      summary: this.usageSummary({ app, days: windowDays }),
+      trends: this.usageTrends({ app, days: windowDays }),
+      models: this.usageStats("model", { app, days: windowDays }),
+      providers: this.usageStats("provider", { app, days: windowDays }),
+      logs,
+    };
   }
 
   pricing() {

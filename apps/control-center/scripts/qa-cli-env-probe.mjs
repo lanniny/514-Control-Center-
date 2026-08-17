@@ -33,6 +33,7 @@ try {
   await page.goto(url, { waitUntil: "domcontentloaded" });
   await page.waitForSelector("#api-connection-badge.is-ok", { timeout: 20_000 });
   await page.locator('.topbar-nav [data-view="config"]').click();
+  await page.locator('[data-config-surface="local-runtime"]').click();
   const root = page.locator("#ccswitch-workbench");
   await root.waitFor({ state: "visible" });
   await root.locator('[data-ccs-tab="env"]').click();

@@ -59,6 +59,7 @@ export function createWorkbenchEnvironmentPanel({
   let selectedRunId = null;
   let environment = null;
   let controller = null;
+  let requestPending = false;
   let generation = 0;
   let refreshTimer = 0;
   let refreshing = false;
@@ -215,7 +216,9 @@ export function createWorkbenchEnvironmentPanel({
     controller?.abort();
     const ownedGeneration = ++generation;
     const ownedRunId = selectedRunId;
-    controller = new AbortController();
+    const ownedController = new AbortController();
+    controller = ownedController;
+    requestPending = true;
     // 已有内容时不整屏替换成 loading：只在变更行内联转圈，避免每次 SSE 抖动导致面板闪烁与滚动位置丢失。
     if (environment) {
       refreshing = true;
@@ -224,22 +227,27 @@ export function createWorkbenchEnvironmentPanel({
       renderLoading();
     }
     try {
-      const value = validateWorkbenchEnvironment(await loadEnvironment(ownedRunId, controller.signal));
-      if (controller.signal.aborted || ownedGeneration !== generation || selectedRunId !== ownedRunId) return;
+      const value = validateWorkbenchEnvironment(await loadEnvironment(ownedRunId, ownedController.signal));
+      if (ownedController.signal.aborted || ownedGeneration !== generation || selectedRunId !== ownedRunId) return;
       environment = value;
       refreshing = false;
       render();
     } catch (error) {
-      if (controller.signal.aborted || ownedGeneration !== generation || selectedRunId !== ownedRunId) return;
+      if (ownedController.signal.aborted || ownedGeneration !== generation || selectedRunId !== ownedRunId) return;
       environment = null;
       refreshing = false;
       renderError(error);
+    } finally {
+      if (controller === ownedController) {
+        controller = null;
+        requestPending = false;
+      }
     }
   }
 
   function selectRun(runId) {
     const next = runId ? String(runId) : null;
-    if (selectedRunId === next && environment) return;
+    if (selectedRunId === next && (environment || requestPending)) return;
     selectedRunId = next;
     expandedRows.clear();
     sourcesExpanded = false;

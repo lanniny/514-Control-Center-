@@ -11,12 +11,12 @@ export function buildClaudeArgs({
   effort = null,
   settingsFile = null,
   systemPromptFile = null,
+  nativeCommand = false,
 }) {
   const nativePermissionMode = permissionMode === "workspace-write" ? "acceptEdits" : "plan";
   const args = [
     "-p",
     "--strict-mcp-config",
-    "--disable-slash-commands",
     "--no-chrome",
     "--output-format",
     "stream-json",
@@ -26,6 +26,9 @@ export function buildClaudeArgs({
     "--max-budget-usd",
     String(maxBudgetUsd),
   ];
+  // 默认禁斜杠命令：普通提示词里的 "/" 只是文本（防提示注入触发 CLI 内部命令）。
+  // 原生命令轮例外：用户显式发送 /compact 等，CLI 需要解释执行——与 Desktop 同通道。
+  if (!nativeCommand) args.splice(2, 0, "--disable-slash-commands");
   const model = typeof requestedModel === "string" ? requestedModel.trim() : "";
   if (model) args.push("--model", model);
   if (effort) args.push("--effort", effort);
@@ -59,7 +62,7 @@ export class ClaudeCliAdapter {
     return sessionId ? `claude -r ${sessionId}` : null;
   }
 
-  async send({ sessionId, prompt, runId, agentId = "claude-fable", signal, permissionMode = "plan", maxBudgetUsd = 2, timeoutMs = 15 * 60_000, model = null, effort = null, cwd = null, onSessionStarted, onTurnSubmitting }) {
+  async send({ sessionId, prompt, runId, agentId = "claude-fable", signal, permissionMode = "plan", maxBudgetUsd = 2, timeoutMs = 15 * 60_000, model = null, effort = null, cwd = null, nativeCommand = false, onSessionStarted, onTurnSubmitting }) {
     const nativeSessionId = sessionId || randomUUID();
     const clientUserMessageId = randomUUID();
     const effectiveRequestedModel = model || this.model; // /model 会话级覆盖（orchestrator 已白名单校验）
@@ -80,6 +83,7 @@ export class ClaudeCliAdapter {
       effort,
       settingsFile: this.settingsFile,
       systemPromptFile: this.systemPromptFile,
+      nativeCommand,
     });
 
     let finalText = "";

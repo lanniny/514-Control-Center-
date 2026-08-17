@@ -15,6 +15,8 @@
 import { request, apiReady, getAccessToken } from "./api.js";
 import { lucideIcon } from "./lucide.js";
 import { escapeHtml } from "./utils.js";
+import { ACTIVE_RUN_STATES } from "./state.js";
+import { resolveWorkbenchPtySpawn, folderNameFromPath } from "./modules/workbench-cwd.js";
 import { Terminal } from "./vendor/xterm/xterm.mjs";
 import { FitAddon } from "./vendor/xterm/addon-fit.mjs";
 
@@ -46,7 +48,7 @@ function gateCard(root, gate, reason) {
     </div>`;
 }
 
-export function createTerminalPanel(root) {
+export function createTerminalPanel(root, { fixedSessions = null, allowSpawn = true, onAllClosed = null, onFirstChunk = null, onTabClosed = null, onSessionExited = null } = {}) {
   const tabs = new Map(); // id → { session, term, fit, paneEl, tabEl, streamCtl, observer, exited }
 
   /**
@@ -81,9 +83,20 @@ export function createTerminalPanel(root) {
               // 这里必须直接 parse——先反转义会让 JSON 含非法控制字符，含 \n 的 chunk 全丢。
               const payload = JSON.parse(line.slice(6));
               if (payload.exited) {
+                const firstExit = !tab.exited;
                 tab.exited = true;
                 markTabExited(tab);
+                if (firstExit) {
+                  // CLI 进程自然退出（用户在 TUI 里 /exit 等）：宿主据此把成员页签的映射
+                  // 还原为"未启动"，再点即重新 spawn——不残留指向死会话的僵尸 chip
+                  try { onSessionExited?.(sessionId, tab); } catch { /* 宿主钩子异常不炸流 */ }
+                }
               } else if (typeof payload.chunk === "string") {
+                // 首块非空输出 = 原生 TUI 已活：通知宿主撤掉冷启动提示（只火一次）
+                if (!tab.gotChunk && payload.chunk) {
+                  tab.gotChunk = true;
+                  try { onFirstChunk?.(tab); } catch { /* 宿主提示物异常不炸流 */ }
+                }
                 tab.term.write(payload.chunk);
               }
             } catch { /* 单帧解析失败不炸流 */ }
@@ -149,9 +162,14 @@ export function createTerminalPanel(root) {
     } catch { /* 已死 */ }
     disposeTab(tab); // 与重复挂载走同一条释放路径，避免两处清理逻辑各漏一半
     tabs.delete(id);
+    try { onTabClosed?.(id); } catch { /* 宿主钩子异常不阻断关闭 */ }
     const remaining = [...tabs.keys()];
     if (remaining.length) activateTab(remaining[remaining.length - 1]);
-    else renderTabStrip();
+    else {
+      renderTabStrip();
+      // 专用面板（沉浸接续）最后一页关掉 = 视图使命结束，通知宿主收罩层
+      if (!remaining.length && typeof onAllClosed === "function") onAllClosed();
+    }
   }
 
   /** 给既有/新建 session 挂 DOM + xterm + 流（spawn 与恢复共用）。 */
@@ -251,8 +269,18 @@ export function createTerminalPanel(root) {
     activateTab(session.id);
   }
 
+  function sessionTabLabel(session) {
+    const folder = folderNameFromPath(session.cwd);
+    const name = session.title || folder || String(session.shell ?? "").split(/[\\/]/).pop() || "pwsh";
+    return `${name} · ${session.id}`;
+  }
+
   async function spawnTab(shell = "") {
-    const payload = shell ? { shell } : {};
+    const context = resolveWorkbenchPtySpawn();
+    const payload = {
+      ...(shell ? { shell } : {}),
+      ...context,
+    };
     const { session } = await request("/api/pty", { method: "POST", body: JSON.stringify(payload) });
     attachSession(session);
   }
@@ -265,7 +293,7 @@ export function createTerminalPanel(root) {
       const item = document.createElement("button");
       item.type = "button";
       item.className = `terminal-tab${tab.exited ? " is-exited" : ""}`;
-      item.innerHTML = `${lucideIcon("square-terminal", "icon lucide")}<span>${escapeHtml(tab.session.title ?? tab.session.shell.split(/[\\/]/).pop())} · ${id}</span>`;
+      item.innerHTML = `${lucideIcon("square-terminal", "icon lucide")}<span>${escapeHtml(sessionTabLabel(tab.session))}</span>`;
       item.addEventListener("click", () => activateTab(id));
       const close = document.createElement("span");
       close.className = "terminal-tab-close";
@@ -283,7 +311,7 @@ export function createTerminalPanel(root) {
     add.className = "terminal-tab terminal-tab-add";
     add.innerHTML = `${lucideIcon("plus", "icon lucide")}<span>新建</span>`;
     add.addEventListener("click", () => void spawnTab());
-    strip.appendChild(add);
+    if (allowSpawn) strip.appendChild(add); // 沉浸接续等专用面板不提供裸 shell 入口
   }
 
   let mounting = null;
@@ -304,18 +332,25 @@ export function createTerminalPanel(root) {
     for (const tab of tabs.values()) disposeTab(tab);
     tabs.clear();
     let sessions = [];
-    try {
-      const payload = await request("/api/pty");
-      sessions = payload?.sessions ?? [];
-    } catch (error) {
-      if (error?.status === 501 || /REMOTE_GATE/.test(error?.message || "")) {
-        gateCard(root, "pty", error.message);
+    if (fixedSessions) {
+      // 沉浸接续等专用场景：只挂指定会话，不列全量台账、零会话时也不自起新 shell
+      sessions = fixedSessions;
+    } else {
+      try {
+        const payload = await request("/api/pty");
+        // CLI 接续会话（kind:"cli"）只属于沉浸罩层——底部抽屉/终端视图保持纯项目 shell，
+        // 不把 agent TUI 混进来（LO 2026-08-17：下侧栏终端只显示项目路径下的命令行）
+        sessions = (payload?.sessions ?? []).filter((session) => session?.kind !== "cli");
+      } catch (error) {
+        if (error?.status === 501 || /REMOTE_GATE/.test(error?.message || "")) {
+          gateCard(root, "pty", error.message);
+          return;
+        }
+        // 带重试入口：竞态类故障重试即恢复，真实故障则由 message 指认，不让用户只看到一句空泛的异常
+        root.innerHTML = `<div class="forge-empty-waveg">${lucideIcon("triangle-alert", "icon lucide icon-lg")}<h2>终端服务异常</h2><p class="subtle">${escapeHtml(String(error?.message ?? "未知错误"))}</p><button class="button secondary" type="button" data-terminal-retry>重试</button></div>`;
+        root.querySelector("[data-terminal-retry]")?.addEventListener("click", () => void mount(), { once: true });
         return;
       }
-      // 带重试入口：竞态类故障重试即恢复，真实故障则由 message 指认，不让用户只看到一句空泛的异常
-      root.innerHTML = `<div class="forge-empty-waveg">${lucideIcon("triangle-alert", "icon lucide icon-lg")}<h2>终端服务异常</h2><p class="subtle">${escapeHtml(String(error?.message ?? "未知错误"))}</p><button class="button secondary" type="button" data-terminal-retry>重试</button></div>`;
-      root.querySelector("[data-terminal-retry]")?.addEventListener("click", () => void mount(), { once: true });
-      return;
     }
     root.innerHTML = `
       <div class="terminal-shell">
@@ -324,10 +359,19 @@ export function createTerminalPanel(root) {
       </div>`;
     renderTabStrip();
     const live = sessions.filter((session) => !session.exited);
+    for (const session of live) attachSession(session);
+    if (fixedSessions) return;
     if (live.length === 0) {
       await spawnTab();
-    } else {
-      for (const session of live) attachSession(session);
+      return;
+    }
+    const wanted = resolveWorkbenchPtySpawn();
+    const samePath = (left, right) => String(left || "").replace(/[\\/]+$/, "").toLowerCase()
+      === String(right || "").replace(/[\\/]+$/, "").toLowerCase();
+    if (wanted.cwd && !live.some((session) => samePath(session.cwd, wanted.cwd))) {
+      await spawnTab();
+    } else if (wanted.ssh && !live.some((session) => session.title && session.title.includes(wanted.ssh.hostId))) {
+      await spawnTab();
     }
   }
 
@@ -345,15 +389,320 @@ export function createTerminalPanel(root) {
 
   // 迟到会话接入（「新会话 → 远程」创建的 SSH 终端）：面板已挂载就直接 attach 新页签；
   // 未挂载/门闸卡则忽略——mountOnce 本来就会全量列会话。attachSession 幂等，重复事件安全。
-  window.addEventListener("forge:pty-session-created", (event) => {
+  // 通用面板跳过 CLI 接续会话（kind:"cli"）：它们是 agent TUI，只进沉浸罩层，不占纯 shell 面板。
+  function onPtySessionCreated(event) {
     const session = event.detail?.session;
     if (!session?.id) return;
+    if (!fixedSessions && session.kind === "cli") return;
     if (!root.querySelector(".terminal-panes")) return;
     attachSession(session);
+  }
+  window.addEventListener("forge:pty-session-created", onPtySessionCreated);
+
+  /** 当前激活页签的 session id（罩层成员条同步选中态用）。 */
+  function activeTabId() {
+    for (const [id, tab] of tabs) if (tab.paneEl?.classList.contains("is-active")) return id;
+    return null;
+  }
+
+  /** 宿主销毁时调用：断全局监听 + 全量释放 tab（SSE/xterm），root 移除后不残留订阅。 */
+  function dispose() {
+    window.removeEventListener("forge:pty-session-created", onPtySessionCreated);
+    for (const tab of tabs.values()) disposeTab(tab);
+    tabs.clear();
+  }
+
+  // attach/activate/close/activeTabId 暴露给沉浸罩层的成员页签条：成员切换 = 罩层自己驱动
+  // 面板增删激活页签（罩层内面板自带页签条被 CSS 隐藏，成员条是唯一切换入口）
+  return { mount, root, focusActive, dispose, attach: attachSession, activate: activateTab, close: closeTab, activeTabId };
+}
+
+/**
+ * 会话 → 原生 CLI 沉浸接续（LO 2026-08-17：红框区域整体变终端，不要只开底部抽屉）：
+ * 罩层覆盖整个 conversation-pane（对话流 + composer + 底部抽屉），与抽屉/终端视图共享
+ * 同一 PTY 会话（tmux 式多挂，双向实时）。Esc / × 返回对话——只拆罩层视图，PTY 会话不死。
+ * 单例：重复打开先收旧罩层再挂新会话。宿主缺失返回 false，调用方负责切视图后重试。
+ *
+ * 成员页签（同日 LO 追加）：members 是该 run 全部可接续成员（服务端 interactiveCliSpecsForRun），
+ * 罩层头部渲染成员条——已起 PTY 的成员点击即切，未起的点击懒调 /cli-terminal 起进程。
+ * 面板自带页签条在罩层内被 CSS 隐藏，成员条是唯一切换入口。
+ */
+let immersiveState = null; // { overlay, panel, onKeydown }
+
+export function closeImmersiveTerminal() {
+  if (!immersiveState) return;
+  window.removeEventListener("keydown", immersiveState.onKeydown, true);
+  if (immersiveState.pollTimer) window.clearInterval(immersiveState.pollTimer);
+  immersiveState.panel.dispose();
+  immersiveState.overlay.remove();
+  immersiveState = null;
+}
+
+/** 协议徽标取短名：opencode-run-json → opencode，claude-code → claude。 */
+function protoShort(protocol) {
+  return String(protocol || "").split("-")[0] || "cli";
+}
+
+/** 成员色相按 agentId 稳定散列：同一成员每次开罩层都是同一个颜色。 */
+function stableHue(text) {
+  let hash = 0;
+  for (const ch of String(text ?? "")) hash = (hash * 31 + (ch.codePointAt(0) || 0)) >>> 0;
+  return hash % 360;
+}
+
+export function openImmersiveTerminal({ session, title = "", members = [], runId = null, activeAgentId = null } = {}) {
+  if (!session?.id) return false;
+  const host = document.querySelector(".conversation-pane");
+  if (!host) return false;
+  closeImmersiveTerminal();
+  const overlay = document.createElement("div");
+  overlay.className = "cli-immersive";
+  overlay.id = "cli-immersive";
+  overlay.setAttribute("role", "dialog");
+  overlay.setAttribute("aria-modal", "true");
+  overlay.setAttribute("aria-label", "原生 CLI 终端");
+  overlay.innerHTML = `
+    <header class="cli-immersive-head">
+      <span class="cli-immersive-title">${lucideIcon("terminal", "icon lucide")}<span>${escapeHtml(title || session.title || "CLI 终端")}</span></span>
+      <span class="cli-run-status" data-run-status hidden></span>
+      <span class="cli-immersive-hint">双击 Esc 返回 · 单 Esc 留给 CLI 自己 · Ctrl+Alt+PgUp/PgDn 切成员 · 收罩层不杀会话</span>
+      <button class="icon-button cli-immersive-external" type="button" title="在系统终端打开（同一条原生会话；罩层内同名进程随后收掉，避免双写）" aria-label="在系统终端打开">${lucideIcon("external-link", "icon lucide")}</button>
+      <button class="icon-button cli-immersive-close" type="button" title="返回对话（双击 Esc）" aria-label="返回对话">${lucideIcon("x", "icon lucide")}</button>
+    </header>
+    <div class="cli-member-strip" role="tablist" aria-label="团队成员 CLI 切换"></div>
+    <div class="cli-immersive-body"></div>`;
+  host.appendChild(overlay);
+  // 冷启动桥接：新 PTY 缓冲是空的，opencode 装载大会话首屏要约 10s，且 TUI 起笔会清屏——
+  // 提示必须活在罩层 DOM 里（不被 ANSI 重绘抹掉），首个非空输出块到达即撤。
+  // 注意挂点是 overlay 而非 .cli-immersive-body：createTerminalPanel mount 时会重写
+  // body 的 innerHTML，挂在 body 里的 chip 会被立刻抹掉（overlay 自身 DOM 无人重写）。
+  const bootChip = document.createElement("div");
+  bootChip.className = "cli-immersive-boot";
+  bootChip.textContent = "正在启动原生 CLI 并装载会话上下文（约 8–10 秒）…";
+  overlay.appendChild(bootChip);
+  let bootToken = 0;
+  const showBoot = (text, { sticky = false } = {}) => {
+    const token = ++bootToken;
+    if (text) bootChip.textContent = text;
+    if (!bootChip.isConnected) overlay.appendChild(bootChip);
+    if (!sticky) {
+      // 失败提示 8s 后自动撤：错误不会自己变成输出块，等 onFirstChunk 是等不到的
+      window.setTimeout(() => {
+        if (bootToken === token && bootChip.isConnected) bootChip.remove();
+      }, 8000);
+    }
+  };
+  const pruneMemberTab = (ptySessionId) => {
+    let pruned = false;
+    for (const [agentId, id] of memberTabs) {
+      if (id === ptySessionId) {
+        memberTabs.delete(agentId);
+        pruned = true;
+      }
+    }
+    if (pruned) renderMemberStrip();
+  };
+  const panel = createTerminalPanel(overlay.querySelector(".cli-immersive-body"), {
+    fixedSessions: [session],
+    allowSpawn: false,
+    onAllClosed: () => closeImmersiveTerminal(),
+    onFirstChunk: () => bootChip.remove(),
+    // CLI 进程退出/页签被关：成员条映射同步还原为"未启动"，再点即重新接续，不留僵尸 chip
+    onSessionExited: (ptySessionId) => pruneMemberTab(ptySessionId),
+    onTabClosed: (ptySessionId) => pruneMemberTab(ptySessionId),
   });
 
-  return { mount, root, focusActive };
+  // ── 成员页签条：agentId → 在罩层里的 PTY 会话 id；未启动的成员没有映射 ──
+  const memberList = Array.isArray(members) ? [...members] : [];
+  if (activeAgentId && !memberList.some((member) => member?.agentId === activeAgentId)) {
+    memberList.unshift({ agentId: activeAgentId, label: "", protocol: "" });
+  }
+  const memberTabs = new Map();
+  if (activeAgentId) memberTabs.set(activeAgentId, session.id);
+  const strip = overlay.querySelector(".cli-member-strip");
+  const overlayAlive = () => immersiveState && immersiveState.overlay === overlay;
+
+  async function spawnMemberCli(member) {
+    if (!runId || !overlayAlive()) return;
+    const label = member.label || member.agentId;
+    // 启动提示粘性：慢 CLI（opencode 大会话装载 ~10s）靠首个输出块撤，不按 8s 定时撤
+    showBoot(`正在启动 ${label} 的原生 CLI 并装载会话上下文（约 8–10 秒）…`, { sticky: true });
+    try {
+      const result = await request(`/api/runs/${encodeURIComponent(runId)}/cli-terminal`, {
+        method: "POST",
+        // 严格模式：点名要哪个成员就是哪个，落空如实报错——不静默回落到别人的会话
+        body: JSON.stringify({ agentId: member.agentId, strict: true }),
+      });
+      if (!overlayAlive()) return; // 等待期间罩层已被收起，静默丢弃
+      if (!result?.session?.id) throw new Error("服务端未返回会话");
+      memberTabs.set(member.agentId, result.session.id);
+      panel.attach(result.session); // attach 内部自动激活新页签
+      renderMemberStrip();
+    } catch (error) {
+      if (!overlayAlive()) return;
+      showBoot(`打开 ${label} 失败：${String(error?.message ?? error).replace(/[\r\n]+/g, " ")}`);
+    }
+  }
+
+  function renderMemberStrip() {
+    if (!strip.isConnected) return;
+    strip.innerHTML = "";
+    const activeId = panel.activeTabId();
+    for (const member of memberList) {
+      const agentId = member.agentId;
+      const ptyId = memberTabs.get(agentId);
+      const live = Boolean(ptyId);
+      const active = live && ptyId === activeId;
+      if (active) {
+        // 记住这条会话上次在罩层里看的是谁：重开罩层（dedupe 接回）时恢复焦点成员
+        try { sessionStorage.setItem(`514cc:cli-active:${runId || ""}`, agentId); } catch { /* storage 可能被禁 */ }
+        overlay.dataset.activeAgent = agentId;
+      }
+      const label = member.label || agentId;
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = `cli-member-chip${live ? " is-live" : ""}${active ? " is-active" : ""}`;
+      chip.setAttribute("role", "tab");
+      chip.setAttribute("aria-selected", active ? "true" : "false");
+      chip.title = live ? `${label} · 已接续（点击切换，× 关闭该 CLI 进程）` : `${label} · 点击启动原生 CLI（与会话共享同一原生会话）`;
+      chip.style.setProperty("--chip-hue", String(stableHue(agentId))); // CSSOM 路径，不落内联 style 属性
+      chip.innerHTML = `
+        <span class="cli-member-dot" aria-hidden="true"></span>
+        <span class="cli-member-name">${escapeHtml(label)}</span>
+        <span class="cli-member-proto">${escapeHtml(protoShort(member.protocol))}</span>`;
+      chip.addEventListener("click", () => {
+        const tabId = memberTabs.get(agentId);
+        if (tabId) {
+          panel.activate(tabId);
+          renderMemberStrip();
+        } else {
+          void spawnMemberCli(member);
+        }
+      });
+      if (live) {
+        const close = document.createElement("span");
+        close.className = "cli-member-close";
+        close.setAttribute("aria-label", `关闭 ${label} 的 CLI`);
+        close.innerHTML = lucideIcon("x", "icon lucide");
+        close.addEventListener("click", (event) => {
+          event.stopPropagation();
+          memberTabs.delete(agentId);
+          // close 是异步（先 DELETE 再激活剩余页签），完成后再重绘一次同步 is-active
+          void panel.close(ptyId).then(() => renderMemberStrip());
+          renderMemberStrip();
+        });
+        chip.appendChild(close);
+      }
+      strip.appendChild(chip);
+    }
+  }
+
+  // 双击 Esc 才收罩层（600ms 窗口）：opencode/claude 原生 TUI 自己用单 Esc 打断当前轮，
+  // 单按必须原样透传给终端；捕获相监听只是为了能抢在 xterm 之前识别双击。
+  let lastEscAt = 0;
+  const onKeydown = (event) => {
+    // Ctrl+Alt+PgUp/PgDn：在已接续的成员页签间循环切换（gnome-terminal 同款）。
+    // 只在 is-live 页签间走——键盘漫游不该背后替用户懒起新进程。
+    if (event.ctrlKey && event.altKey && !event.shiftKey && (event.key === "PageDown" || event.key === "PageUp")) {
+      const liveIds = memberList.map((member) => memberTabs.get(member.agentId)).filter(Boolean);
+      if (liveIds.length < 2) return; // 少于两页无可循环，按键照常透传给终端
+      event.preventDefault();
+      event.stopPropagation();
+      const current = panel.activeTabId();
+      const index = liveIds.indexOf(current);
+      const step = event.key === "PageDown" ? 1 : -1;
+      const next = liveIds[(index + step + liveIds.length) % liveIds.length] ?? liveIds[0];
+      panel.activate(next);
+      renderMemberStrip();
+      return;
+    }
+    if (event.key !== "Escape") return;
+    const now = Date.now();
+    if (now - lastEscAt >= 600) {
+      lastEscAt = now;
+      return; // 单按：不拦截，透传给终端
+    }
+    lastEscAt = 0;
+    event.preventDefault();
+    event.stopPropagation();
+    closeImmersiveTerminal();
+  };
+  window.addEventListener("keydown", onKeydown, true);
+  overlay.querySelector(".cli-immersive-close").addEventListener("click", () => closeImmersiveTerminal());
+
+  // ── 控制台轮次状态徽标：罩层里也看得见"控制台那边的轮次在不在跑"（5s 轮询，罩层收起即停）。
+  // 用户在 CLI 里输入前看一眼，避免与控制台在途轮次交错写同一份原生会话。──
+  const statusBadge = overlay.querySelector("[data-run-status]");
+  const RUN_STATUS_META = {
+    running: { text: "控制台轮次进行中", tone: "is-busy", title: "控制台正在对该会话跑一轮；此时在终端里继续可能交错，建议等本轮结束或先停止" },
+    waiting_agent: { text: "等待你在控制台回应", tone: "is-wait", title: "成员在控制台发起了提问（pending ask），回控制台回应或直接在 CLI 里聊都行" },
+    waiting_approval: { text: "等待控制台审批", tone: "is-wait", title: "build 轮在等动作审批，回控制台处理" },
+    recovery_required: { text: "待恢复确认", tone: "is-wait", title: "上一轮提交状态不明，回控制台确认恢复" },
+  };
+  let pollTimer = 0;
+  const syncRunStatus = async () => {
+    if (!overlayAlive() || !runId) return;
+    try {
+      const run = await request(`/api/runs/${encodeURIComponent(runId)}`);
+      if (!overlayAlive()) return;
+      // 未具名的活跃态（queued/executing/planning/…）同样算"轮次在途"——
+      // 兜底成"空闲"会恰好在最该提醒的时候误导用户往终端里打字
+      const meta = RUN_STATUS_META[run?.status]
+        ?? (ACTIVE_RUN_STATES.has(run?.status) ? RUN_STATUS_META.running : null)
+        ?? { text: "控制台空闲", tone: "is-idle", title: "控制台侧没有在途轮次，终端里随便聊" };
+      statusBadge.textContent = meta.text;
+      statusBadge.title = meta.title;
+      statusBadge.className = `cli-run-status ${meta.tone}`;
+      statusBadge.hidden = false;
+    } catch { /* 轮询失败保持上一状态，下一轮再试 */ }
+  };
+  if (runId && statusBadge) {
+    void syncRunStatus();
+    pollTimer = window.setInterval(() => void syncRunStatus(), 5000);
+  }
+
+  // ── 在系统终端打开：同一条原生会话、同一份 resume 命令，宿主从罩层换成真终端窗口。
+  // 迁移语义而非分身：两个 CLI 进程同时写同一份原生 session 文件就是 dedupe 要灭掉的争抢，
+  // 所以外部窗口起成功后，罩层内同成员的在途 PTY 收掉（关的是最后一页时罩层随之收起）。──
+  overlay.querySelector(".cli-immersive-external")?.addEventListener("click", async () => {
+    if (!runId) {
+      showBoot("缺少会话上下文，无法打开系统终端");
+      return;
+    }
+    const agentId = overlay.dataset.activeAgent || activeAgentId || "";
+    const label = memberList.find((member) => member.agentId === agentId)?.label || agentId || "当前成员";
+    showBoot("正在请求系统终端…", { sticky: true });
+    try {
+      const result = await request(`/api/runs/${encodeURIComponent(runId)}/cli-terminal`, {
+        method: "POST",
+        body: JSON.stringify({ agentId: agentId || undefined, strict: true, external: true }),
+      });
+      if (!overlayAlive()) return;
+      showBoot(result?.spec ? `已在系统终端打开：${result.spec.command}` : "已在系统终端打开");
+      // 外部窗口已起：收掉罩层内同成员 PTY，同一份原生会话不交双写
+      const livePty = agentId ? memberTabs.get(agentId) : null;
+      if (livePty) {
+        memberTabs.delete(agentId);
+        await panel.close(livePty).catch(() => {}); // 最后一页会触发 onAllClosed 收罩层
+        if (overlayAlive()) renderMemberStrip();
+      }
+    } catch (error) {
+      if (!overlayAlive()) return;
+      showBoot(`系统终端打开失败：${String(error?.message ?? error).replace(/[\r\n]+/g, " ")}`);
+    }
+  });
+
+  immersiveState = { overlay, panel, onKeydown, pollTimer };
+  renderMemberStrip();
+  // mount 完成（首个会话 attach + 激活）后重绘一次成员条，补上 is-active 选中态
+  void panel.mount().then(() => renderMemberStrip());
+  return true;
 }
+
+window.addEventListener("forge:cli-immersive-open", (event) => {
+  openImmersiveTerminal(event.detail ?? {});
+});
+window.addEventListener("forge:cli-immersive-close", () => closeImmersiveTerminal());
 
 function bootWhenReady() {
   if (typeof document === "undefined") return;

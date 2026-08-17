@@ -155,6 +155,131 @@ test("market: skill install is atomic stage-then-swap and serialized under the w
   assert.equal(ledger.filter((entry) => entry.kind === "skill").length, 2);
 });
 
+test("market: skill remove also drops the installed ledger row", async (t) => {
+  const { dir, service } = await fixture(t);
+  const zip = await makeSkillZip(t, dir, "ledger-skill", true);
+  const staged = await service.skillsStage({ url: `https://local.fixture/${zip}` });
+  await service.skillsInstall({ stageId: staged.stageId, confirmed: true });
+  assert.equal((await service.installedList()).some((item) => item.id === "ledger-skill"), true);
+  assert.equal(await service.skillsRemove("ledger-skill"), true);
+  assert.equal((await service.installedList()).some((item) => item.id === "ledger-skill"), false);
+});
+
+test("market: skill remove also asks ccswitch to uninstall a projected skill", async (t) => {
+  const removed = [];
+  const { dir } = await fixture(t);
+  const service = createMarketService({
+    dataRoot: dir,
+    skillHostAllowlist: ["local.fixture", "github.com", "codeload.github.com"],
+    ccswitchDomain: {
+      installSkillFiles: async (input) => ({ id: input.name }),
+      uninstallSkill: async (id, opts) => { removed.push({ id, confirmed: opts?.confirmed }); return { removed: id }; },
+    },
+  });
+  const zip = await makeSkillZip(t, dir, "cli-skill", true);
+  const staged = await service.skillsStage({ url: `https://local.fixture/${zip}` });
+  await service.skillsInstall({ stageId: staged.stageId, confirmed: true });
+  assert.equal(await service.skillsRemove("cli-skill"), true);
+  assert.deepEqual(removed, [{ id: "cli-skill", confirmed: true }]);
+});
+
+test("market: skill install projects from the swapped copy, not the deleted stage", async (t) => {
+  const projected = [];
+  const { dir } = await fixture(t);
+  const service = createMarketService({
+    dataRoot: dir,
+    skillHostAllowlist: ["local.fixture", "github.com", "codeload.github.com"],
+    ccswitchDomain: {
+      installSkillFiles: async (input) => {
+        projected.push(Object.keys(input.files || {}));
+        return { id: input.name };
+      },
+    },
+  });
+  const zip = await makeSkillZip(t, dir, "swap-skill", true);
+  const staged = await service.skillsStage({ url: `https://local.fixture/${zip}` });
+  await service.skillsInstall({ stageId: staged.stageId, confirmed: true });
+  assert.equal(projected.length, 1);
+  assert.equal(projected[0].some((name) => name.replace(/\\/g, "/").endsWith("SKILL.md")), true);
+});
+
+test("market: mcp update apps re-upserts the projected server", async (t) => {
+  const upserts = [];
+  const detail = { server: { name: "io.x/fs", title: "Filesystem", description: "d", command: "npx", args: ["-y", "@x/fs"] } };
+  const { dir } = await fixture(t);
+  const service = createMarketService({
+    dataRoot: dir,
+    fetchImpl: async () => ({ ok: true, json: async () => detail }),
+    ccswitchDomain: {
+      upsertMcp: async (input) => { upserts.push(input); return { id: input.id }; },
+    },
+  });
+  const staged = await service.mcpStage({ source: "official", id: "io.x/fs" });
+  await service.mcpInstall({ stageId: staged.stageId, confirmed: true, apps: { claude: true } });
+  const updated = await service.mcpUpdateApps({ id: "io.x-fs", apps: { claude: true, kimi: true } });
+  assert.equal(updated.apps.kimi, true);
+  assert.equal(upserts.at(-1).apps.kimi, true);
+  await assert.rejects(() => service.mcpUpdateApps({ id: "missing", apps: { claude: true } }), { code: "MARKET_NOT_FOUND" });
+});
+
+test("market: skill update apps re-projects and disables unchecked CLIs", async (t) => {
+  const toggled = [];
+  const { dir } = await fixture(t);
+  const service = createMarketService({
+    dataRoot: dir,
+    skillHostAllowlist: ["local.fixture", "github.com", "codeload.github.com"],
+    ccswitchDomain: {
+      installSkillFiles: async (input) => ({ id: input.name, apps: input.apps }),
+      toggleSkill: async (id, app, enabled) => { toggled.push({ id, app, enabled }); return { id }; },
+    },
+  });
+  const zip = await makeSkillZip(t, dir, "proj-skill", true);
+  const staged = await service.skillsStage({ url: `https://local.fixture/${zip}` });
+  await service.skillsInstall({ stageId: staged.stageId, confirmed: true, apps: { claude: true, codex: true } });
+  const updated = await service.skillUpdateApps({ name: "proj-skill", apps: { claude: true, codex: false } });
+  assert.equal(updated.apps.claude, true);
+  assert.equal(updated.apps.codex, false);
+  assert.deepEqual(toggled, [{ id: "proj-skill", app: "codex", enabled: false }]);
+});
+
+test("market: scan all repos continues after one failure", async (t) => {
+  const { service } = await fixture(t, async (url) => {
+    if (String(url).includes("cexll")) throw new Error("boom");
+    if (String(url).includes("/git/trees/")) {
+      return { ok: true, json: async () => ({ tree: [{ path: "SKILL.md", type: "blob" }] }) };
+    }
+    if (String(url).includes("raw.githubusercontent.com")) {
+      return { ok: true, text: async () => "---\nname: demo\ndescription: d\n---\n" };
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  });
+  await service.addRepo({ url: "cexll/myclaude", branch: "main" });
+  const result = await service.scanAllRepos();
+  assert.equal(result.repos.some((item) => item.id === "cexll/myclaude" && item.ok === false), true);
+  assert.equal(result.repos.some((item) => item.id === "anthropics/skills" && item.ok === true), true);
+});
+
+test("market: mcp remove drops ledger and asks ccswitch to delete a projected server", async (t) => {
+  const removed = [];
+  const detail = { server: { name: "io.x/fs", title: "Filesystem", description: "d", command: "npx", args: ["-y", "@x/fs"] } };
+  const { dir } = await fixture(t);
+  const service = createMarketService({
+    dataRoot: dir,
+    fetchImpl: async () => ({ ok: true, json: async () => detail }),
+    ccswitchDomain: {
+      upsertMcp: async (input) => ({ id: input.id }),
+      deleteMcp: async (id) => { removed.push(id); return { removed: id }; },
+    },
+  });
+  const staged = await service.mcpStage({ source: "official", id: "io.x/fs" });
+  await service.mcpInstall({ stageId: staged.stageId, confirmed: true, apps: { claude: true } });
+  const gone = await service.mcpRemove("io.x-fs");
+  assert.equal(gone.removed, "io.x-fs");
+  assert.deepEqual(removed, ["io.x-fs"]);
+  assert.equal((await service.installedList()).length, 0);
+  await assert.rejects(() => service.mcpRemove("missing"), { code: "MARKET_NOT_FOUND" });
+});
+
 test("market: skill remove deletes directory and refuses unsafe names", async (t) => {
   const { dir, service } = await fixture(t);
   const zip = await makeSkillZip(t, dir, "rm-skill", true);
@@ -164,4 +289,66 @@ test("market: skill remove deletes directory and refuses unsafe names", async (t
   assert.equal(await service.skillsRemove("rm-skill"), true);
   assert.equal(await service.skillsRemove("rm-skill"), false);
   await assert.rejects(() => service.skillsRemove("../x"), { code: "MARKET_BAD_ID" });
+});
+
+test("market: MCP 安装把 registry 配置投影进 ccswitch，缺 command/url 则拒绝", async (t) => {
+  const calls = [];
+  const detail = { server: { name: "io.x/fs", title: "Filesystem", description: "d", packages: [{ identifier: "@x/fs", registryType: "npm" }] } };
+  const { dir } = await fixture(t);
+  const withDomain = createMarketService({
+    dataRoot: dir,
+    fetchImpl: async () => ({ ok: true, json: async () => detail }),
+    ccswitchDomain: { upsertMcp: async (input) => { calls.push(input); return { id: input.id }; } },
+  });
+  const staged = await withDomain.mcpStage({ source: "official", id: "io.x/fs" });
+  assert.equal(staged.review.config.command, "npx");
+  assert.deepEqual(staged.review.config.args, ["-y", "@x/fs"]);
+  const installed = await withDomain.mcpInstall({
+    stageId: staged.stageId,
+    confirmed: true,
+    apps: { claude: true, kimi: true, hermes: false },
+  });
+  assert.equal(installed.projected, true);
+  assert.equal(calls[0].apps.kimi, true);
+  assert.equal(calls[0].id, "io.x-fs");
+
+  const { dir: emptyDir } = await fixture(t);
+  const empty = createMarketService({
+    dataRoot: emptyDir,
+    fetchImpl: async () => ({ ok: true, json: async () => ({ server: { name: "bare", title: "Bare" } }) }),
+  });
+  const bare = await empty.mcpStage({ source: "official", id: "bare" });
+  await assert.rejects(() => empty.mcpInstall({ stageId: bare.stageId, confirmed: true }), { code: "MARKET_MCP_INCOMPLETE" });
+});
+
+test("market: 仓库添加/扫描/目录，skillPath 能从多 skill zip 里取出指定目录", async (t) => {
+  const { dir, service } = await fixture(t, async (url) => {
+    if (String(url).includes("/git/trees/")) {
+      return {
+        ok: true,
+        json: async () => ({ tree: [{ path: "skills/pdf/SKILL.md", type: "blob" }, { path: "skills/docx/SKILL.md", type: "blob" }] }),
+      };
+    }
+    if (String(url).includes("raw.githubusercontent.com")) {
+      const name = String(url).includes("/pdf/") ? "pdf" : "docx";
+      return { ok: true, text: async () => `---\nname: ${name}\ndescription: ${name} skill\n---\n` };
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  });
+  const listed = await service.listRepos();
+  assert.ok(listed.some((item) => item.id === "anthropics/skills"));
+  const scanned = await service.scanRepo("anthropics/skills");
+  assert.equal(scanned.skills.length, 2);
+  assert.equal(scanned.skills[0].description.includes("skill"), true);
+  const catalog = await service.catalogSkills("pdf");
+  assert.equal(catalog.length, 1);
+  assert.equal(catalog[0].repoId, "anthropics/skills");
+  const extra = await service.addRepo({ url: "cexll/myclaude", branch: "master" });
+  assert.equal(extra.id, "cexll/myclaude");
+
+  const zip = storedZip("wrap/skills/pdf/SKILL.md", "---\nname: pdf\ndescription: PDF 工具\n---\n# pdf\n");
+  const zipPath = join(dir, "multi.zip");
+  await writeFile(zipPath, zip);
+  const staged = await service.skillsStage({ url: `https://local.fixture/${zipPath}`, skillPath: "skills/pdf" });
+  assert.equal(staged.review.name, "pdf");
 });

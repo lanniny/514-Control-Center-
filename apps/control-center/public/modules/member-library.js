@@ -2,6 +2,12 @@
  * Team member registry UI. A logical member owns identity and dispatch metadata;
  * runtimeProfileId remains a read-through binding to a manifest-backed adapter.
  */
+import {
+  fileToAvatarDataUrl,
+  hydrateAvatar,
+  hydrateAvatarCatalog,
+  memberAvatarMarkup,
+} from "./avatars.js";
 export function normalizeMemberModelOptions(options = [], defaultModel = null) {
   const normalized = new Map();
   for (const option of Array.isArray(options) ? options : []) {
@@ -40,6 +46,8 @@ export function createMemberLibrary({
   onOpenTeam,
   onMemberSaved,
   cliIconMarkup,
+  requestBlob,
+  onAvatarsChanged,
 } = {}) {
   const byId = (id) => document.getElementById(id);
   let filter = "all";
@@ -102,6 +110,7 @@ export function createMemberLibrary({
     if (runtimeConfig) runtimeConfig.disabled = busy || !draft?.runtimeProfileId;
     const capabilityConfig = byId("member-open-capabilities-button");
     if (capabilityConfig) capabilityConfig.disabled = busy || !source?.id;
+    if (draft) renderAvatarSlot(source || draft, { isNew: !source?.id });
     if (busy) setStatus("正在保存", "neutral");
   }
 
@@ -131,8 +140,12 @@ export function createMemberLibrary({
       const active = member.id === state.selectedMemberId && source?.id === member.id;
       const ready = member.teamMemberEligible === true;
       const brand = brandFor(member);
-      const logo = typeof cliIconMarkup === "function" ? cliIconMarkup(brand, "member-library-logo") : "";
       const initials = String(member.shortLabel || member.label || member.id).slice(0, 2);
+      const logo = memberAvatarMarkup(member, {
+        className: "avatar-photo",
+        iconClass: "member-library-logo",
+        fallback: typeof cliIconMarkup === "function" ? cliIconMarkup(brand, "member-library-logo") : "",
+      });
       const usageCount = usageOf(member.id).length;
       const badges = [
         member.coordinatorEligible === true ? '<span class="member-badge is-coordinator" title="许可、Adapter 与席位均满足主脑条件">主脑可任</span>' : "",
@@ -482,9 +495,35 @@ export function createMemberLibrary({
     byId("member-reset-label").textContent = member.builtin && !isNew ? "恢复系统默认" : "重置";
     setStatus(isNew ? "尚未保存" : "已保存", isNew ? "warning" : "ok");
     renderUsage(isNew ? null : member);
+    renderAvatarSlot(member, { isNew });
     updateCounters();
     renderList();
     updateTeamToggle();
+  }
+
+  function renderAvatarSlot(member, { isNew = false } = {}) {
+    const preview = byId("member-avatar-preview");
+    const hint = byId("member-avatar-hint");
+    const upload = byId("member-avatar-upload");
+    const reset = byId("member-avatar-reset");
+    if (!preview) return;
+    const brand = brandFor(member);
+    const fallback = typeof cliIconMarkup === "function" ? cliIconMarkup(brand, "cli-logo") : "";
+    preview.innerHTML = memberAvatarMarkup(member, {
+      className: "avatar-photo",
+      iconClass: "cli-logo",
+      fallback: fallback || `<span>${escapeHtml(String(member.shortLabel || member.label || "?").slice(0, 2))}</span>`,
+    });
+    const custom = member?.avatar === "custom";
+    if (hint) {
+      hint.textContent = isNew
+        ? "先保存成员，再更换头像。未设置时默认使用官方 CLI 图标。"
+        : custom
+          ? "当前使用自定义照片。恢复后回到该成员的官方 CLI 图标。"
+          : "默认使用该成员的官方 CLI 图标。可以换成自己的照片。";
+    }
+    if (upload) upload.disabled = isNew || busy;
+    if (reset) reset.hidden = isNew || !custom;
   }
 
   function blankMember(copy = null) {
@@ -553,6 +592,13 @@ export function createMemberLibrary({
     state.bootstrap.teamCatalog = state.memberCatalog;
     state.bootstrap.runtimeCatalog = state.runtimeCatalog;
     await onCatalogChanged?.(state.memberCatalog);
+    if (typeof requestBlob === "function") {
+      await hydrateAvatarCatalog(requestBlob, {
+        members: state.memberCatalog,
+        operatorProfile: state.operatorProfile,
+      });
+      await onAvatarsChanged?.();
+    }
     renderList();
     const next = memberById(preferredId || source?.id);
     if (next) renderEditor(next);
@@ -631,7 +677,7 @@ export function createMemberLibrary({
     const accepted = await confirmAction({
       eyebrow: "恢复内置成员",
       title: `恢复「${source.label}」的系统默认配置？`,
-      rows: [["成员 ID", source.id], ["恢复范围", "身份、席位、能力、模型、推理强度与主脑许可"]],
+      rows: [["成员 ID", source.id], ["恢复范围", "身份、席位、能力、模型、推理强度、主脑许可与自定义头像"]],
       warning: "只清除该内置成员的可编辑覆盖，不删除成员，也不修改运行席位本身。",
       confirmLabel: "恢复系统默认",
       danger: false,
@@ -644,12 +690,50 @@ export function createMemberLibrary({
         "defaultModel", "defaultEffort", "runtimeProfileId", "mainBrainAllowed",
       ].map((key) => [key, null]));
       await request(`${apiPath}/${encodeURIComponent(source.id)}`, { method: "PUT", body: payload });
+      if (source.avatar === "custom") {
+        await request(`/api/avatars/members/${encodeURIComponent(source.id)}`, { method: "DELETE" });
+      }
       dirty = false;
       await refreshCatalog(source.id);
       toast("内置成员已恢复系统默认", "success");
     } catch (error) {
       toast(`恢复系统默认失败：${error.message}`, "error");
       setStatus("恢复失败", "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function uploadAvatar(file) {
+    if (!source?.id || busy || typeof request !== "function") return;
+    setBusy(true);
+    try {
+      const dataUrl = await fileToAvatarDataUrl(file);
+      const saved = await request(`/api/avatars/members/${encodeURIComponent(source.id)}`, {
+        method: "POST",
+        body: { dataUrl },
+      });
+      if (typeof requestBlob === "function") await hydrateAvatar(requestBlob, "member", source.id);
+      await refreshCatalog(saved?.id || source.id);
+      await onAvatarsChanged?.();
+      toast("成员头像已更新", "success");
+    } catch (error) {
+      toast(`头像更新失败：${error.message}`, "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function resetAvatar() {
+    if (!source?.id || source.avatar !== "custom" || busy) return;
+    setBusy(true);
+    try {
+      await request(`/api/avatars/members/${encodeURIComponent(source.id)}`, { method: "DELETE" });
+      await refreshCatalog(source.id);
+      await onAvatarsChanged?.();
+      toast("已恢复官方图标", "success");
+    } catch (error) {
+      toast(`恢复官方图标失败：${error.message}`, "error");
     } finally {
       setBusy(false);
     }
@@ -665,8 +749,10 @@ export function createMemberLibrary({
     button.dataset.included = included ? "true" : "false";
   }
 
+  const TEAM_SURFACES = ["orchestration", "members", "settings"];
+
   function setSurface(surface, { focus = true } = {}) {
-    const next = surface === "members" ? "members" : "orchestration";
+    const next = TEAM_SURFACES.includes(surface) ? surface : "orchestration";
     state.teamSurface = next;
     document.querySelectorAll("[data-team-surface]").forEach((tab) => {
       const active = tab.dataset.teamSurface === next;
@@ -674,8 +760,11 @@ export function createMemberLibrary({
       tab.setAttribute("aria-selected", String(active));
       tab.tabIndex = active ? 0 : -1;
     });
-    byId("team-surface-orchestration").hidden = next !== "orchestration";
-    byId("team-surface-members").hidden = next !== "members";
+    for (const name of TEAM_SURFACES) {
+      const panel = byId(`team-surface-${name}`);
+      if (panel) panel.hidden = name !== next;
+    }
+    byId("team-settings-panel")?.setAttribute("data-active-surface", next);
     if (focus) byId(`team-surface-${next}-tab`)?.focus({ preventScroll: true });
   }
 
@@ -741,7 +830,9 @@ export function createMemberLibrary({
     byId("team-surface-tabs")?.addEventListener("keydown", (event) => {
       if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return;
       event.preventDefault();
-      setSurface(state.teamSurface === "members" ? "orchestration" : "members");
+      const index = TEAM_SURFACES.indexOf(state.teamSurface);
+      const dir = event.key === "ArrowRight" ? 1 : -1;
+      setSurface(TEAM_SURFACES[(index + dir + TEAM_SURFACES.length) % TEAM_SURFACES.length]);
     });
     byId("member-library-list")?.addEventListener("click", (event) => {
       const item = event.target.closest("[data-member-id]");
@@ -761,6 +852,16 @@ export function createMemberLibrary({
         item.setAttribute("aria-pressed", String(active));
       });
       renderList();
+    });
+    byId("member-avatar-upload")?.addEventListener("click", () => {
+      if (!source?.id || busy) return;
+      byId("member-avatar-file")?.click();
+    });
+    byId("member-avatar-reset")?.addEventListener("click", () => void resetAvatar());
+    byId("member-avatar-file")?.addEventListener("change", (event) => {
+      const file = event.target.files?.[0];
+      event.target.value = "";
+      if (file) void uploadAvatar(file);
     });
     byId("member-new-button")?.addEventListener("click", () => void createNew());
     byId("member-duplicate-button")?.addEventListener("click", async () => {

@@ -76,7 +76,7 @@ test("app close 在 proxy restore 未完成时保留服务与实例锁，并允�
   await assert.rejects(access(lockPath), { code: "ENOENT" });
 });
 
-test("app close 提交点后的清理失败会尽力完成其余步骤，并在后续关闭中保持失败", async (t) => {
+test("app close 提交点后的清理失败会尽力完成其余步骤，并允许后续关闭重试", async (t) => {
   const root = await mkdtemp(resolve(appRoot, ".test-app-close-"));
   const repoRoot = await createIsolatedRepo(root);
   const dataRoot = resolve(root, "data");
@@ -95,10 +95,14 @@ test("app close 提交点后的清理失败会尽力完成其余步骤，并在�
     calls.push("approvalBroker.denyAll");
     return originalDenyAll();
   };
+  let orchestratorAttempts = 0;
   state.orchestrator.close = async () => {
     calls.push("orchestrator.close");
     await originalOrchestratorClose();
-    throw Object.assign(new Error("injected orchestrator cleanup failure"), { code: "INJECTED_CLEANUP_FAILURE" });
+    orchestratorAttempts += 1;
+    if (orchestratorAttempts === 1) {
+      throw Object.assign(new Error("injected orchestrator cleanup failure"), { code: "INJECTED_CLEANUP_FAILURE" });
+    }
   };
   state.eventStore.close = async () => {
     calls.push("eventStore.close");
@@ -109,11 +113,9 @@ test("app close 提交点后的清理失败会尽力完成其余步骤，并在�
     return originalFlush();
   };
 
-  let firstError;
   await assert.rejects(
     state.close(),
     (error) => {
-      firstError = error;
       return error.code === "CONTROL_CENTER_CLOSE_FAILED"
         && error.cleanupErrors?.some((entry) => entry.step === "orchestrator.close"
           && entry.code === "INJECTED_CLEANUP_FAILURE");
@@ -127,6 +129,40 @@ test("app close 提交点后的清理失败会尽力完成其余步骤，并在�
   ]);
   await assert.rejects(access(lockPath), { code: "ENOENT" });
 
-  await assert.rejects(state.close(), (error) => error === firstError);
-  assert.equal(calls.length, 4, "terminal cleanup failure must not be retried or reported as success");
+  await state.close();
+  assert.deepEqual(calls, [
+    "approvalBroker.denyAll",
+    "orchestrator.close",
+    "eventStore.close",
+    "childRegistry.flush",
+    "orchestrator.close",
+  ]);
+});
+
+test("app close 为未纳入 deadline 的 cleanup step 提供超时并支持恢复后重试", async (t) => {
+  const root = await mkdtemp(resolve(appRoot, ".test-app-close-"));
+  const repoRoot = await createIsolatedRepo(root);
+  const dataRoot = resolve(root, "data");
+  const lockPath = resolve(dataRoot, "control-center.lock");
+  const state = await createControlCenter({ repoRoot, dataRoot });
+  t.after(async () => {
+    await state.close().catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  });
+
+  let releaseFlush;
+  state.childRegistry.flush = () => new Promise((resolveFlush) => { releaseFlush = resolveFlush; });
+  const startedAt = Date.now();
+  await assert.rejects(
+    state.close({ budgetMs: 5_000, deadlineMs: Date.now() + 150 }),
+    (error) => error.code === "CONTROL_CENTER_CLOSE_FAILED"
+      && error.cleanupErrors?.some((entry) => entry.step === "childRegistry.flush"
+        && entry.code === "CONTROL_CENTER_CLOSE_TIMEOUT"),
+  );
+  assert.ok(Date.now() - startedAt < 1_000, "an external absolute deadline must override the local close budget");
+  await access(lockPath);
+
+  releaseFlush();
+  await state.close({ budgetMs: 1_000 });
+  await assert.rejects(access(lockPath), { code: "ENOENT" });
 });

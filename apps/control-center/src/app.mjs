@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { closeChannelService } from "./channels/routes.mjs";
 import { join, resolve } from "node:path";
 import { EventStore } from "./event-store.mjs";
 import { configureChildRegistry } from "./child-registry.mjs";
@@ -28,6 +29,40 @@ import { getSshService } from "./ssh/routes.mjs";
 
 async function readJson(path) {
   return JSON.parse(await readFile(path, "utf8"));
+}
+
+// 关闭链统一预算默认值（烛 wave-shutdown 复审）：proxy→orchestrator→eventStore 共享
+// 同一份剩余预算，不再各自独占计时叠加出无界总时长。server.mjs 可用
+// CONTROL_CENTER_SHUTDOWN_BUDGET_MS 覆盖（测试 fixture 收紧到 5s 退出窗口内）。
+export const DEFAULT_CLOSE_BUDGET_MS = 8_000;
+
+function closeTimeoutError(step, deadline) {
+  const remainingMs = Math.max(0, deadline - Date.now());
+  return Object.assign(
+    new Error(`Control Center close step ${step} exceeded its remaining shutdown budget (${remainingMs}ms left)`),
+    {
+      code: "CONTROL_CENTER_CLOSE_TIMEOUT",
+      step,
+      deadline,
+    },
+  );
+}
+
+async function settleCloseStep(operation, deadline, step) {
+  const remainingMs = deadline - Date.now();
+  if (remainingMs <= 0) throw closeTimeoutError(step, deadline);
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(closeTimeoutError(step, deadline)), remainingMs);
+  });
+  try {
+    return await Promise.race([
+      typeof operation === "function" ? Promise.resolve().then(operation) : Promise.resolve(operation),
+      timeout,
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 const HOT_RELOAD_SOURCES = new Set([
@@ -260,6 +295,9 @@ export async function createControlCenter(options = {}) {
   let closed = false;
   let closeFailure = null;
   let closePromise = null;
+  // 每个关闭步骤只启动一次；超时后下一次 close() 继续等待同一 Promise，避免
+  // 对仍在运行的资源操作重复发起并发清理。已拒绝的步骤会在下一次尝试重新创建。
+  const closeTasks = new Map();
   let state;
   configManager = await new ConfigManager({
     repoRoot,
@@ -432,29 +470,85 @@ export async function createControlCenter(options = {}) {
         }
         throw error;
       } finally {
-        await catalogGuard?.release({ committed: true, activation });
+        // 只有明确发布成功或已完成 swap 才提交候选目录。swapRuntime 之前失败时，
+        // pending catalog 必须回到上一个值，否则团队写入会被一代未激活的目录卡死。
+        const catalogCommitted = Boolean(activation?.status === "reloaded" || swapped);
+        await catalogGuard?.release({
+          committed: catalogCommitted,
+          activation: activation ?? (swapped ? { status: "reloaded" } : null),
+        });
         reloadInProgress = false;
       }
     },
-    async close() {
-      if (closeFailure) throw closeFailure;
+    async close({ budgetMs = DEFAULT_CLOSE_BUDGET_MS, deadlineMs = null, onPhase = null } = {}) {
       if (closed) return;
       if (closePromise) return closePromise;
       const resumeAutomations = Boolean(automations.timer);
       closePromise = (async () => {
-        await automations.stop(); // 先停调度器：关闭窗口不再产生新 run
+        // 统一 shutdown deadline：所有阶段共享同一份剩余预算。onPhase 逐阶段上报耗时，
+        // 关闭超时/失败时能定位到具体阶段，而不是只剩一句“优雅关闭超时”。
+        const budgetDeadline = Date.now() + Math.max(500, Number(budgetMs) || DEFAULT_CLOSE_BUDGET_MS);
+        const requestedDeadline = Number(deadlineMs);
+        const deadline = Number.isFinite(requestedDeadline) && requestedDeadline > 0
+          ? Math.min(budgetDeadline, requestedDeadline)
+          : budgetDeadline;
+        const reportPhase = (step, startedAt, error = null) => {
+          if (typeof onPhase !== "function") return;
+          try {
+            onPhase({ step, ms: Date.now() - startedAt, ok: !error, code: error?.code ?? null });
+          } catch {}
+        };
+        const runCloseStep = async (step, operation) => {
+          let task = closeTasks.get(step);
+          if (task?.status === "rejected") {
+            closeTasks.delete(step);
+            task = null;
+          }
+          if (!task) {
+            task = { status: "pending" };
+            task.promise = Promise.resolve()
+              .then(operation)
+              .then(
+                (value) => {
+                  task.status = "fulfilled";
+                  return value;
+                },
+                (error) => {
+                  task.status = "rejected";
+                  throw error;
+                },
+              );
+            closeTasks.set(step, task);
+          }
+          return settleCloseStep(task.promise, deadline, step);
+        };
+
+        let phaseAt = Date.now();
+        try {
+          await runCloseStep("automations.stop", () => automations.stop()); // 先停调度器：关闭窗口不再产生新 run
+          reportPhase("automations.stop", phaseAt);
+        } catch (error) {
+          reportPhase("automations.stop", phaseAt, error);
+          if (resumeAutomations) automations.start();
+          throw error;
+        }
         let proxyStatus;
         try {
-          proxyStatus = await ccswitchProxy.close();
-          if (proxyStatus?.closed !== true) {
-            throw Object.assign(
-              new Error("Control Center close aborted because CC-Switch takeover restore is incomplete"),
-              {
-                code: "CONTROL_CENTER_CLOSE_INCOMPLETE",
-                proxyStatus: proxyStatus ?? null,
-              },
-            );
-          }
+          phaseAt = Date.now();
+          proxyStatus = await runCloseStep("ccswitchProxy.close", async () => {
+            const status = await ccswitchProxy.close();
+            if (status?.closed !== true) {
+              throw Object.assign(
+                new Error("Control Center close aborted because CC-Switch takeover restore is incomplete"),
+                {
+                  code: "CONTROL_CENTER_CLOSE_INCOMPLETE",
+                  proxyStatus: status ?? null,
+                },
+              );
+            }
+            return status;
+          });
+          reportPhase("ccswitchProxy.close", phaseAt);
         } catch (error) {
           if (resumeAutomations) automations.start();
           throw error;
@@ -463,17 +557,25 @@ export async function createControlCenter(options = {}) {
         // Proxy restore is the shutdown commit point. Before it succeeds, the instance lock and
         // every other runtime service remain live so a failed close can be retried safely.
         const cleanupErrors = [];
+        // Orchestrator/event-store may drain provider chains. Reserve a small finalization window
+        // for lock/channel cleanup so a long-running run cannot consume the entire close budget.
+        const finalizationReserveMs = Math.min(250, Math.max(0, deadline - Date.now()));
+        const resourceDeadline = Math.max(Date.now() + 1, deadline - finalizationReserveMs);
         const cleanupSteps = [
           ["approvalBroker.denyAll", () => approvalBroker.denyAll()],
-          ["orchestrator.close", () => orchestrator.close()],
-          ["eventStore.close", () => eventStore.close()],
+          ["orchestrator.close", () => orchestrator.close({ deadlineMs: resourceDeadline })],
+          ["eventStore.close", () => eventStore.close({ deadlineMs: resourceDeadline })],
           ["childRegistry.flush", () => childReg.flush()],
+          ["channels.close", () => closeChannelService()],
           ["instanceLock.release", () => instanceLock.release()],
         ];
         for (const [step, operation] of cleanupSteps) {
+          const stepStarted = Date.now();
           try {
-            await operation();
+            await runCloseStep(step, operation);
+            reportPhase(step, stepStarted);
           } catch (error) {
+            reportPhase(step, stepStarted, error);
             cleanupErrors.push({
               step,
               code: error?.code ?? null,
@@ -482,7 +584,6 @@ export async function createControlCenter(options = {}) {
             });
           }
         }
-        closed = true;
         if (cleanupErrors.length) {
           closeFailure = Object.assign(
             new AggregateError(
@@ -496,6 +597,8 @@ export async function createControlCenter(options = {}) {
           );
           throw closeFailure;
         }
+        closed = true;
+        closeFailure = null;
       })();
       try {
         return await closePromise;

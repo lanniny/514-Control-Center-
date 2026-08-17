@@ -5,6 +5,8 @@ import { fileURLToPath } from "node:url";
 const appRoot = fileURLToPath(new URL("..", import.meta.url));
 const serverUrls = new WeakMap();
 const ownedServerPids = new WeakMap();
+const serverOutputTails = new WeakMap();
+const SERVER_OUTPUT_TAIL_LIMIT = 16_000;
 
 export function testModelProfiles() {
   return [
@@ -20,6 +22,8 @@ export function testModelProfiles() {
 export function testServerEnv(overrides = {}) {
   return {
     ...process.env,
+    // 关闭链预算必须留在 stopTestServer 的 5s 退出窗口内：POST(≤1s) + transport + state.close。
+    CONTROL_CENTER_SHUTDOWN_BUDGET_MS: "3500",
     ...overrides,
     CONTROL_CENTER_OPEN: "0",
     CONTROL_CENTER_TEST_MODE: "1",
@@ -34,6 +38,15 @@ export function spawnTestServer({ env = {}, cwd = appRoot } = {}) {
     windowsHide: true,
   });
   ownedServerPids.set(child, child.pid);
+  // 全程保留子进程输出尾巴：优雅关闭超时是间歇性故障，失败轮的 [shutdown] 阶段
+  // 计时行是定位卡点的唯一现场证据，不能随管道丢弃。
+  const tail = { text: "" };
+  const appendOutput = (chunk) => {
+    tail.text = (tail.text + chunk.toString("utf8")).slice(-SERVER_OUTPUT_TAIL_LIMIT);
+  };
+  child.stdout?.on("data", appendOutput);
+  child.stderr?.on("data", appendOutput);
+  serverOutputTails.set(child, tail);
   return child;
 }
 
@@ -147,8 +160,12 @@ export async function stopTestServer(child, { token, timeoutMs = 5_000 } = {}) {
     return result;
   }
 
+  const outputTail = serverOutputTails.get(child)?.text ?? "";
   process.stderr.write(
-    `[test-fixture] graceful shutdown timed out for owned server pid ${ownedPid}; falling back to child.kill()\n`,
+    `[test-fixture] graceful shutdown timed out for owned server pid ${ownedPid}; falling back to child.kill()\n`
+    + (outputTail
+      ? `[test-fixture] server output tail follows (shutdown phase timings are the [shutdown] lines):\n${outputTail}\n`
+      : "[test-fixture] server produced no captured output\n"),
   );
   const exitedAfterKill = new Promise((resolveExit, rejectExit) => {
     const onExit = (code, signal) => {
@@ -170,6 +187,6 @@ export async function stopTestServer(child, { token, timeoutMs = 5_000 } = {}) {
   const result = { graceful: false, fallback: true };
   throw Object.assign(
     new Error(`test server pid ${ownedPid} required fallback termination instead of the authorized shutdown endpoint`),
-    { code: "TEST_SERVER_GRACEFUL_SHUTDOWN_FAILED", result },
+    { code: "TEST_SERVER_GRACEFUL_SHUTDOWN_FAILED", result, outputTail },
   );
 }

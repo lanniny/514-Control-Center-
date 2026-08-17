@@ -30,6 +30,7 @@ import { ResponseLeaseLimiter } from "./src/response-limiter.mjs";
 import { collectPulseSnapshot } from "./src/pulse.mjs";
 import { eventForUi } from "./src/event-view.mjs";
 import { auditBusDiagnostics, MISSION_CONTROL_LIMITS, projectMissionControl } from "./src/mission-control.mjs";
+import { collectTeamInbox, INBOX_LIMITS } from "./src/collaboration-inbox.mjs";
 import { inspectRunWorkspace } from "./src/workspace-explorer.mjs";
 import { collectWorkbenchEnvironment, GitActionBroker } from "./src/workbench-environment.mjs";
 import { attestRunWorkspace, resolveRunWorkspace } from "./src/run-workspace.mjs";
@@ -42,15 +43,17 @@ import {
 import { claimPendingClipboardUpload } from "./src/clipboard-lifecycle.mjs";
 import { SearchService } from "./src/search.mjs";
 import { MemoryService } from "./src/memory.mjs";
-import { scaffoldProject } from "./src/bootstrap.mjs";
+import { scaffoldProject, scaffoldRemoteProject } from "./src/bootstrap.mjs";
+import { createAvatarStore, MAX_AVATAR_REQUEST_BYTES } from "./src/avatars.mjs";
 import { registerChannelsRoutes } from "./src/channels/routes.mjs";
-import { registerSshRoutes } from "./src/ssh/routes.mjs";
+import { getSshService, registerSshRoutes } from "./src/ssh/routes.mjs";
 import { registerRemoteProjectRoutes } from "./src/remote-projects/routes.mjs";
 import { registerOfficeRoutes } from "./src/office/routes.mjs";
-import { registerPtyRoutes } from "./src/pty/routes.mjs";
+import { registerPtyRoutes, getPtyServiceFor } from "./src/pty/routes.mjs";
 import { registerMarketRoutes } from "./src/market/routes.mjs";
 import { registerCcSwitchRoutes } from "./src/ccswitch/routes.mjs";
 import { registerCliEnvRoutes } from "./src/cli-env/routes.mjs";
+import { registerHooksRoutes } from "./src/hooks/routes.mjs";
 import { homedir } from "node:os";
 
 const appRoot = fileURLToPath(new URL(".", import.meta.url));
@@ -94,6 +97,15 @@ const testAgentActionDelayMs = process.env.CONTROL_CENTER_TEST_MODE === "1"
   : 0;
 const testBusTailGateEnabled = process.env.CONTROL_CENTER_TEST_MODE === "1"
   && process.env.CONTROL_CENTER_TEST_BUS_TAIL_GATE === "1";
+// 关闭链统一预算（烛 wave-shutdown 复审）：state.close 各阶段共享这一份预算。
+// 测试 fixture 通过 CONTROL_CENTER_SHUTDOWN_BUDGET_MS 收紧到其 5s 退出窗口内。
+const shutdownBudgetMs = Math.min(30_000, Math.max(500, Number(process.env.CONTROL_CENTER_SHUTDOWN_BUDGET_MS) || 8_000));
+// 测试钩子：拉长 health probe 让并发 mission 请求有窗口汇合到同一共享 batch，
+// 并通过 /api/test/health-stats 观察 inflight/waiters/retiring 生命周期。
+const testHealthProbeDelayMs = process.env.CONTROL_CENTER_TEST_MODE === "1"
+  ? Math.min(30_000, Math.max(0, Number(process.env.CONTROL_CENTER_TEST_HEALTH_PROBE_DELAY_MS) || 0))
+  : 0;
+const testHealthProbeStats = { calls: 0 };
 const state = await createControlCenter({
   repoRoot: process.env.CONTROL_CENTER_TEST_MODE === "1"
     ? process.env.CONTROL_CENTER_TEST_REPO_ROOT || undefined
@@ -104,6 +116,18 @@ const state = await createControlCenter({
       }
     : undefined,
 });
+state.avatars = await createAvatarStore({
+  dataRoot: state.dataRoot,
+  teamMembers: state.teamMembers,
+}).init();
+if (testHealthProbeDelayMs > 0) {
+  const baseProbe = state.healthService.probeProfile.bind(state.healthService);
+  state.healthService.probeProfile = async (profile, options = {}) => {
+    testHealthProbeStats.calls += 1;
+    await delay(testHealthProbeDelayMs, undefined, { signal: options.signal });
+    return baseProbe(profile, options);
+  };
+}
 // Wave G 面路由注册表：各面 src/<surface>/routes.mjs 导出 register<SX>Routes(router, ctx)。
 // router.get/post/put/delete(prefix, handler)；handler(request, response, url, ctx) 返回 true 表示已处理。
 // 工位纪律：面模块不碰本文件；主驾在下方统一接线（import + register）。
@@ -125,6 +149,7 @@ registerPtyRoutes(surfaceRouter, surfaceCtx);
 registerMarketRoutes(surfaceRouter, surfaceCtx);
 registerCcSwitchRoutes(surfaceRouter, surfaceCtx);
 registerCliEnvRoutes(surfaceRouter, surfaceCtx);
+registerHooksRoutes(surfaceRouter, surfaceCtx);
 async function dispatchSurfaceRoute(request, response, url) {
   for (const route of surfaceRoutes) {
     if (request.method !== route.method) continue;
@@ -507,7 +532,7 @@ const searchService = new SearchService({ repoRoot: state.repoRoot, aiSharedRoot
 const memoryService = new MemoryService({ repoRoot: state.repoRoot, aiSharedRoot });
 
 const securityHeaders = {
-  "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+  "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
   "cross-origin-opener-policy": "same-origin",
   "cross-origin-resource-policy": "same-origin",
   "referrer-policy": "no-referrer",
@@ -518,6 +543,16 @@ const securityHeaders = {
 function json(response, status, payload) {
   response.writeHead(status, { ...securityHeaders, "content-type": "application/json; charset=utf-8", "cache-control": "no-store" });
   response.end(JSON.stringify(payload));
+}
+
+function sendBytes(response, status, bytes, contentType) {
+  response.writeHead(status, {
+    ...securityHeaders,
+    "content-type": contentType,
+    "cache-control": "no-store",
+    "content-length": bytes.length,
+  });
+  response.end(bytes);
 }
 
 function redactOrphanedRunPaths(value) {
@@ -664,13 +699,29 @@ async function rawBody(request, maxBytes = 6 * 1024 * 1024) {
 }
 
 function authorized(request) {
-  return request.headers.authorization === `Bearer ${token}`;
+  // 常数时间比较，与 bootstrap nonce 的 secretEquals 同基线
+  return secretEquals(request.headers.authorization, `Bearer ${token}`);
 }
 
 function secretEquals(left, right) {
   const a = Buffer.from(String(left ?? ""));
   const b = Buffer.from(String(right ?? ""));
   return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/** 跨平台"在文件管理器中定位/打开"。Windows 用 explorer /select，其余平台退化为打开所在目录。 */
+function revealInFileManager(target, { select = true } = {}) {
+  if (process.platform === "win32") {
+    const args = select ? [`/select,${target}`] : [target];
+    spawn("explorer.exe", args, { detached: true, stdio: "ignore", windowsHide: false }).unref();
+    return;
+  }
+  // explorer.exe 常以非 0 退出码返回（历史行为），fire-and-forget 不据此报错
+  const opener = process.platform === "darwin" ? "open" : "xdg-open";
+  const args = process.platform === "darwin" && select ? ["-R", target] : [select ? dirname(target) : target];
+  const child = spawn(opener, args, { detached: true, stdio: "ignore" });
+  child.on("error", () => {}); // 桌面环境无 opener 时不拖垮请求
+  child.unref();
 }
 
 function secretReferenceStatus(health) {
@@ -705,19 +756,22 @@ function secretReferenceStatus(health) {
 }
 
 function statusFor(error) {
-  if (["SOURCE_NOT_FOUND", "RUN_NOT_FOUND", "VERSION_NOT_FOUND", "APPROVAL_NOT_FOUND", "LEASE_NOT_FOUND", "AUTOMATION_NOT_FOUND", "RUNTIME_SEAT_NOT_FOUND", "REMOTE_HOST_NOT_FOUND", "BACKUP_NOT_FOUND", "MODEL_FETCH_NOT_FOUND"].includes(error.code)) return 404;
-  if (["STALE_BASE", "RUN_ACTIVE", "RUN_TERMINAL", "RUN_INTERRUPTING", "TURN_ACTIVE", "CONTROL_TRANSITION_FORBIDDEN", "APPROVAL_HASH_MISMATCH", "APPROVAL_IN_PROGRESS", "PLAN_REQUIRED", "PLAN_MISMATCH", "PLAN_EXPIRED", "PLAN_STALE", "APPROVAL_REQUIRED", "RECOVERY_REQUIRED", "RUNTIME_BUSY", "AGENT_ACTION_BUSY", "AUTOMATION_BUSY", "AUTOMATION_RECOVERY_REQUIRED", "PREFS_REVISION_MISMATCH", "MCP_RESTORE_CONFLICT", "MCP_QUARANTINE_CONFLICT", "MCP_SOURCE_CONFLICT", "TEAM_CATALOG_CONFLICT", "MEMBER_IN_USE", "MEMBER_RUNTIME_CONFLICT", "RUNTIME_SEAT_EXISTS", "RUNTIME_SEAT_IN_USE", "PROVIDER_IN_USE", "PROVIDER_RESERVED_NAME", "ASK_NOT_PENDING", "ASK_MISMATCH", "ASK_OWNER_MISMATCH", "ANSWER_IN_PROGRESS", "DUPLICATE_MESSAGE", "GIT_ACTION_FAILED", "REMOTE_HOST_DISABLED", "BACKUP_TARGET_CHANGED", "CODEX_MODEL_CATALOG_CONFLICT"].includes(error.code)) return 409;
-  if (["CONFIRMATION_REQUIRED", "DEPLOYMENT_REQUIRED", "READ_ONLY_SOURCE", "FROZEN_BLOCK"].includes(error.code)) return 403;
-  if (["VALIDATION_FAILED", "PROVIDER_CREDENTIAL_SCOPE_MISMATCH", "CODEX_MODEL_CATALOG_REQUIRED", "MODEL_FETCH_URL_INVALID", "MODEL_FETCH_HTTPS_REQUIRED", "MODEL_FETCH_INVALID_RESPONSE", "RUNTIME_GRAPH_INVALID", "ADAPTER_MANIFEST_INVALID", "RUNTIME_CATALOG_INVALID", "RUNTIME_PROFILE_NOT_FOUND", "RUNTIME_PROFILE_INELIGIBLE", "AGENT_ACTION_UNSUPPORTED", "PATH_BOUNDARY", "INVALID_PROMPT", "INVALID_JSON", "INVALID_DECISION", "INVALID_CWD", "INVALID_MODEL", "INVALID_EFFORT", "INVALID_IMAGE_DATA", "IMAGE_TYPE_MISMATCH", "UNSUPPORTED_IMAGE_TYPE", "CLIPBOARD_CLAIM_INVALID", "NOT_TEAM_MEMBER", "PROVIDER_NOT_FOUND", "PROVIDER_UNAVAILABLE", "NO_ROUTE", "NO_INDEPENDENT_ROUTE", "ROUND_LIMIT", "INTERACTION_STEP_LIMIT", "INTERACTION_INVALID", "INSUFFICIENT_ROUNDS", "SENSITIVE_PROMPT", "UNSUPPORTED_APPROVAL", "UNSUPPORTED_PERMISSION", "POLICY_VIOLATION", "ADAPTER_UNAVAILABLE", "TRANSACTION_INCONSISTENT", "GIT_STATE_UNAVAILABLE", "NOTHING_STAGED", "NOTHING_TO_PUSH", "NO_UPSTREAM", "MULTIPLE_PUSH_TARGETS", "PUSH_URL_REWRITE", "DETACHED_HEAD", "WORKTREE_NOT_READY", "WORKTREE_INVALID", "INVALID_REMOTE", "INVALID_REMOTE_PATH", "REMOTE_ADAPTER_UNSUPPORTED", "BACKUP_NAME_INVALID", "BACKUP_TARGET_UNRESOLVED"].includes(error.code)) return 422;
+  if (error.httpStatus) return error.httpStatus; // 渠道/office 等自带语义化状态码的错误，避免误报 500
+  if (["CHANNEL_NOT_FOUND"].includes(error.code)) return 404;
+  if (["CHANNELS_STORE_UNAVAILABLE"].includes(error.code)) return 503;
+  if (["SOURCE_NOT_FOUND", "RUN_NOT_FOUND", "VERSION_NOT_FOUND", "APPROVAL_NOT_FOUND", "LEASE_NOT_FOUND", "AUTOMATION_NOT_FOUND", "RUNTIME_SEAT_NOT_FOUND", "REMOTE_HOST_NOT_FOUND", "BACKUP_NOT_FOUND", "MODEL_FETCH_NOT_FOUND", "AVATAR_NOT_FOUND", "SSH_NOT_FOUND"].includes(error.code)) return 404;
+  if (["STALE_BASE", "RUN_ACTIVE", "RUN_TERMINAL", "RUN_INTERRUPTING", "TURN_ACTIVE", "CONTROL_TRANSITION_FORBIDDEN", "APPROVAL_HASH_MISMATCH", "APPROVAL_IN_PROGRESS", "PLAN_REQUIRED", "PLAN_MISMATCH", "PLAN_EXPIRED", "PLAN_STALE", "APPROVAL_REQUIRED", "RECOVERY_REQUIRED", "RUNTIME_BUSY", "AGENT_ACTION_BUSY", "AUTOMATION_BUSY", "AUTOMATION_RECOVERY_REQUIRED", "PREFS_REVISION_MISMATCH", "MCP_RESTORE_CONFLICT", "MCP_QUARANTINE_CONFLICT", "MCP_SOURCE_CONFLICT", "SKILL_EXISTS", "TEAM_CATALOG_CONFLICT", "MEMBER_IN_USE", "MEMBER_RUNTIME_CONFLICT", "RUNTIME_SEAT_EXISTS", "RUNTIME_SEAT_IN_USE", "PROVIDER_IN_USE", "PROVIDER_RESERVED_NAME", "ASK_NOT_PENDING", "ASK_MISMATCH", "ASK_OWNER_MISMATCH", "ANSWER_IN_PROGRESS", "DUPLICATE_MESSAGE", "GIT_ACTION_FAILED", "REMOTE_HOST_DISABLED", "BACKUP_TARGET_CHANGED", "CODEX_MODEL_CATALOG_CONFLICT", "SSH_HOST_DISABLED", "OFFICE_FILE_EXISTS"].includes(error.code)) return 409;
+  if (["CONFIRMATION_REQUIRED", "DEPLOYMENT_REQUIRED", "READ_ONLY_SOURCE", "FROZEN_BLOCK", "SFTP_PATH_BOUNDARY", "SFTP_BAD_PATH"].includes(error.code)) return 403;
+  if (["VALIDATION_FAILED", "CLI_HANDOFF_UNSUPPORTED", "PROVIDER_CREDENTIAL_SCOPE_MISMATCH", "CODEX_MODEL_CATALOG_REQUIRED", "MODEL_FETCH_URL_INVALID", "MODEL_FETCH_HTTPS_REQUIRED", "MODEL_FETCH_INVALID_RESPONSE", "RUNTIME_GRAPH_INVALID", "ADAPTER_MANIFEST_INVALID", "RUNTIME_CATALOG_INVALID", "RUNTIME_PROFILE_NOT_FOUND", "RUNTIME_PROFILE_INELIGIBLE", "AGENT_ACTION_UNSUPPORTED", "PATH_BOUNDARY", "INVALID_PROMPT", "INVALID_JSON", "INVALID_DECISION", "INVALID_CWD", "INVALID_MODEL", "INVALID_EFFORT", "INVALID_IMAGE_DATA", "IMAGE_TYPE_MISMATCH", "UNSUPPORTED_IMAGE_TYPE", "CLIPBOARD_CLAIM_INVALID", "NOT_TEAM_MEMBER", "PROVIDER_NOT_FOUND", "PROVIDER_UNAVAILABLE", "NO_ROUTE", "NO_INDEPENDENT_ROUTE", "ROUND_LIMIT", "INTERACTION_STEP_LIMIT", "INTERACTION_INVALID", "INSUFFICIENT_ROUNDS", "SENSITIVE_PROMPT", "UNSUPPORTED_APPROVAL", "UNSUPPORTED_PERMISSION", "POLICY_VIOLATION", "ADAPTER_UNAVAILABLE", "TRANSACTION_INCONSISTENT", "GIT_STATE_UNAVAILABLE", "NOTHING_STAGED", "NOTHING_TO_PUSH", "NO_UPSTREAM", "MULTIPLE_PUSH_TARGETS", "PUSH_URL_REWRITE", "DETACHED_HEAD", "WORKTREE_NOT_READY", "WORKTREE_INVALID", "INVALID_REMOTE", "INVALID_REMOTE_PATH", "REMOTE_ADAPTER_UNSUPPORTED", "BACKUP_NAME_INVALID", "BACKUP_TARGET_UNRESOLVED"].includes(error.code)) return 422;
   if (["BODY_TOO_LARGE", "IMAGE_TOO_LARGE", "MODEL_FETCH_RESPONSE_TOO_LARGE"].includes(error.code)) return 413;
   if (["EVENT_TOO_LARGE", "EVENT_HISTORY_TOO_LARGE"].includes(error.code)) return 413;
   if (error.code === "CLIPBOARD_STORAGE_QUOTA_EXCEEDED") return 507;
   if (error.code === "PROCESS_TIMEOUT") return 408; // 系统选择框挂满 5 分钟未选属预期流程，不是服务端故障
   if (error.code === "MODEL_FETCH_TIMEOUT") return 504;
-  if (["PROVIDER_TURN_INCOMPLETE", "MODEL_FETCH_UNAUTHORIZED", "MODEL_FETCH_UPSTREAM_FAILED", "MODEL_FETCH_REDIRECT_BLOCKED", "MODEL_FETCH_REDIRECT_LIMIT"].includes(error.code)) return 502;
+  if (["PROVIDER_TURN_INCOMPLETE", "MODEL_FETCH_UNAUTHORIZED", "MODEL_FETCH_UPSTREAM_FAILED", "MODEL_FETCH_REDIRECT_BLOCKED", "MODEL_FETCH_REDIRECT_LIMIT", "SFTP_FAILED", "SSH_CONNECT_FAILED"].includes(error.code)) return 502;
   if (error.code === "OUTPUT_LIMIT") return 413;
   if (["AGENT_ACTION_CAPACITY", "MODEL_DISCOVERY_CAPACITY"].includes(error.code)) return 429;
-  if (["EVENT_INDEX_BUSY", "HEALTH_PROBE_BUSY", "TEAM_STORE_UNAVAILABLE", "MEMBER_REFERENCE_CHECK_FAILED", "PROVIDER_REFERENCE_CHECK_FAILED", "REMOTE_UNAVAILABLE"].includes(error.code)) return 503;
+  if (["EVENT_INDEX_BUSY", "HEALTH_PROBE_BUSY", "TEAM_STORE_UNAVAILABLE", "MEMBER_REFERENCE_CHECK_FAILED", "PROVIDER_REFERENCE_CHECK_FAILED", "REMOTE_UNAVAILABLE", "SSH_UNAVAILABLE"].includes(error.code)) return 503;
   if ([
     "AUTOMATION_STORE_CORRUPT",
     "AUTOMATION_STORE_UNREADABLE",
@@ -734,9 +788,10 @@ function statusFor(error) {
     "MCP_TRANSACTION_INCOMPLETE",
     "SENSITIVE_FILE_PERMISSION_FAILED",
     "SENSITIVE_TEMP_CLEANUP_FAILED",
+    "OPERATOR_PROFILE_UNREADABLE",
   ].includes(error.code)) return 503;
   if (error.code === "NOT_ACCEPTABLE") return 406;
-  if (error.code === "REMOTE_GATE_BLOCKED") return 501; // 远程门闸未授权（ssh/sftp）——各面路由同语义
+  if (["REMOTE_GATE_BLOCKED", "REMOTE_GATE_NOT_IMPLEMENTED"].includes(error.code)) return 501; // 远程门闸未授权（ssh/sftp）——各面路由同语义
   return 500;
 }
 
@@ -875,6 +930,15 @@ async function api(request, response, url) {
   if (request.method === "GET" && pathname === "/api/test/response-leases" && process.env.CONTROL_CENTER_TEST_MODE === "1") {
     return json(response, 200, runEventResponses.snapshot(url.searchParams.get("key")));
   }
+  if (request.method === "GET" && pathname === "/api/test/health-stats" && process.env.CONTROL_CENTER_TEST_MODE === "1") {
+    const healthService = state.healthService;
+    return json(response, 200, {
+      probeCalls: testHealthProbeStats.calls,
+      inflight: Boolean(healthService.inflight),
+      waiters: healthService.inflight?.waiters ?? 0,
+      retiring: healthService.retiring.size,
+    });
+  }
   if (request.method === "POST" && pathname === "/api/test/bus-tail-gate/release" && testBusTailGateEnabled) {
     return json(response, 200, { released: testBusTailGate.release() });
   }
@@ -894,6 +958,7 @@ async function api(request, response, url) {
         teamCatalog: state.teamCatalog,
         memberCatalog: state.teamCatalog,
         runtimeCatalog: state.runtimeCatalog,
+        operatorProfile: await state.avatars.operatorProfile(),
         health,
         sources,
         runs: runsForPublic(state.orchestrator.list()),
@@ -1015,6 +1080,10 @@ async function api(request, response, url) {
     return json(response, 200, await state.capabilities.setAgentSkill(agentId, skill, payload?.enabled !== false));
   }
   // MCP 启停（claude.json 全局 server 隔离式）：mtime 乐观锁防覆写 Claude Code 并发写
+  if (request.method === "POST" && pathname === "/api/capabilities/skills") {
+    const payload = await body(request);
+    return json(response, 201, await state.capabilities.createSkill(payload));
+  }
   if (request.method === "POST" && pathname === "/api/capabilities/mcp/toggle") {
     const payload = await body(request);
     return json(response, 200, await state.capabilities.toggleMcpServer({
@@ -1050,8 +1119,17 @@ async function api(request, response, url) {
     return json(response, 200, await memoryService.search({ query: url.searchParams.get("q") ?? "" }));
   }
   // v4.0 Forge 项目脚手架：静态模板生成（零网络零安装）；dryRun 只出计划，dir 限根 home/仓库父目录
+  // hostId 在场 → 远程 SFTP 写入（先过 sftp 门闸，不假装落到本机）
   if (request.method === "POST" && pathname === "/api/bootstrap/scaffold") {
-    return json(response, 200, await scaffoldProject(await body(request), {
+    const payload = await body(request);
+    if (payload?.hostId) {
+      state.remoteGates.assert("sftp");
+      const ssh = getSshService();
+      if (!ssh) throw Object.assign(new Error("SSH service is not wired"), { code: "SSH_UNAVAILABLE", httpStatus: 503 });
+      if (ssh._initPromise) await ssh._initPromise;
+      return json(response, 200, await scaffoldRemoteProject(payload, { ssh }));
+    }
+    return json(response, 200, await scaffoldProject(payload, {
       homeDir: homedir(),
       allowedRoots: [homedir(), dirname(state.repoRoot)],
     }));
@@ -1197,7 +1275,40 @@ async function api(request, response, url) {
     const memberId = decodeURIComponent(memberMatch[1]);
     if (request.method === "GET") return json(response, 200, state.teamMembers.get(memberId));
     if (request.method === "PUT") return json(response, 200, await state.teamMembers.update(memberId, await body(request)));
-    if (request.method === "DELETE") return json(response, 200, await state.teamMembers.remove(memberId));
+    if (request.method === "DELETE") {
+      const removed = await state.teamMembers.remove(memberId);
+      await state.avatars.removeMemberFile(memberId);
+      return json(response, 200, removed);
+    }
+  }
+  if (request.method === "GET" && pathname === "/api/operator-profile") {
+    return json(response, 200, await state.avatars.operatorProfile());
+  }
+  if (request.method === "POST" && pathname === "/api/avatars/operator") {
+    const input = await body(request, MAX_AVATAR_REQUEST_BYTES);
+    return json(response, 200, await state.avatars.setOperatorAvatar(input?.dataUrl));
+  }
+  if (request.method === "DELETE" && pathname === "/api/avatars/operator") {
+    return json(response, 200, await state.avatars.clearOperatorAvatar());
+  }
+  if (request.method === "GET" && pathname === "/api/avatars/operator") {
+    const file = await state.avatars.readOperatorFile();
+    return sendBytes(response, 200, file.bytes, file.mimeType);
+  }
+  const memberAvatarMatch = pathname.match(/^\/api\/avatars\/members\/([^/]+)$/);
+  if (memberAvatarMatch) {
+    const memberId = decodeURIComponent(memberAvatarMatch[1]);
+    if (request.method === "POST") {
+      const input = await body(request, MAX_AVATAR_REQUEST_BYTES);
+      return json(response, 200, await state.avatars.setMemberAvatar(memberId, input?.dataUrl));
+    }
+    if (request.method === "DELETE") {
+      return json(response, 200, await state.avatars.clearMemberAvatar(memberId));
+    }
+    if (request.method === "GET") {
+      const file = await state.avatars.readMemberFile(memberId);
+      return sendBytes(response, 200, file.bytes, file.mimeType);
+    }
   }
   if (request.method === "POST" && pathname === "/api/teams") return json(response, 201, await state.teams.create(await body(request)));
   const teamMatch = pathname.match(/^\/api\/teams\/([^/]+)$/);
@@ -1206,6 +1317,38 @@ async function api(request, response, url) {
     if (request.method === "GET") return json(response, 200, state.teams.get(teamId));
     if (request.method === "PUT") return json(response, 200, await state.teams.update(teamId, await body(request)));
     if (request.method === "DELETE") return json(response, 200, await state.teams.remove(teamId));
+  }
+
+  const teamInboxMatch = pathname.match(/^\/api\/teams\/([^/]+)\/inbox$/);
+  if (request.method === "GET" && teamInboxMatch) {
+    const teamId = decodeURIComponent(teamInboxMatch[1]);
+    const team = state.teams.get(teamId);
+    return await runEventResponses.run(`team-inbox:${teamId}`, response, async (signal) => {
+      const result = await collectTeamInbox({
+        teamId,
+        team,
+        runs: state.orchestrator.list(),
+        maxRuns: INBOX_LIMITS.maxRuns,
+        maxMessages: Math.min(
+          INBOX_LIMITS.maxMessages,
+          Math.max(1, Number(url.searchParams.get("limit")) || INBOX_LIMITS.maxMessages),
+        ),
+        readTail: async (runId, options) => {
+          const run = structuredClone(state.orchestrator.get(runId));
+          const tail = await state.orchestrator.bus.readTail(runId, {
+            maxBytes: MISSION_CONTROL_LIMITS.busBytes,
+            maxMessages: MISSION_CONTROL_LIMITS.busMessages,
+            signal: options?.signal || signal,
+          });
+          return {
+            ...tail,
+            diagnostics: auditBusDiagnostics(run, tail.diagnostics, tail.messages.length),
+          };
+        },
+        signal,
+      });
+      return json(response, 200, result);
+    }, { request });
   }
 
   // cc-switch 配置方式迁移：统一供应商档案 + 一键切换 live 配置（切换即备份）；list/live 永不含 apiKey 明文
@@ -1525,7 +1668,7 @@ async function api(request, response, url) {
     // 资源管理器中定位历史会话 jsonl（路径由服务端安全解析，不信任前端拼装）
     const { source, project, scope, id } = await body(request);
     const filePath = await state.sessions.resolveFilePath({ source: source ?? "claude", project, scope, id });
-    spawn("explorer.exe", [`/select,${filePath}`], { detached: true, stdio: "ignore", windowsHide: false }).unref();
+    revealInFileManager(filePath, { select: true });
     return json(response, 200, { revealed: filePath });
   }
   if (request.method === "POST" && pathname === "/api/system/reveal") {
@@ -1539,9 +1682,7 @@ async function api(request, response, url) {
     } catch {
       throw Object.assign(new Error(`path does not exist: ${target}`), { code: "SOURCE_NOT_FOUND" });
     }
-    // explorer.exe 常以非 0 退出码返回（历史行为），fire-and-forget 不据此报错
-    const args = info.isDirectory() ? [target] : [`/select,${target}`];
-    spawn("explorer.exe", args, { detached: true, stdio: "ignore", windowsHide: false }).unref();
+    revealInFileManager(target, { select: !info.isDirectory() });
     return json(response, 200, { revealed: target });
   }
   if (request.method === "POST" && pathname === "/api/system/worktree") {
@@ -1819,15 +1960,82 @@ async function api(request, response, url) {
 
   match = pathname.match(/^\/api\/runs\/([^/]+)$/);
   if (request.method === "GET" && match) return json(response, 200, runForPublic(state.orchestrator.get(decodeURIComponent(match[1]))));
+  // 一键跳到当前会话的 CLI 界面：用原生 session ID 开交互式 CLI 终端（claude -r / codex exec resume…），
+  // 与控制台共享同一原生会话，双向实时。门闸与终端面板同闸（pty）。
+  match = pathname.match(/^\/api\/runs\/([^/]+)\/cli-terminal$/);
+  if (request.method === "POST" && match) {
+    const id = decodeURIComponent(match[1]);
+    state.remoteGates.assert("pty");
+    const run = state.orchestrator.get(id);
+    if (!run) throw Object.assign(new Error(`run not found: ${id}`), { code: "RUN_NOT_FOUND" });
+    const payload = await body(request).catch(() => ({}));
+    const spec = state.orchestrator.interactiveCliSpecForRun(run, payload?.agentId, { strict: payload?.strict === true });
+    if (!spec) {
+      // 两种落空要分清：一句"先完成一轮对话"对 pi 这类根本没有交互 resume 通道的席位是误导
+      const hasNativeSessions = Object.keys(run.sessions || {}).length > 0;
+      throw Object.assign(new Error(hasNativeSessions
+        ? "该会话的原生记录不支持交互式接续（此 CLI 没有已验证的 resume 通道）"
+        : "当前会话还没有原生 CLI 会话（先至少完成一轮对话）"), { code: "CLI_HANDOFF_UNSUPPORTED" });
+    }
+    const pty = getPtyServiceFor(surfaceCtx);
+    // 外部系统终端（真终端窗口）：同一条原生会话、同一份 resume 命令，宿主从罩层换成系统终端。
+    // 系统级 spawn 与 revealInFileManager 同信任级（操作者本机）；非 Windows 的终端生态太碎，
+    // 如实拒绝而不是猜一个 x-terminal-emulator。
+    if (payload?.external === true) {
+      if (process.platform !== "win32") {
+        throw Object.assign(new Error("外部系统终端当前仅支持 Windows；内置罩层终端在所有平台可用"), { code: "CLI_HANDOFF_UNSUPPORTED" });
+      }
+      spawn("cmd.exe", ["/d", "/c", "start", "", spec.command, ...spec.args], {
+        detached: true,
+        stdio: "ignore",
+        cwd: spec.cwd ?? undefined,
+        windowsHide: false,
+      }).unref();
+      return json(response, 201, {
+        ok: true,
+        external: true,
+        spec: { agentId: spec.agentId, protocol: spec.protocol, sessionId: spec.sessionId, command: [spec.command, ...spec.args].join(" ") },
+        busy: state.orchestrator.controllers.has(id),
+      });
+    }
+    const session = pty.create({
+      shell: spec.command,
+      args: spec.args,
+      // run.cwd 是操作者选定的项目地址，adapter 子进程本就以其为 cwd——终端同权，
+      // 通过按次 extraCwdRoots 放行，通用 /api/pty 沙箱不变
+      cwd: spec.cwd ?? undefined,
+      extraCwdRoots: spec.cwd ? [spec.cwd] : [],
+      title: `${spec.agentId} · ${run.title || String(run.id).slice(0, 8)} · CLI`,
+      // 同一 run 同一席位重复点开 = 同一原生会话：复用在途 PTY，不再 spawn 第二个进程抢 session 文件
+      dedupeKey: `run-cli:${run.id}:${spec.agentId}`,
+      // CLI 接续会话只属于沉浸罩层；底部抽屉/终端视图按 kind 过滤掉它，保持纯 shell
+      kind: "cli",
+    });
+    return json(response, 201, {
+      ok: true,
+      session,
+      spec: { agentId: spec.agentId, protocol: spec.protocol, sessionId: spec.sessionId, command: [spec.command, ...spec.args].join(" ") },
+      // 全成员可接续清单：罩层成员页签据此渲染（点击未启动成员时按 agentId 再调本接口懒起 PTY）
+      members: state.orchestrator.interactiveCliSpecsForRun(run)
+        .map((entry) => ({ agentId: entry.agentId, protocol: entry.protocol, sessionId: entry.sessionId })),
+      busy: state.orchestrator.controllers.has(id),
+    });
+  }
   match = pathname.match(/^\/api\/runs\/([^/]+)\/(cancel|interrupt|messages)$/);
   if (request.method === "POST" && match) {
     const id = decodeURIComponent(match[1]);
     const action = match[2];
+    if (action === "messages") {
+      const input = await body(request) ?? {};
+      delete input.waitForTurn;
+      return json(response, 200, runForPublic(await state.orchestrator.continue(id, {
+        ...input,
+        waitForTurn: false,
+      })));
+    }
     return json(response, 200, runForPublic(action === "cancel"
       ? await state.orchestrator.cancel(id)
-      : action === "interrupt"
-        ? await state.orchestrator.interrupt(id)
-        : await state.orchestrator.continue(id, await body(request))));
+      : await state.orchestrator.interrupt(id)));
   }
   match = pathname.match(/^\/api\/runs\/([^/]+)\/sources$/);
   if (request.method === "POST" && match) {
@@ -2060,7 +2268,12 @@ const server = createServer(async (request, response) => {
       return json(response, 200, { token });
     }
     if (url.pathname.startsWith("/api/")) {
-      if (!authorized(request)) return json(response, 401, { error: { code: "UNAUTHORIZED", message: "Missing or invalid local access token", requestId } });
+      // 入站 webhook 是给外部系统回调的：它们拿不到本地 Bearer token，
+      // 安全边界由渠道自身的 HMAC 验签 + 限流承担（channels.mjs receiveWebhook）。
+      const inboundWebhook = request.method === "POST" && /^\/api\/channels\/webhook\/[\w-]+$/.test(url.pathname);
+      if (!inboundWebhook && !authorized(request)) {
+        return json(response, 401, { error: { code: "UNAUTHORIZED", message: "Missing or invalid local access token", requestId } });
+      }
       return await api(request, response, url);
     }
     if (request.method === "GET" && (await serveStatic(url.pathname, response))) return;
@@ -2154,7 +2367,13 @@ async function reopenHttpTransport() {
 const shutdownController = createShutdownController({
   closeTransport: closeHttpTransport,
   reopenTransport: reopenHttpTransport,
-  closeState: () => state.close(),
+  closeState: ({ deadlineMs } = {}) => state.close({
+    budgetMs: shutdownBudgetMs,
+    deadlineMs,
+    onPhase: (phase) => process.stdout.write(
+      `[shutdown] ${phase.step} ${phase.ok ? "ok" : "FAILED"} in ${phase.ms}ms${phase.code ? ` [${phase.code}]` : ""}\n`,
+    ),
+  }),
   onClosed: () => process.exit(0),
   onError(error, signal) {
     const code = error?.code || "CONTROL_CENTER_SHUTDOWN_FAILED";
@@ -2164,6 +2383,7 @@ const shutdownController = createShutdownController({
     process.stderr.write(`Shutdown failed (${signal}, ${code}): ${error?.message || error}${reopen}\n`);
     if (shouldSetShutdownFailureExitCode(error)) process.exitCode = 1;
   },
+  budgetMs: shutdownBudgetMs,
   log: (message) => process.stdout.write(message),
 });
 

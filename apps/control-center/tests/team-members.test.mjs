@@ -76,6 +76,7 @@ test("legacy runtime profiles are projected as builtin logical members", async (
   assert.deepEqual(members.map((member) => member.id), ["codex-technical", "kimi-frontend"]);
   assert.deepEqual(members.map((member) => member.runtimeProfileId), ["codex-technical", "kimi-frontend"]);
   assert.ok(members.every((member) => member.builtin));
+  assert.ok(members.every((member) => member.avatar === ""));
   assert.equal(members[0].provider, "openai");
   assert.equal(members[0].adapter, "codex-app-server");
   assert.equal(members[0].teamMemberEligible, true);
@@ -389,4 +390,27 @@ test("serialized concurrent creates do not lose updates or leave temp files", as
   assert.equal(disk.members.length, 24);
   const names = await import("node:fs/promises").then(({ readdir }) => readdir(root));
   assert.deepEqual(names.filter((name) => name.endsWith(".tmp")), []);
+});
+
+test("setAvatar persists custom flag on builtin and custom members", async (t) => {
+  const { root, state, store } = await fixture(t);
+  const created = await store.create({
+    label: "头像席",
+    runtimeProfileId: "codex-technical",
+  });
+  assert.equal(created.avatar, "");
+  const custom = await store.setAvatar(created.id, "custom");
+  assert.equal(custom.avatar, "custom");
+  const builtin = await store.setAvatar("codex-technical", "custom");
+  assert.equal(builtin.avatar, "custom");
+  const reloaded = await new TeamMemberStore({
+    dataRoot: root,
+    runtimeCatalog: () => state.catalog,
+    referencesForMember: async () => [],
+    secureFile: async (path) => chmod(path, 0o600),
+  }).load();
+  assert.equal(reloaded.get(created.id).avatar, "custom");
+  assert.equal(reloaded.get("codex-technical").avatar, "custom");
+  assert.equal((await reloaded.setAvatar(created.id, "")).avatar, "");
+  assert.equal((await reloaded.setAvatar("codex-technical", "")).avatar, "");
 });

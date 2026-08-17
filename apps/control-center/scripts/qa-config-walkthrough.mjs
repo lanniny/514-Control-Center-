@@ -82,6 +82,7 @@ try {
 
   await page.evaluate(() => { location.hash = "#router"; });
   await page.waitForTimeout(1200);
+  await page.locator("#team-router-workbench").scrollIntoViewIfNeeded().catch(() => {});
   await shoot("07-router", "模型路由");
 
   await page.evaluate(() => { location.hash = "#hosts"; });

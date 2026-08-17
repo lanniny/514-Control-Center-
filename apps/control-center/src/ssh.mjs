@@ -594,6 +594,86 @@ export function createSshService({
     return { ok: true, bytes: Buffer.byteLength(text) };
   }
 
+  function sftpPathPrefixes(normalized) {
+    if (/^[A-Za-z]:\//.test(normalized)) {
+      let current = `${normalized.slice(0, 2)}/`;
+      const prefixes = [current.replace(/\/+$/, "/")];
+      for (const part of normalized.slice(3).split("/").filter(Boolean)) {
+        current = `${current.replace(/\/+$/, "")}/${part}`;
+        prefixes.push(current);
+      }
+      return prefixes;
+    }
+    const prefixes = [];
+    let current = "";
+    for (const part of normalized.split("/").filter(Boolean)) {
+      current += `/${part}`;
+      prefixes.push(current);
+    }
+    return prefixes;
+  }
+
+  function sftpMkdirOne(sftp, path) {
+    return new Promise((resolveMkdir, rejectMkdir) => {
+      sftp.mkdir(path, (error) => {
+        if (!error) return resolveMkdir();
+        const already = error.code === 11 || /exists|EEXIST|already/i.test(String(error.message || ""));
+        if (already) return resolveMkdir();
+        if (typeof sftp.stat !== "function") {
+          rejectMkdir(sshError("SFTP_FAILED", error.message, 502));
+          return;
+        }
+        sftp.stat(path, (statError, attrs) => {
+          if (!statError && attrs?.isDirectory?.()) return resolveMkdir();
+          rejectMkdir(sshError("SFTP_FAILED", error.message, 502));
+        });
+      });
+    });
+  }
+
+  async function sftpEnsureDir(id, path, { hostKeyFingerprint = null } = {}) {
+    const entry = getRequired(id);
+    const lexical = normalizeSftpPath(assertSftpPath(entry, path));
+    await withSftp(id, hostKeyFingerprint, async (sftp) => {
+      const canonicalRoots = [];
+      for (const root of sftpRoots(entry)) {
+        try {
+          canonicalRoots.push(await sftpRealpath(sftp, normalizeSftpPath(root)));
+        } catch {
+          // An unavailable allowlist root grants no access; another configured root may still match.
+        }
+      }
+      if (!canonicalRoots.length) throw sshError("SFTP_PATH_BOUNDARY", "cannot resolve any SFTP allowlist root", 403);
+
+      let lastCanonical = null;
+      const missing = [];
+      for (const prefix of sftpPathPrefixes(lexical)) {
+        if (!sftpRoots(entry).some((root) => sftpPathWithin(prefix, root))) continue;
+        try {
+          const resolved = await sftpRealpath(sftp, prefix);
+          if (!canonicalRoots.some((root) => sftpPathWithin(resolved, root))) {
+            throw sshError("SFTP_PATH_BOUNDARY", `resolved path escapes allowlist: ${prefix}`, 403);
+          }
+          lastCanonical = resolved;
+        } catch (error) {
+          if (error?.code === "SFTP_PATH_BOUNDARY") throw error;
+          missing.push(prefix.split("/").filter(Boolean).pop());
+        }
+      }
+      if (!lastCanonical) throw sshError("SFTP_PATH_BOUNDARY", `cannot resolve SFTP parent for ${lexical}`, 403);
+      let current = lastCanonical;
+      for (const name of missing) {
+        current = `${current.replace(/\/+$/, "")}/${name}`;
+        if (!canonicalRoots.some((root) => sftpPathWithin(current, root))) {
+          throw sshError("SFTP_PATH_BOUNDARY", `mkdir path escapes allowlist: ${current}`, 403);
+        }
+        await sftpMkdirOne(sftp, current);
+      }
+    });
+    audit("ssh.sftp_mkdir", { hostId: id });
+    return { ok: true, path: lexical };
+  }
+
   async function testConnection(id, { hostKeyFingerprint = null } = {}) {
     const { reused } = await connect(id, { hostKeyFingerprint });
     return { ok: true, reused };
@@ -647,7 +727,7 @@ export function createSshService({
 
   const service = {
     init, list, create, remove, trust, exec, testConnection, setEnabled, captureFingerprint, update, close, openRunChannel,
-    sftpList, sftpRead, sftpReadRaw, sftpWrite, checkHostKey,
+    sftpList, sftpRead, sftpReadRaw, sftpWrite, sftpEnsureDir, checkHostKey,
     assertSftpPathPublic: (id, path) => assertSftpPath(getRequired(id), path),
     assertSftpResolvedPathPublic,
     _state: state,

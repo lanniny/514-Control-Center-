@@ -47,6 +47,55 @@ async function assertNoAtomicTemps(...directories) {
   assert.deepEqual(names.filter((name) => name.endsWith(".tmp")), [], "failed atomic replacements must clean their temp files");
 }
 
+async function skillRepoFixture(t) {
+  const root = await mkdtemp(resolve(appRoot, ".test-skill-create-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repoRoot = join(root, "repo");
+  const dataRoot = join(root, "data");
+  const home = join(root, "home");
+  await mkdir(join(home, ".codex"), { recursive: true });
+  await mkdir(dataRoot, { recursive: true });
+  await mkdir(repoRoot, { recursive: true });
+  const caps = createCapabilities({
+    repoRoot,
+    homeDir: home,
+    teamsStore: { list: () => [] },
+    membersStore: { list: () => [] },
+    dataRoot,
+    eventStore: null,
+  });
+  return { root, repoRoot, caps };
+}
+
+test("createSkill writes repo .agents/skills and refuses overwrite or path escape", async (t) => {
+  const { repoRoot, caps } = await skillRepoFixture(t);
+  const created = await caps.createSkill({
+    name: "wizard-demo",
+    description: 'say "hello"',
+    body: "Use this skill to greet LO.",
+  });
+  assert.deepEqual(created, {
+    code: "wizard-demo",
+    path: ".agents/skills/wizard-demo",
+    description: 'say "hello"',
+    created: true,
+  });
+  const skillFile = join(repoRoot, ".agents", "skills", "wizard-demo", "SKILL.md");
+  const text = await readFile(skillFile, "utf8");
+  assert.match(text, /^---\nname: wizard-demo\ndescription: "say \\"hello\\""\n---\n/);
+  assert.match(text, /Use this skill to greet LO\./);
+  const summary = await caps.summary();
+  assert.ok(summary.skills.items.some((skill) => skill.code === "wizard-demo" && skill.path.replace(/\\/g, "/") === ".agents/skills/wizard-demo"));
+
+  await assert.rejects(() => caps.createSkill({ name: "wizard-demo", description: "again" }), { code: "SKILL_EXISTS" });
+  await assert.rejects(() => caps.createSkill({ name: "../escape" }), { code: "VALIDATION_FAILED" });
+  await assert.rejects(() => caps.createSkill({ name: "foo/bar" }), { code: "VALIDATION_FAILED" });
+  await assert.rejects(() => caps.createSkill({ name: "__proto__" }), { code: "VALIDATION_FAILED" });
+  await assert.rejects(() => caps.createSkill({ name: "" }), { code: "VALIDATION_FAILED" });
+  const escaped = await readdir(repoRoot);
+  assert.deepEqual(escaped.filter((name) => name !== ".agents"), []);
+});
+
 test("agent skill toggle persists and reads back (negative list, default enabled)", async (t) => {
   const { caps, dataRoot } = await fixture(t);
   assert.deepEqual(await caps.agentConfigStatus(), {
@@ -373,6 +422,20 @@ test("mcp disable quarantines the entry verbatim (env included), enable restores
   }
 });
 
+test("disabledMcpNames mirrors quarantine and fail-closes when unreadable", async (t) => {
+  const { caps, home, dataRoot } = await fixture(t, { claudeJson: CLAUDE_CONFIG });
+  const empty = await caps.disabledMcpNames();
+  assert.equal(empty.failClosed, false);
+  assert.deepEqual([...empty.names], []);
+  await caps.toggleMcpServer({ name: "serena", source: join(home, ".claude.json"), action: "disable" });
+  const held = await caps.disabledMcpNames();
+  assert.equal(held.failClosed, false);
+  assert.deepEqual([...held.names], ["serena"]);
+  await writeFile(join(dataRoot, "mcp-quarantine.json"), "{", "utf8");
+  const broken = await caps.disabledMcpNames();
+  assert.equal(broken.failClosed, true);
+});
+
 test("concurrent MCP mutations preserve every config and quarantine update", async (t) => {
   const { home, dataRoot, teamsStore, caps } = await fixture(t, { claudeJson: CLAUDE_CONFIG });
   const caps2 = createCapabilities({
@@ -543,10 +606,13 @@ test("social loop injects only enabled skills into member prompts", async (t) =>
     policy: { version: 1, modes: { plan: { approvalRequired: false } }, limits: { maxRounds: 4, maxBudgetUsdPerTurn: 2, turnTimeoutMs: 1000 } },
     approvalBroker: { request: async () => ({ decision: "accept" }), denyRun() {} },
     teams: {
-      get: () => ({ id: "team-514cc", name: "514cc", coordinator: "claude-fable", members: ["claude-fable", "codex-technical"], skills: ["co-review", "docx", "ssh"] }),
-      brief: () => "[团队]",
+      get: () => ({ id: "team-514cc", name: "514cc", coordinator: "claude-fable", members: ["claude-fable", "codex-technical"], skills: ["co-review", "docx", "ssh"], mcp: ["serena", "exa"] }),
+      brief: () => "[团队]\n团队 Skill（声明，供派工参考）：co-review、docx、ssh\n团队 MCP（声明，供派工参考）：serena、exa",
     },
-    capabilities: { agentDisabledSkills: async (id) => new Set(id === "codex-technical" ? ["docx"] : []) },
+    capabilities: {
+      agentDisabledSkills: async (id) => new Set(id === "codex-technical" ? ["docx"] : []),
+      disabledMcpNames: async () => ({ failClosed: false, names: new Set(["serena"]) }),
+    },
   }).init();
   const run = await orchestrator.create({ prompt: "接线验证", execute: true, permissionMode: "plan", teamId: "team-514cc", orchestrationMode: "social", maxRounds: 4 });
   const deadline = Date.now() + 10_000;
@@ -557,6 +623,9 @@ test("social loop injects only enabled skills into member prompts", async (t) =>
   const codexPrompt = calls.find((call) => call.id === "codex-technical")?.prompt ?? "";
   assert.ok(codexPrompt.includes("co-review") && codexPrompt.includes("ssh"), "启用中的 skill 必须注入");
   assert.ok(!codexPrompt.includes("docx"), "被禁用的 skill 不得进提示词");
+  assert.ok(codexPrompt.includes("exa") && !codexPrompt.includes("serena"), "隔离的 MCP 不得进提示词");
+  assert.doesNotMatch(codexPrompt, /团队 Skill（声明，供派工参考）/);
+  assert.doesNotMatch(codexPrompt, /团队 MCP（声明，供派工参考）/);
   assert.match(codexPrompt, /只是注入模型的提示词声明，不授予工具、文件、网络或沙箱权限/);
   await orchestrator.close();
 });

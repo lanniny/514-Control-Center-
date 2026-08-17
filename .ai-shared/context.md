@@ -1,7 +1,7 @@
 # 当前任务上下文（活跃状态）
 
 > 协作体系的"短期记忆"。每个 Agent 接入时**先读这里**。
-> 由 Claude 主驾维护。最后更新：2026-08-08（环境舱对齐、工具标签栏、终端修复、团队配置便利层）。
+> 由 Claude 主驾维护。最后更新：2026-08-18（全面审查、交付闸门、CCB 消息收发局与浏览器验收）。
 > 本文件只存稳定事实和当前风险；逐轮实现史、测试计数与运行时快照分别进入 `decisions.md`、handoff 和当轮验证输出。
 
 ## 主人信息
@@ -99,10 +99,17 @@ Console 另有 Grok Build、Kimi 前端和 Pi resident 等执行 profile；它�
 
 - **配置系统 bug 搜寻 + 矩阵可用性改造**（主驾续波）：三路并进（静态审查 / 真实 HTTP 边界探针 / UI 走查截图）。结论诚实分层——`/api/config` 边界层健康（路径穿越 404 不回内容、critical 源 403 fail-closed、无 5xx），**该层无可报缺陷**；真问题在 UI：①门闸未授权（501）被当成故障渲染成常驻红字技术文案（390px 占三行），改为 `gated`/`error` 分类 + 「去授权」直达门闩；②`team-workspace-ui` 三条断言盯字面文本而守卫已收口，先核实三道闸都在、确认是断言腐烂才升级为语义断言；③Skill 矩阵 126 格无筛选无批量无定位，补筛选/覆盖率/整行整列全量批量（复用原子接口、只提交真实变更、fail-closed 成员豁免、影响面二次确认、部分失败逐条回报）+ 斑马纹/行 hover/勾选饱和度/表头 sticky。走查工具正式化为 `npm run qa:walkthrough`。证据见 `claude-to-all__config-system-bugs-and-matrix-ux__20260813-0150.md`、`decisions.md` D-2026-08-13-002。
 
+### 2026-08-17 ~ 08-18 活跃波次
+
+- **Control Center 全面审查与交付闸门**：runtime reload 提交点、shutdown/instance lock、终端 RAF、自动化 fail-closed、市场 latest-wins、右栏 ARIA 已补强；新增 `qa:delivery` 只读清单。完整回归和 validate 当前通过，但 strict 仍因未跟踪源码/测试阻断，不能把本地绿灯说成可提交交付。
+- **CCB 启发的消息收发局**：团队编排页新增 `514cc.collaboration-inbox/v1` 有界只读投影，复用 BusStore 脱敏和 Mission Control 诊断；Ask 的已回答身份固定为 `runId + askId`，run 截断必须标 `partial`。前端使用 AbortController + generation 拒绝迟到响应，任务跳转在全局 run 缓存缺失时先刷新并显式失败。
+- **真实浏览器验收**：隔离 dataRoot/端口、不继承真实 provider 凭据；桌面与移动视口无 Inbox 横向溢出，`success -> error -> recovery` 状态链和 stale run 点击跳转通过。顺带移除强调色控件的 4 个内联 style CSP 违规。证据见 `codex-to-claude__ccb-message-bureau__20260818-0058.md`。
+
 ## 当前风险
 
 - 正式 framework release 仍以真源记录为准；工作记录里的 v3.6/v3.7/v4.0 仅是**未发布功能波次**，不得作为已发布版本传播。`rules.md` 仍为 v3.5.0，但 v4.0 功能（Forge 设计系统、CC-Switch 迁移、团队工作区融合、配置图谱、工具标签栏、终端修复等）已深度落地到 Console。版本升格/正式发布待 LO 决策。
 - 仓库源、用户运行时和正在运行的进程是三个状态面；未做当轮 readback/端到端调用时，不得声称已部署或已激活。
+- 2026-08-18 GitHub 快照前已按显式产品闭包纳入 Control Center 源码/测试，并让 `qa:delivery --strict` 达到 `tracked=345 / physical=345 / pass`；本次只代表可复现工作快照，不等于正式版本升格，临时 QA/preview/scratch 产物继续排除。
 - Console 与治理面持续演进，固定测试总数会迅速腐烂；只记录验证命令和当轮输出，不在本文件固化“全绿 N/N”。
 - Python 校验依赖由 `requirements-validation.txt` 声明；缺少 PyYAML/jsonschema 时必须显式失败，禁止静默退化成仅语法检查。
 - CC-Switch 的 3 个 updater 命令必须保持 `blocked_external_trust`，直到 514cc 拥有自己的签名公钥与更新端点；禁止借用上游信任材料或伪称 updater 已上线。

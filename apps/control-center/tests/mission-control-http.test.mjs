@@ -5,6 +5,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { MISSION_CONTROL_LIMITS, MISSION_CONTROL_SCHEMA } from "../src/mission-control.mjs";
+import { INBOX_SCHEMA } from "../src/collaboration-inbox.mjs";
 import { spawnTestServer, stopTestServer, waitForUrl } from "./server-fixture.mjs";
 
 const appRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -22,6 +23,21 @@ async function waitForResponseLeaseCount(origin, token, key, expected, { timeout
     await new Promise((resolveImmediate) => setImmediate(resolveImmediate));
   }
   assert.fail(`timed out waiting for response lease ${key}=${expected}; observed ${JSON.stringify(observed)}`);
+}
+
+async function waitForHealthStats(origin, token, predicate, description, { timeoutMs = 5_000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  let observed = null;
+  while (Date.now() < deadline) {
+    const response = await fetch(`${origin}/api/test/health-stats`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    assert.equal(response.status, 200);
+    observed = await response.json();
+    if (predicate(observed)) return observed;
+    await new Promise((resolveImmediate) => setImmediate(resolveImmediate));
+  }
+  assert.fail(`timed out waiting for health stats (${description}); observed ${JSON.stringify(observed)}`);
 }
 
 async function stopProductionServer(child, { timeoutMs = 5_000 } = {}) {
@@ -137,8 +153,8 @@ test("authenticated run mission endpoint returns a bounded redacted snapshot", {
     ts: new Date(index * 3_000).toISOString(),
     runId,
     from: index % 2 ? "claude-fable" : "codex-technical",
-    to: index % 2 ? "codex-technical" : "claude-fable",
-    kind: "say",
+    to: index === 1_998 ? "lo" : index % 2 ? "codex-technical" : "claude-fable",
+    kind: index === 1_998 ? "ask" : index === 1_999 ? "answer" : "say",
     text: `authorization=Bearer bus-http-secret-${index}-${"y".repeat(200)}`,
   }));
   const busPath = join(dataRoot, "bus", `${runId}.jsonl`);
@@ -195,6 +211,21 @@ test("authenticated run mission endpoint returns a bounded redacted snapshot", {
   assert.equal(bus.messages[0]?.id, `bus-${messages.length - MISSION_CONTROL_LIMITS.busMessages}`);
   assert.equal(bus.messages.at(-1)?.id, `bus-${messages.length - 1}`);
   assert.equal(JSON.stringify(bus).includes("bus-http-secret-0-"), false, "bounded tail must exclude old records");
+
+  const inboxResponse = await fetch(`${origin}/api/teams/team-514cc/inbox`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  assert.equal(inboxResponse.status, 200);
+  const inbox = await inboxResponse.json();
+  assert.equal(inbox.schema, INBOX_SCHEMA);
+  assert.equal(inbox.team.id, "team-514cc");
+  assert.ok(inbox.sources.some((source) => source.runId === runId));
+  assert.equal(inbox.pendingAsks[0]?.id, "bus-1998");
+  assert.equal(inbox.recentAnswers[0]?.id, "bus-1999");
+  assert.equal(JSON.stringify(inbox).includes(dataRoot), false);
+
+  const unauthorizedInbox = await fetch(`${origin}/api/teams/team-514cc/inbox`);
+  assert.equal(unauthorizedInbox.status, 401);
 
   await writeFile(busPath, `${messages.map(JSON.stringify).join("\n")}\n{"id":`, "utf8");
   const degradedResponse = await fetch(endpoint, { headers: { authorization: `Bearer ${token}` } });
@@ -458,6 +489,111 @@ test("mission endpoint cancels its health wait and releases the response lease o
       ...blockers.map((item) => item.response),
       ...(replacementPromise ? [replacementPromise] : []),
     ]);
+  }
+  await waitForResponseLeaseCount(origin, token, `mission:${runId}`, 0);
+});
+
+test("mission waiters share one health batch and disconnects retire it end-to-end", { timeout: 60_000 }, async (t) => {
+  const dataRoot = await mkdtemp(resolve(appRoot, ".test-mission-http-health-"));
+  const token = "mission-http-health-token";
+  const runId = "55555555-5555-4555-8555-555555555555";
+  await mkdir(join(dataRoot, "runs"), { recursive: true });
+  await mkdir(join(dataRoot, "bus"), { recursive: true });
+  await writeFile(join(dataRoot, "runs", `${runId}.json`), `${JSON.stringify({
+    id: runId,
+    prompt: "verify mission shared health batch",
+    status: "running",
+    taskType: "coding",
+    orchestrationMode: "social",
+    permissionMode: "plan",
+    execute: true,
+    busExpectedAt: "2026-07-23T00:00:00.500Z",
+    busMaterializedAt: "2026-07-23T00:00:01.000Z",
+    coordinatorId: "claude-fable",
+    startAgentId: "claude-fable",
+    teamMembers: ["claude-fable"],
+    route: { selected: { id: "claude-fable" } },
+    sessions: {},
+    turns: [],
+    turnAttempts: [],
+    createdAt: "2026-07-23T00:00:00.000Z",
+    updatedAt: "2026-07-23T00:00:01.000Z",
+    round: 0,
+    maxRounds: 3,
+  })}\n`, "utf8");
+  await writeFile(join(dataRoot, "bus", `${runId}.jsonl`), `${JSON.stringify({
+    id: "message-1",
+    runId,
+    from: "lo",
+    to: "claude-fable",
+    kind: "task",
+    text: "shared health batch",
+    ts: "2026-07-23T00:00:01.000Z",
+  })}\n`, "utf8");
+
+  const child = spawnTestServer({
+    env: {
+      CONTROL_CENTER_TOKEN: token,
+      CONTROL_CENTER_DATA_DIR: dataRoot,
+      CONTROL_CENTER_PORT: "0",
+      CONTROL_CENTER_TEST_HEALTH_PROBE_DELAY_MS: "30000",
+    },
+  });
+  t.after(async () => {
+    await stopTestServer(child, { token });
+    await rm(dataRoot, { recursive: true, force: true });
+  });
+  const origin = new URL(await waitForUrl(child)).origin;
+  const endpoint = `${origin}/api/runs/${runId}/mission`;
+  const headers = { authorization: `Bearer ${token}` };
+
+  // 3 个并发 mission 请求必须汇合到同一个共享 health batch（probe 计数只涨一轮）。
+  const waiters = Array.from({ length: 3 }, () => {
+    const controller = new AbortController();
+    return { controller, response: fetch(endpoint, { headers, signal: controller.signal }) };
+  });
+  try {
+    const joined = await waitForHealthStats(origin, token,
+      (stats) => stats.inflight && stats.waiters === 3 && stats.probeCalls >= 1,
+      "three mission waiters join one inflight health batch");
+    const batchProbeCalls = joined.probeCalls;
+
+    // 一个 waiter 断连：其余 waiter 不被波及，底层 batch 继续、不重新探测。
+    waiters[0].controller.abort();
+    await assert.rejects(waiters[0].response, (error) => error?.name === "AbortError");
+    await waitForHealthStats(origin, token,
+      (stats) => stats.inflight && stats.waiters === 2 && stats.probeCalls === batchProbeCalls,
+      "surviving waiters keep the shared batch");
+    const survivors = await Promise.race([
+      Promise.allSettled(waiters.slice(1).map((item) => item.response)).then(() => "settled"),
+      new Promise((resolvePending) => setTimeout(resolvePending, 300, "pending")),
+    ]);
+    assert.equal(survivors, "pending", "surviving waiters must keep waiting on the shared batch");
+
+    // 最后一个 waiter 断连：底层 batch 被 abort，inflight/retiring 最终清空。
+    for (const item of waiters.slice(1)) item.controller.abort();
+    await Promise.allSettled(waiters.slice(1).map((item) => item.response));
+    await waitForHealthStats(origin, token,
+      (stats) => !stats.inflight && stats.waiters === 0 && stats.retiring === 0,
+      "retired batch fully drains");
+
+    // 下一次请求重新创建 batch：被取消的批次不会污染缓存或卡住后续探测。
+    const replacementController = new AbortController();
+    const replacement = fetch(endpoint, { headers, signal: replacementController.signal });
+    try {
+      await waitForHealthStats(origin, token,
+        (stats) => stats.inflight && stats.probeCalls > batchProbeCalls,
+        "a fresh health batch starts for the next request");
+    } finally {
+      replacementController.abort();
+      await assert.rejects(replacement, (error) => error?.name === "AbortError");
+    }
+    await waitForHealthStats(origin, token,
+      (stats) => !stats.inflight && stats.retiring === 0,
+      "replacement batch drains after its last waiter disconnects");
+  } finally {
+    for (const item of waiters) item.controller.abort();
+    await Promise.allSettled(waiters.map((item) => item.response));
   }
   await waitForResponseLeaseCount(origin, token, `mission:${runId}`, 0);
 });

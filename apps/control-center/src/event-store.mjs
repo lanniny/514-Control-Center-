@@ -474,17 +474,41 @@ export class EventStore {
     return () => this.subscribers.delete(listener);
   }
 
-  async close() {
+  async close({ deadlineMs = null } = {}) {
     this.accepting = false;
     this.lifecycleAbort.abort();
     // Let a pending lazy-load batch enter its guarded start path before taking the chain snapshot.
     await Promise.resolve();
-    while (this.readTasks.size) await Promise.allSettled([...this.readTasks]);
-    await Promise.all([
+    // 统一 shutdown deadline（烛 wave-shutdown 复审）：读取任务与扫描链只等到截止点。
+    // 超期不再无限等待——lifecycleAbort 已广播，尾部任务按各自 abort 语义收尾。
+    const withinDeadline = async (pending) => {
+      if (deadlineMs == null) {
+        await pending;
+        return true;
+      }
+      const remaining = deadlineMs - Date.now();
+      if (remaining <= 0) {
+        void Promise.resolve(pending).catch(() => {});
+        return false;
+      }
+      let timer = null;
+      try {
+        return await Promise.race([
+          Promise.resolve(pending).then(() => true, () => true),
+          new Promise((resolveTimeout) => { timer = setTimeout(() => resolveTimeout(false), remaining); }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    };
+    while (this.readTasks.size) {
+      if (!await withinDeadline(Promise.allSettled([...this.readTasks]))) break;
+    }
+    await withinDeadline(Promise.all([
       this.writeChain.catch(() => {}),
       this.runLoadScanChain.catch(() => {}),
       this.recentReadScanChain.catch(() => {}),
-    ]);
+    ]));
     this.subscribers.clear();
   }
 

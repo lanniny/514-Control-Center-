@@ -37,6 +37,20 @@ async function fixture(t, storeOptions = {}) {
   return { root, dataRoot, runtimeHome, store };
 }
 
+async function withTimeout(promise, timeoutMs, message) {
+  let timer = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(Object.assign(new Error(message), { code: "TEST_TIMEOUT" })), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 const PACKY = {
   name: "PackyCode",
   baseUrl: "https://api.packycode.com",
@@ -561,6 +575,8 @@ test("ProviderStore: sort/failover/commonConfig/markProxyCurrent 持久化失败
   });
   const first = await store.create({ ...PACKY, name: "Candidate P1" });
   const second = await store.create({ ...PACKY, name: "Candidate P2" });
+  await store.switchTo("claude", first.id);
+  await store.setProxyTakeover("claude", true);
   failRename = true;
 
   const assertRejectedCandidate = async (operation) => {
@@ -660,6 +676,241 @@ test("ProviderStore: switchTo 将 live CLI、current 与 providers.json 作为�
     ...await readdir(join(runtimeHome, ".claude")),
   ];
   assert.equal(tempNames.some((name) => name.startsWith(".514forge") && name.endsWith(".tmp")), false);
+});
+
+test("ProviderStore: execution projection holds the same-app switch lock for the full operation", async (t) => {
+  const { store } = await fixture(t);
+  const first = await store.create({ ...PACKY, name: "Projection P1" });
+  const second = await store.create({
+    ...PACKY,
+    name: "Projection P2",
+    baseUrl: "https://projection-p2.invalid",
+    apiKey: "projection-p2-key",
+  });
+  await store.switchTo("claude", first.id);
+
+  let releaseOperation;
+  let markOperationEntered;
+  const operationEntered = new Promise((resolveEntered) => { markOperationEntered = resolveEntered; });
+  const operationGate = new Promise((resolveGate) => { releaseOperation = resolveGate; });
+  const projected = store.withProviderProjection("claude", first.id, async () => {
+    markOperationEntered();
+    await operationGate;
+    assert.equal(store.current.claude, first.id, "live provider must stay pinned for the whole operation");
+    return "projected-result";
+  });
+  await operationEntered;
+
+  let switchSettled = false;
+  const queuedSwitch = store.switchTo("claude", second.id).then((result) => {
+    switchSettled = true;
+    return result;
+  });
+  await new Promise((resolveTimer) => setTimeout(resolveTimer, 50));
+  assert.equal(switchSettled, false, "external switchTo must wait behind the active execution projection");
+  assert.equal(store.current.claude, first.id);
+
+  releaseOperation();
+  assert.equal(await projected, "projected-result");
+  await queuedSwitch;
+  assert.equal(store.current.claude, second.id);
+
+  await assert.rejects(
+    store.withProviderProjection("claude", second.id, async () => {
+      throw Object.assign(new Error("operation failed"), { code: "OPERATION_FAILED" });
+    }),
+    { code: "OPERATION_FAILED" },
+  );
+  await store.switchTo("claude", first.id);
+  assert.equal(store.current.claude, first.id, "failed operations must release the projection queue");
+});
+
+test("ProviderStore: same-app projection re-entry fails fast instead of waiting on its own lock", async (t) => {
+  const { store } = await fixture(t);
+  const first = await store.create({ ...PACKY, name: "Projection reentry P1" });
+  const second = await store.create({
+    ...PACKY,
+    name: "Projection reentry P2",
+    baseUrl: "https://projection-reentry-p2.invalid",
+    apiKey: "projection-reentry-p2-key",
+  });
+  await store.switchTo("claude", first.id);
+
+  await store.withProviderProjection("claude", first.id, async () => {
+    await assert.rejects(
+      withTimeout(
+        Promise.resolve().then(() => store.switchTo("claude", second.id)),
+        250,
+        "same-app switchTo deadlocked",
+      ),
+      { code: "PROJECTION_REENTRANT" },
+    );
+    await assert.rejects(
+      withTimeout(
+        Promise.resolve().then(() => store.withProviderProjection("claude", second.id, async () => {})),
+        250,
+        "nested same-app projection deadlocked",
+      ),
+      { code: "PROJECTION_REENTRANT" },
+    );
+  });
+
+  const grok = await store.create({
+    name: "Projection reentry Grok",
+    baseUrl: "https://projection-reentry-grok.invalid/v1",
+    apiKey: "projection-reentry-grok-key",
+    apps: { grokbuild: true },
+    models: { grokbuild: { model: "grok-test" } },
+    meta: { apiFormat: "openai_responses" },
+  });
+  await store.switchTo("grokbuild", grok.id);
+  await store.withProviderProjection("grokbuild", grok.id, async () => {
+    await assert.rejects(
+      withTimeout(
+        Promise.resolve().then(() => store.switchToOfficial("grokbuild")),
+        250,
+        "same-app official switch deadlocked",
+      ),
+      { code: "PROJECTION_REENTRANT" },
+    );
+  });
+});
+
+test("ProviderStore: proxy takeover waits behind the active execution projection", async (t) => {
+  const { runtimeHome, store } = await fixture(t);
+  const provider = await store.create({ ...PACKY, name: "Projection takeover" });
+  await store.switchTo("claude", provider.id);
+  const settingsPath = join(runtimeHome, ".claude", "settings.json");
+
+  let releaseOperation;
+  let markOperationEntered;
+  const operationEntered = new Promise((resolveEntered) => { markOperationEntered = resolveEntered; });
+  const operationGate = new Promise((resolveGate) => { releaseOperation = resolveGate; });
+  const projected = store.withProviderProjection("claude", provider.id, async () => {
+    markOperationEntered();
+    await operationGate;
+  });
+  await operationEntered;
+
+  let takeoverSettled = false;
+  const takeover = store.setProxyTakeover("claude", true).then((result) => {
+    takeoverSettled = true;
+    return result;
+  });
+  await new Promise((resolveTimer) => setTimeout(resolveTimer, 50));
+  assert.equal(takeoverSettled, false, "takeover must not rewrite live config during a provider operation");
+  assert.equal(JSON.parse(await readFile(settingsPath, "utf8")).env.ANTHROPIC_BASE_URL, PACKY.baseUrl);
+
+  releaseOperation();
+  await projected;
+  await takeover;
+  assert.equal(store.proxyRuntime.takeover.has("claude"), true);
+  assert.equal(JSON.parse(await readFile(settingsPath, "utf8")).env.ANTHROPIC_BASE_URL, `${store.proxyRuntime.origin}/claude`);
+});
+
+test("ProviderStore: proxy current performs a full live projection when takeover is disabled", async (t) => {
+  const { runtimeHome, store } = await fixture(t);
+  const first = await store.create({ ...PACKY, name: "Proxy current P1" });
+  const second = await store.create({
+    ...PACKY,
+    name: "Proxy current P2",
+    baseUrl: "https://proxy-current-p2.invalid",
+    apiKey: "proxy-current-p2-key",
+  });
+  await store.switchTo("claude", first.id);
+  const settingsPath = join(runtimeHome, ".claude", "settings.json");
+
+  let releaseOperation;
+  let markOperationEntered;
+  const operationEntered = new Promise((resolveEntered) => { markOperationEntered = resolveEntered; });
+  const operationGate = new Promise((resolveGate) => { releaseOperation = resolveGate; });
+  const projected = store.withProviderProjection("claude", first.id, async () => {
+    markOperationEntered();
+    await operationGate;
+  });
+  await operationEntered;
+
+  let markSettled = false;
+  const marking = store.markProxyCurrent("claude", second.id).then((result) => {
+    markSettled = true;
+    return result;
+  });
+  await new Promise((resolveTimer) => setTimeout(resolveTimer, 50));
+  assert.equal(markSettled, false, "proxy current must wait behind the active execution projection");
+  assert.equal(store.current.claude, first.id);
+
+  releaseOperation();
+  await projected;
+  await marking;
+  const live = JSON.parse(await readFile(settingsPath, "utf8"));
+  assert.equal(store.current.claude, second.id);
+  assert.equal(live.env.ANTHROPIC_BASE_URL, second.baseUrl);
+  assert.equal(live.env.ANTHROPIC_AUTH_TOKEN, "proxy-current-p2-key");
+});
+
+test("ProviderStore: observed proxy current may settle inside takeover projection without rewriting live CLI", async (t) => {
+  const { runtimeHome, store } = await fixture(t);
+  const first = await store.create({ ...PACKY, name: "Observed proxy P1" });
+  const second = await store.create({
+    ...PACKY,
+    name: "Observed proxy P2",
+    baseUrl: "https://observed-proxy-p2.invalid",
+    apiKey: "observed-proxy-p2-key",
+  });
+  await store.switchTo("claude", first.id);
+  await store.setProxyTakeover("claude", true);
+  const settingsPath = join(runtimeHome, ".claude", "settings.json");
+
+  await store.withProviderProjection("claude", first.id, async () => {
+    await withTimeout(
+      store.markProxyCurrent("claude", second.id, { proxyObserved: true }),
+      250,
+      "proxy-observed current waited on the operation that produced it",
+    );
+    assert.equal(store.current.claude, second.id);
+    const live = JSON.parse(await readFile(settingsPath, "utf8"));
+    assert.equal(live.env.ANTHROPIC_BASE_URL, `${store.proxyRuntime.origin}/claude`);
+    assert.equal(live.env.ANTHROPIC_AUTH_TOKEN, store.proxyRuntime.token);
+  });
+});
+
+test("ProviderStore: stale proxy observation cannot move current after takeover restore commits", async (t) => {
+  let releaseRestore;
+  let markRestoreReady;
+  const restoreReady = new Promise((resolveReady) => { markRestoreReady = resolveReady; });
+  const restoreGate = new Promise((resolveRestore) => { releaseRestore = resolveRestore; });
+  const { runtimeHome, store } = await fixture(t, {
+    beforeLiveConfigPlanCommit: async ({ app, enabled }) => {
+      if (app !== "claude" || enabled) return;
+      markRestoreReady();
+      await restoreGate;
+    },
+  });
+  const first = await store.create({ ...PACKY, name: "Restore race P1" });
+  const second = await store.create({
+    ...PACKY,
+    name: "Restore race P2",
+    baseUrl: "https://restore-race-p2.invalid",
+    apiKey: "restore-race-p2-key",
+  });
+  await store.switchTo("claude", first.id);
+  await store.setProxyTakeover("claude", true);
+  const settingsPath = join(runtimeHome, ".claude", "settings.json");
+  const controller = new AbortController();
+
+  const restoring = store.setProxyTakeover("claude", false, { signal: controller.signal });
+  await restoreReady;
+  const observed = store.markProxyCurrent("claude", second.id, { proxyObserved: true });
+  releaseRestore();
+
+  await restoring;
+  const observation = await observed;
+  const live = JSON.parse(await readFile(settingsPath, "utf8"));
+  assert.equal(observation.ignored, true);
+  assert.equal(observation.reason, "takeover-changed");
+  assert.equal(store.current.claude, first.id);
+  assert.equal(live.env.ANTHROPIC_BASE_URL, first.baseUrl);
+  assert.equal(live.env.ANTHROPIC_AUTH_TOKEN, PACKY.apiKey);
 });
 
 test("Provider 默认出站投影深层脱敏，明文只由显式 includeSecrets 读取", async (t) => {
@@ -1144,6 +1395,11 @@ test("remove：活跃档案拒删；applyTeamBindings 逐 app 如实回报（含
   const created = await store.create(PACKY);
   const claudeOnly = await store.create({ name: "C", baseUrl: "https://c.example.com", apiKey: "k1", apps: { claude: true } });
   await store.switchTo("claude", created.id);
+  await assert.rejects(
+    () => store.update(created.id, { apps: { claude: false } }),
+    { code: "PROVIDER_ACTIVE" },
+  );
+  assert.equal(store.get(created.id).apps.claude, true);
 
   const teamRoot = await mkdtemp(resolve(appRoot, ".test-providers-team-"));
   t.after(() => rm(teamRoot, { recursive: true, force: true }));
@@ -2014,6 +2270,7 @@ test("opencode：缺省补 npm 适配器与模型表、顶层 model 指针落盘
   assert.equal(written.provider.tokenrelay.options.apiKey, "sk_tr_test");
   assert.deepEqual(written.provider.tokenrelay.models, { "deepseek-v4-flash": { name: "deepseek-v4-flash" } }); // 模型表合成
   assert.equal(written.model, "tokenrelay/deepseek-v4-flash"); // 顶层 model 指针——「启用了但没生效」的命门
+  assert.ok(written.provider.tokenrelay.models["deepseek-v4-flash"]);
 
   // apiFormat=anthropic → anthropic 适配器；不同档案共存于同一 provider 表
   const anth = await store.create({
@@ -2039,6 +2296,64 @@ test("opencode：缺省补 npm 适配器与模型表、顶层 model 指针落盘
   // 空 Base URL：启用即报错，不再静默写出 CLI 不可用的配置
   const noUrl = await store.create({ name: "NoUrl", baseUrl: "", apiKey: "sk-x", apps: { opencode: true } });
   await assert.rejects(() => store.switchTo("opencode", noUrl.id), /Base URL/);
+});
+
+test("opencode：供应商标识、请求头、timeout 与模型显示名一并投影", async (t) => {
+  const { store, runtimeHome } = await fixture(t);
+  const created = await store.create({
+    name: "TokenRhythm Display",
+    baseUrl: "https://514claude.xyz/v1",
+    apiKey: "sk_tr_test",
+    apps: { opencode: true },
+    models: { opencode: { model: "qwen3-8-27b" } },
+    meta: {
+      apiFormat: "openai_chat",
+      appConfig: {
+        opencode: {
+          providerKey: "tokenrhythm",
+          settingsConfig: {
+            options: { timeout: 600000, headers: { "X-Title": "514cc" } },
+            models: { "qwen3-8-27b": { name: "Qwen3 8/27B" } },
+          },
+        },
+      },
+    },
+  });
+  await store.switchTo("opencode", created.id);
+  const written = JSON.parse(await readFile(join(runtimeHome, ".config", "opencode", "opencode.json"), "utf8"));
+  assert.equal(written.model, "tokenrhythm/qwen3-8-27b");
+  assert.equal(written.provider.tokenrhythm.options.baseURL, "https://514claude.xyz/v1");
+  assert.equal(written.provider.tokenrhythm.options.timeout, 600000);
+  assert.equal(written.provider.tokenrhythm.options.headers["X-Title"], "514cc");
+  assert.equal(written.provider.tokenrhythm.models["qwen3-8-27b"].name, "Qwen3 8/27B");
+  assert.equal(written.provider.tokenrhythm.npm, "@ai-sdk/openai-compatible");
+});
+
+test("opencode：顶层 model 指针写入时同步补进模型表，不抹掉磁盘已有档", async (t) => {
+  const { store, runtimeHome } = await fixture(t);
+  const configPath = join(runtimeHome, ".config", "opencode", "opencode.json");
+  await mkdir(join(runtimeHome, ".config", "opencode"), { recursive: true });
+  await writeFile(configPath, JSON.stringify({
+    $schema: "https://opencode.ai/config.json",
+    provider: {
+      tokenrelay: {
+        npm: "@ai-sdk/openai-compatible",
+        models: { "qwen3-8-27b": { name: "qwen3-8-27b" } },
+      },
+    },
+  }));
+  const created = await store.create({
+    name: "TokenRelay",
+    baseUrl: "https://tokenrhythm.studio/v1",
+    apiKey: "sk_tr_test",
+    apps: { opencode: true },
+    models: { opencode: { model: "deepseek-v4-flash" } },
+    meta: { appConfig: { opencode: { settingsConfig: { models: { "qwen3-8-27b": { name: "qwen3-8-27b" } } } } } },
+  });
+  await store.switchTo("opencode", created.id);
+  const written = JSON.parse(await readFile(configPath, "utf8"));
+  assert.equal(written.model, "tokenrelay/deepseek-v4-flash");
+  assert.deepEqual(Object.keys(written.provider.tokenrelay.models).sort(), ["deepseek-v4-flash", "qwen3-8-27b"]);
 });
 
 test("per-app 排序与团队八应用绑定保持隔离", async (t) => {

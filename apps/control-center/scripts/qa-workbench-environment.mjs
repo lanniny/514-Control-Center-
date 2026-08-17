@@ -128,7 +128,8 @@ async function prepareFixture(qaRoot, token) {
 async function runBrowserQa({ bootstrapUrl, origin, token, outputDir, run, runId, buildRunId, repoRoot }) {
   const diagnostics = [];
   const allowedGateBlocks = [];
-  const watcher = diagnosticsWatcher(diagnostics, allowedGateBlocks);
+  const allowedRequestAborts = [];
+  const watcher = diagnosticsWatcher(diagnostics, allowedGateBlocks, allowedRequestAborts);
   const browser = await chromium.launch({ headless: true });
   try {
     const context = await browser.newContext({ viewport: viewports[0] });
@@ -264,8 +265,8 @@ async function runBrowserQa({ bootstrapUrl, origin, token, outputDir, run, runId
     await page.unroute(`**/api/runs/${runId}/messages`);
 
     await page.locator("#mission-side-chat-close").click();
-    // 终端是底部抽屉（LO 图4）：➕ 打开后出现在对话区下方，× 关闭只隐藏不销毁 PTY
-    await invokeTool("terminal");
+    // 底部抽屉由顶栏角位开关负责；右栏「终端」是另一份独立 PTY 视图。
+    await page.locator("#global-terminal-toggle").click();
     await page.locator("#terminal-drawer").waitFor({ state: "visible", timeout: 15_000 });
     assert.equal(await page.locator("#terminal-dock").count(), 0); // 旧的常驻折叠条不得回归
     await page.waitForTimeout(400); // 抽屉展开会推挤会话流网格，等布局收敛再交互
@@ -281,8 +282,53 @@ async function runBrowserQa({ bootstrapUrl, origin, token, outputDir, run, runId
       `终端抽屉必须在输入框下方，实测 drawer.top=${drawerOrder.drawerTop} composer.bottom=${drawerOrder.composerBottom}`,
     );
     await page.screenshot({ path: resolve(outputDir, "terminal-drawer-below-composer.png") });
+    const terminalCloseGeometry = await page.evaluate(() => {
+      const rectOf = (selector) => {
+        const node = document.querySelector(selector);
+        const rect = node?.getBoundingClientRect();
+        if (!rect) return null;
+        const style = getComputedStyle(node);
+        return {
+          selector,
+          left: Math.round(rect.left),
+          top: Math.round(rect.top),
+          right: Math.round(rect.right),
+          bottom: Math.round(rect.bottom),
+          width: Math.round(rect.width),
+          height: Math.round(rect.height),
+          position: style.position,
+          zIndex: style.zIndex,
+          pointerEvents: style.pointerEvents,
+        };
+      };
+      const close = document.querySelector("#terminal-drawer-close");
+      const closeRect = close?.getBoundingClientRect();
+      const x = closeRect ? closeRect.left + closeRect.width / 2 : -1;
+      const y = closeRect ? closeRect.top + closeRect.height / 2 : -1;
+      const hit = x >= 0 ? document.elementFromPoint(x, y) : null;
+      return {
+        drawer: rectOf("#terminal-drawer"),
+        close: rectOf("#terminal-drawer-close"),
+        conversation: rectOf(".conversation-pane"),
+        missionDock: rectOf("#mission-control-dock"),
+        hit: hit ? { id: hit.id, tag: hit.tagName, className: hit.className } : null,
+        closeOwnsHit: Boolean(hit?.closest?.("#terminal-drawer-close")),
+        point: { x: Math.round(x), y: Math.round(y) },
+      };
+    });
+    assert.equal(
+      terminalCloseGeometry.closeOwnsHit,
+      true,
+      `终端关闭按钮命中层级错误：${JSON.stringify(terminalCloseGeometry)}`,
+    );
     await page.locator("#terminal-drawer-close").click();
+    await page.locator("#terminal-drawer").waitFor({ state: "hidden", timeout: 2_000 });
     assert.equal(await page.locator("#terminal-drawer").isVisible(), false);
+
+    await invokeTool("terminal");
+    await page.locator('[data-tool-panel="terminal"]').waitFor({ state: "visible", timeout: 15_000 });
+    assert.equal(await page.locator("#terminal-drawer").isVisible(), false, "侧栏终端不得重新打开底部抽屉");
+    await page.locator('[data-rail-activate="mission"]').click();
 
     // 右栏标签条：任务上下文默认在位，➕ 菜单与空态选择器的视觉证据
     await page.locator("#mission-control-dock").screenshot({ path: resolve(outputDir, "rail-tab-mission.png") });
@@ -402,11 +448,7 @@ async function runBrowserQa({ bootstrapUrl, origin, token, outputDir, run, runId
     }
 
     await watcher.settle();
-    const allowedRequestAborts = diagnostics.filter((item) => (
-      /^environment requestfailed: GET \/api\/(?:workbench\/environment|runs\/[^/]+\/mission) net::ERR_ABORTED$/.test(item)
-    ));
-    const unexpectedDiagnostics = diagnostics.filter((item) => !allowedRequestAborts.includes(item));
-    assert.deepEqual(unexpectedDiagnostics, []);
+    assert.deepEqual(diagnostics, []);
     assert.ok(allowedGateBlocks.every((item) => ALLOWED_GATE_BLOCKS.has(item)));
     return {
       ok: true,
@@ -424,7 +466,7 @@ async function runBrowserQa({ bootstrapUrl, origin, token, outputDir, run, runId
       },
       cliControls,
       layouts,
-      diagnostics: unexpectedDiagnostics,
+      diagnostics,
       allowedRequestAborts: allowedRequestAborts.length,
       allowedGateBlocks: [...new Set(allowedGateBlocks)].sort(),
     };

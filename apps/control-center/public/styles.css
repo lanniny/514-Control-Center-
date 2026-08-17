@@ -1265,7 +1265,8 @@ pre,
   border-bottom: 0;
 }
 
-.rail-block > .pane-heading h2 {
+.rail-block > .pane-heading h2,
+.rail-block > .pane-heading .pane-title {
   color: var(--text-soft);
   font-family: inherit;
   font-size: 11px;
@@ -1285,7 +1286,8 @@ pre,
   border-bottom: 1px solid var(--border);
 }
 
-.pane-heading h2 {
+.pane-heading h2,
+.pane-heading .pane-title {
   margin: 0;
   font-size: 12px;
 }
@@ -2686,6 +2688,7 @@ pre,
 
 .conversation-pane {
   display: grid;
+  position: relative; /* CLI 沉浸罩层（.cli-immersive）的绝对定位锚点 */
   min-width: 0;
   min-height: 0;
   /* tab 栏 / 成员条 / 会话头 / 会话流 / composer——行模板与 DOM 同序（曾错配把成员条拉成巨带） */
@@ -2940,6 +2943,49 @@ pre,
 
 .rail-statusline .sl-dim {
   color: var(--text-soft);
+}
+
+/* —— composer 编辑提示条：amber 细条，明确「追加不改写」语义 —— */
+.composer-editing-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 4px;
+  padding: 3px 8px;
+  border: 1px solid color-mix(in oklab, var(--amber, #b58900) 35%, transparent);
+  border-radius: 6px;
+  background: color-mix(in oklab, var(--amber, #b58900) 8%, var(--surface));
+  color: var(--text-soft);
+  font-size: 11px;
+}
+
+.composer-editing-bar .icon {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+  color: var(--amber, #b58900);
+}
+
+.composer-editing-bar span {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.composer-editing-cancel {
+  flex: 0 0 auto;
+  padding: 1px 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-soft);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.composer-editing-cancel:hover,
+.composer-editing-cancel:focus-visible {
+  background: var(--surface-hover);
+  color: var(--text);
 }
 
 .composer-shell textarea {
@@ -4866,7 +4912,7 @@ input::placeholder {
    没有它，会话流里只剩审批与最终答复，中间"它到底做了什么"完全不可见。 */
 .process-card {
   margin: 0 0 8px 40px;
-  border: 1px solid var(--line);
+  border: 1px solid var(--border);
   border-radius: var(--radius-small);
   background: var(--surface-muted, var(--surface));
   font-size: 11.5px;
@@ -4918,7 +4964,7 @@ input::placeholder {
 
 .process-body {
   padding: 8px 10px 10px;
-  border-top: 1px solid var(--line);
+  border-top: 1px solid var(--border);
 }
 
 .process-command,
@@ -5197,6 +5243,15 @@ input::placeholder {
 
 .run-end-note.is-succeeded strong {
   color: var(--green);
+}
+
+.run-end-note.is-interrupted {
+  border-left-color: var(--amber);
+  background: var(--amber-soft);
+}
+
+.run-end-note.is-interrupted strong {
+  color: var(--amber);
 }
 
 /* 失败卡"重新发起"：与失败原因同卡，间距一档 */
@@ -5986,12 +6041,12 @@ input::placeholder {
   text-align: left;
 }
 
-.archived-toggle h2 {
+.archived-toggle .pane-title {
   margin: 0;
   transition: color 120ms ease;
 }
 
-.archived-toggle:hover h2 {
+.archived-toggle:hover .pane-title {
   color: var(--text);
 }
 
@@ -6399,7 +6454,8 @@ input::placeholder {
   row-gap: 2px;
 }
 
-.rail-block-team > .pane-heading h2 {
+.rail-block-team > .pane-heading h2,
+.rail-block-team > .pane-heading .pane-title {
   white-space: nowrap; /* 窄栏下「团队」两字不许竖排挤压 */
 }
 
@@ -7226,6 +7282,7 @@ button.topology-node {
   place-items: center;
   width: 44px;
   height: 44px;
+  overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 14px;
   background: var(--surface-muted);
@@ -7237,7 +7294,22 @@ button.topology-node {
   height: 24px;
 }
 
-.agent-pick-fallback {
+.agent-pick-logo .avatar-photo,
+.constellation-logo .avatar-photo,
+.composer-target-logo .avatar-photo,
+.mention-logo .avatar-photo {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: inherit;
+}
+
+.agent-pick-fallback,
+.avatar-initials,
+.member-chip-fallback,
+.mention-fallback,
+.composer-target-fallback,
+.composer-collaborator-fallback {
   font-size: 13px;
   font-weight: 750;
   letter-spacing: 0.04em;
@@ -7337,7 +7409,8 @@ button.topology-node {
 }
 
 .cap-matrix th .cap-col-label {
-  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .cap-bulk-button {
@@ -7886,7 +7959,8 @@ h2 {
   box-shadow: var(--shadow-low);
 }
 
-#view-workbench {
+#view-workbench,
+#view-config {
   width: 100%;
   max-width: none;
 }
@@ -7925,8 +7999,19 @@ h2 {
 
 .run-rail > .rail-block,
 .run-rail > .rail-newtask,
-.run-rail > .rail-statusline {
+.run-rail > .rail-footer {
   flex-shrink: 0;
+}
+
+/* 底部钉住区：状态栏 + 账户坞整体 sticky 钉在栏底——长列表滚动时状态栏不再滚出视野 */
+.rail-footer {
+  position: sticky;
+  bottom: 0;
+  z-index: 4;
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  margin-top: auto;
 }
 
 .run-rail > .rail-block-team {
@@ -7951,6 +8036,13 @@ h2 {
 .rail-block > .pane-heading {
   padding-right: 10px;
   padding-left: 12px;
+  /* 分区头左对齐（Codex 式）：标题贴左，悬停动作跟标题走，计数 pill 推右——
+     通用 .pane-heading 的 space-between 会把 chevron/标题/计数甩成"标题居中"，与团队头不一致 */
+  justify-content: flex-start;
+}
+
+.rail-block > .pane-heading > span:last-child {
+  margin-left: auto;
 }
 
 .rail-block > .pane-heading h2 {
@@ -8936,6 +9028,7 @@ h2 {
   width: 30px;
   height: 30px;
   flex: 0 0 30px;
+  overflow: hidden;
   border-radius: 9px;
   background: var(--surface-strong);
   color: var(--text-strong);
@@ -9236,6 +9329,69 @@ h2 {
 .automation-dialog-actions {
   flex-wrap: wrap;
   gap: 8px;
+}
+
+/* 自动化管理：状态条 / 计划预设 / 校验与脏状态 */
+.automation-edit-status {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-muted);
+  color: var(--text-soft);
+  font-size: 11.5px;
+}
+
+.automation-status-chip {
+  padding: 2px 9px;
+  border-radius: 99px;
+  font-size: 10.5px;
+  font-weight: 650;
+}
+
+.automation-status-chip.is-on {
+  border: 1px solid color-mix(in srgb, var(--accent, #7aa2f7) 45%, transparent);
+  color: var(--accent, #7aa2f7);
+  background: color-mix(in srgb, var(--accent, #7aa2f7) 12%, transparent);
+}
+
+.automation-status-chip.is-off {
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  background: transparent;
+}
+
+.automation-status-error {
+  color: var(--danger, #e06c75);
+  font-size: 11px;
+}
+
+.automation-schedule-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.automation-schedule-presets .chip.is-active {
+  border-color: var(--rose-line);
+  background: var(--rose-soft);
+  color: var(--text);
+}
+
+.field-hint.is-error {
+  color: var(--danger, #e06c75);
+}
+
+#automation-save-button.is-dirty {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent, #7aa2f7) 55%, transparent);
+}
+
+.automation-history-row.is-failed {
+  border-color: color-mix(in srgb, var(--danger, #e06c75) 40%, transparent);
 }
 
 .registry-connection-list {
@@ -11582,8 +11738,43 @@ h2 {
 
 .provider-dialog:not(.is-codex) .provider-inline-switch,
 .provider-codex-advanced[hidden],
-.provider-grok-fields[hidden] {
+.provider-grok-fields[hidden],
+.provider-opencode-fields[hidden] {
   display: none;
+}
+
+.provider-opencode-fields {
+  display: grid;
+  gap: 10px;
+  margin: 4px 0 8px;
+}
+
+.provider-opencode-pair-list {
+  display: grid;
+  gap: 6px;
+}
+
+.provider-opencode-pair-head,
+.provider-opencode-pair-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) auto;
+  gap: 7px;
+  align-items: center;
+}
+
+.provider-opencode-pair-head {
+  color: var(--muted, #8b8b8b);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+
+.provider-opencode-pair-row input {
+  min-width: 0;
+}
+
+.provider-opencode-empty {
+  margin: 0;
+  font-size: 12px;
 }
 
 .provider-grok-field-grid {
@@ -13348,7 +13539,7 @@ h2 {
   color: var(--text);
 }
 
-.team-tree-toggle h2 {
+.team-tree-toggle .pane-title {
   color: inherit;
   font-size: 11px;
   font-weight: 620;
@@ -13439,7 +13630,7 @@ h2 {
   min-width: 0;
 }
 
-.rail-block-team > .pane-heading .team-tree-toggle h2 {
+.rail-block-team > .pane-heading .team-tree-toggle .pane-title {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

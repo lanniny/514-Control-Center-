@@ -24,7 +24,10 @@ export const ALLOWED_GATE_BLOCKS = new Set([
   "GET /api/office/templates",
   "GET /api/market/skills",
   "GET /api/market/installed",
+  "GET /api/market/repos",
+  "GET /api/market/catalog",
   "GET /api/ssh/hosts",
+  "GET /api/ssh/hosts/recoveries",
   "GET /api/pty",
 ]);
 
@@ -253,7 +256,13 @@ async function api(page, path, { method = "GET", body } = {}) {
   }, { path, method, body });
 }
 
-export function diagnosticsWatcher(diagnostics, allowedGateBlocks) {
+export function isAllowedRequestAbort({ method = "GET", pathname = "/", errorText = "" } = {}) {
+  if (String(method).toUpperCase() !== "GET" || errorText !== "net::ERR_ABORTED") return false;
+  return pathname === "/api/workbench/environment"
+    || /^\/api\/runs\/[^/]+\/(?:mission|diff)$/.test(pathname);
+}
+
+export function diagnosticsWatcher(diagnostics, allowedGateBlocks, allowedRequestAborts = []) {
   const pending = new Set();
   let closing = false;
 
@@ -274,7 +283,15 @@ export function diagnosticsWatcher(diagnostics, allowedGateBlocks) {
     page.on("pageerror", (error) => diagnostics.push(`${label} pageerror: ${error.message}`));
     page.on("requestfailed", (request) => {
       if (closing) return;
-      diagnostics.push(`${label} requestfailed: ${request.method()} ${new URL(request.url()).pathname} ${request.failure()?.errorText || "unknown"}`);
+      const method = request.method();
+      const pathname = new URL(request.url()).pathname;
+      const errorText = request.failure()?.errorText || "unknown";
+      const diagnostic = `${label} requestfailed: ${method} ${pathname} ${errorText}`;
+      if (isAllowedRequestAbort({ method, pathname, errorText })) {
+        allowedRequestAborts.push(diagnostic);
+        return;
+      }
+      diagnostics.push(diagnostic);
     });
     page.on("response", (response) => {
       if (response.status() < 400) return;
@@ -611,6 +628,8 @@ async function runBrowserQa({ browser, bootstrapUrl, origin, outputDir, token, d
   const staleSnapshot = await within(race.staleReady, 15_000, "stale team snapshot capture");
   assert.equal(staleSnapshot.teams.find((item) => item.id === team.id)?.description, "团队工作区隔离验收");
 
+  await desktop.locator("#team-edit-button").click();
+  await desktop.locator("#team-surface-settings").waitFor({ state: "visible", timeout: 15_000 });
   await desktop.locator("#team-description-input").fill("团队设置与运行态已合并验收");
   await desktop.locator("#team-prompt-input").fill("主脑规划，Codex 实现，独立验证。 ");
   await desktop.locator('#team-members-list input[type="checkbox"][value="claude-fable"]').uncheck();
@@ -842,7 +861,7 @@ async function runBrowserQa({ browser, bootstrapUrl, origin, outputDir, token, d
   await desktop.waitForFunction((memberId) => document.querySelector("#member-id-value")?.textContent?.trim() === memberId, customMember.id);
 
   assert.equal(await desktop.locator("#member-team-toggle-label").textContent(), "从当前团队移除");
-  await desktop.locator("#team-surface-orchestration-tab").click();
+  await desktop.locator("#team-surface-settings-tab").click();
   const customMemberCheckbox = desktop.locator(`#team-members-list input[type="checkbox"][value="${customMember.id}"]`);
   const customCoordinator = desktop.locator(`#team-members-list input[name="team-coordinator"][value="${customMember.id}"]`);
   assert.equal(await customMemberCheckbox.isChecked(), true);
@@ -860,7 +879,7 @@ async function runBrowserQa({ browser, bootstrapUrl, origin, outputDir, token, d
   const customMemberPutResponse = await customMemberPut;
   assert.equal(customMemberPutResponse.status(), 200);
   assert.equal((await customMemberPutResponse.json()).label, "QA 架构主脑");
-  await desktop.locator("#team-surface-orchestration-tab").click();
+  await desktop.locator("#team-surface-settings-tab").click();
   assert.equal(await customMemberCheckbox.isChecked(), true, "member catalog refresh must preserve the dirty team roster");
   assert.equal(await customCoordinator.isChecked(), true, "member catalog refresh must preserve the dirty coordinator");
   assert.equal(
@@ -880,7 +899,7 @@ async function runBrowserQa({ browser, bootstrapUrl, origin, outputDir, token, d
   await desktop.locator(`[data-edit-team-member="${customMember.id}"]`).click();
   await desktop.waitForSelector("#team-surface-members:not([hidden])");
   await desktop.locator("#member-team-toggle-button").click();
-  await desktop.locator("#team-surface-orchestration-tab").click();
+  await desktop.locator("#team-surface-settings-tab").click();
   assert.equal(await customMemberCheckbox.isChecked(), false);
   assert.equal(await desktop.locator('input[name="team-coordinator"]:checked').count(), 0);
   await desktop.locator('#team-members-list input[name="team-coordinator"][value="codex-technical"]').check();
@@ -1197,7 +1216,8 @@ export async function runTeamWorkspaceQa({ outputDir } = parseQaArgs()) {
     const cleanupErrors = [];
     const diagnostics = [];
     const allowedGateBlocks = [];
-    const watcher = diagnosticsWatcher(diagnostics, allowedGateBlocks);
+    const allowedRequestAborts = [];
+    const watcher = diagnosticsWatcher(diagnostics, allowedGateBlocks, allowedRequestAborts);
     let shutdown = null;
 
     try {
@@ -1247,6 +1267,7 @@ export async function runTeamWorkspaceQa({ outputDir } = parseQaArgs()) {
         if (result) {
           result.diagnostics = [...diagnostics];
           result.allowedGateBlocks = [...new Set(allowedGateBlocks)].sort();
+          result.allowedRequestAborts = allowedRequestAborts.length;
         }
       } catch (error) {
         cleanupErrors.push(error);

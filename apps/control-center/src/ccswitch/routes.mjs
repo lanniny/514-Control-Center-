@@ -52,15 +52,26 @@ export function registerCcSwitchRoutes(router, ctx) {
       return;
     }
     if (url.pathname === "/api/ccswitch/proxy/usage/trends") {
-      ctx.json(response, 200, { ok: true, trends: service.usageTrends({ app: url.searchParams.get("app"), days: url.searchParams.get("days") }) });
+      ctx.json(response, 200, {
+        ok: true,
+        trends: service.usageTrends({
+          app: url.searchParams.get("app"),
+          days: url.searchParams.get("days"),
+          granularity: url.searchParams.get("granularity"),
+        }),
+      });
+      return;
+    }
+    if (url.pathname === "/api/ccswitch/proxy/usage/overview") {
+      ctx.json(response, 200, { ok: true, ...service.usageOverview({ app: url.searchParams.get("app"), days: url.searchParams.get("days") }) });
       return;
     }
     if (url.pathname === "/api/ccswitch/proxy/usage/providers") {
-      ctx.json(response, 200, { ok: true, items: service.usageStats("provider") });
+      ctx.json(response, 200, { ok: true, items: service.usageStats("provider", { app: url.searchParams.get("app"), days: url.searchParams.get("days") }) });
       return;
     }
     if (url.pathname === "/api/ccswitch/proxy/usage/models") {
-      ctx.json(response, 200, { ok: true, items: service.usageStats("model") });
+      ctx.json(response, 200, { ok: true, items: service.usageStats("model", { app: url.searchParams.get("app"), days: url.searchParams.get("days") }) });
       return;
     }
     if (url.pathname === "/api/ccswitch/proxy/logs") {

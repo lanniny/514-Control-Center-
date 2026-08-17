@@ -1,0 +1,6 @@
+.ace-tool/
+
+# Local browser QA captures and throwaway style previews.
+.qa-*/
+public/.scratch-preview*.html
+public/scratch-preview-*.html

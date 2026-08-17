@@ -3,7 +3,7 @@
  *
  * 右栏不再是「环境舱 + 五页常驻」，而是一条可关闭的工具标签：
  *   任务上下文（环境舱 + 任务/产物/证据/活动/连接）· 审阅 · 浏览器 · 文件
- * 终端不占标签——它是底部抽屉（workbench-chrome.js），在这里只作为菜单项转发。
+ * 终端占右栏标签（与顶栏 Ctrl+` 底部抽屉分开）；侧边对话仍转发为浮层。
  * 标签全部关闭时露出工具选择列表（参考图空态），而不是一片灰白。
  *
  * 契约：零 emoji；lucide sprite 引用；标签顺序与激活态持久化；容器缺失时静默降级。
@@ -12,11 +12,11 @@
 const OPEN_KEY = "514cc-rail-tools-open";
 const ACTIVE_KEY = "514cc-rail-tools-active";
 
-// external=true 的工具不产生标签，只把动作转发出去（终端在底部抽屉）
+// external=true 的工具不产生标签，只把动作转发出去
 export const RAIL_TOOLS = Object.freeze([
   Object.freeze({ id: "mission", menuLabel: "任务上下文", tabLabel: "任务上下文", icon: "layout-dashboard", shortcut: "" }),
   Object.freeze({ id: "review", menuLabel: "审阅", tabLabel: "审阅", icon: "clipboard-list", shortcut: "Ctrl+Shift+G" }),
-  Object.freeze({ id: "terminal", menuLabel: "终端", tabLabel: "终端", icon: "square-terminal", shortcut: "Ctrl+`", external: true }),
+  Object.freeze({ id: "terminal", menuLabel: "终端", tabLabel: "侧栏终端", icon: "square-terminal", shortcut: "Ctrl+Alt+T" }),
   Object.freeze({ id: "browser", menuLabel: "浏览器", tabLabel: "新标签页", icon: "globe", shortcut: "Ctrl+Alt+B" }),
   Object.freeze({ id: "files", menuLabel: "文件", tabLabel: "打开文件", icon: "folder-open", shortcut: "Ctrl+Alt+F" }),
   // 参考图没有这一项，但侧边对话是 514cc 的直接收件人入口，不能因为"照着图做"而丢掉
@@ -35,9 +35,42 @@ function fallbackEscape(value) {
     .replaceAll("'", "&#39;");
 }
 
-function readOpenTabs() {
+export function safeStorageGet(storage, key) {
   try {
-    const raw = JSON.parse(localStorage.getItem(OPEN_KEY) ?? "null");
+    return storage?.getItem?.(key) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function safeStorageSet(storage, key, value) {
+  try {
+    storage?.setItem?.(key, value);
+  } catch {
+    // Storage 被策略/隐私模式禁用时，工具栏退化为当前页面内存态。
+  }
+}
+
+export function safeStorageRemove(storage, key) {
+  try {
+    storage?.removeItem?.(key);
+  } catch {
+    // 同上：持久化失败不应让右栏初始化或关闭工具失败。
+  }
+}
+
+export function safeLocalStorage() {
+  try {
+    return globalThis.localStorage ?? null;
+  } catch {
+    // opaque origin / 浏览器策略可能在 getter 本身抛 SecurityError。
+    return null;
+  }
+}
+
+function readOpenTabs(storage = null) {
+  try {
+    const raw = JSON.parse(safeStorageGet(storage, OPEN_KEY) ?? "null");
     if (!Array.isArray(raw)) return null;
     const ids = raw.map(String).filter((id) => toolById.has(id) && !toolById.get(id).external);
     return [...new Set(ids)];
@@ -67,14 +100,15 @@ export function createRailTools({
     PANEL_TOOLS.map((tool) => [tool.id, root.querySelector(`[data-tool-panel="${tool.id}"]`)]).filter(([, node]) => node),
   );
   // 首访默认只开任务上下文：右栏一进来就有内容，又不预占三个工具页的加载成本
-  let openTabs = readOpenTabs() ?? ["mission"];
-  let activeId = localStorage.getItem(ACTIVE_KEY);
+  const storage = safeLocalStorage();
+  let openTabs = readOpenTabs(storage) ?? ["mission"];
+  let activeId = safeStorageGet(storage, ACTIVE_KEY);
   if (!openTabs.includes(activeId)) activeId = openTabs[0] ?? null;
 
   function persist() {
-    localStorage.setItem(OPEN_KEY, JSON.stringify(openTabs));
-    if (activeId) localStorage.setItem(ACTIVE_KEY, activeId);
-    else localStorage.removeItem(ACTIVE_KEY);
+    safeStorageSet(storage, OPEN_KEY, JSON.stringify(openTabs));
+    if (activeId) safeStorageSet(storage, ACTIVE_KEY, activeId);
+    else safeStorageRemove(storage, ACTIVE_KEY);
   }
 
   function toolItemMarkup(tool, role) {
@@ -87,15 +121,21 @@ export function createRailTools({
     tabStrip.innerHTML = openTabs.map((id) => {
       const tool = toolById.get(id);
       const active = id === activeId;
+      const tabId = `rail-tab-${id}`;
+      const panelId = `rail-panel-${id}`;
       return `<span class="rail-tab${active ? " is-active" : ""}">
-        <button class="rail-tab-main" type="button" role="tab" aria-selected="${active}" tabindex="${active ? 0 : -1}" data-rail-activate="${escapeHtml(id)}" title="${escapeHtml(tool.tabLabel)}">
+        <button class="rail-tab-main" id="${tabId}" type="button" role="tab" aria-selected="${active}" aria-controls="${panelId}" tabindex="${active ? 0 : -1}" data-rail-activate="${escapeHtml(id)}" title="${escapeHtml(tool.tabLabel)}">
           ${icon(tool.icon)}<span>${escapeHtml(tool.tabLabel)}</span>
         </button>
         <button class="rail-tab-close" type="button" data-rail-close="${escapeHtml(id)}" title="关闭${escapeHtml(tool.tabLabel)}" aria-label="关闭${escapeHtml(tool.tabLabel)}">${icon("x")}</button>
       </span>`;
     }).join("");
 
-    for (const [id, panel] of panels) panel.hidden = id !== activeId;
+    for (const [id, panel] of panels) {
+      panel.id = `rail-panel-${id}`;
+      panel.setAttribute("aria-labelledby", `rail-tab-${id}`);
+      panel.hidden = id !== activeId;
+    }
     emptyState.hidden = openTabs.length > 0;
     // 菜单与空态选择器共用同一份工具定义，不会出现"菜单有、空态没有"的漂移
     menu.innerHTML = RAIL_TOOLS.map((tool) => toolItemMarkup(tool, "menuitem")).join("");
@@ -176,9 +216,27 @@ export function createRailTools({
   // capture 阶段消费 Escape 并 preventDefault：右栏折叠器也监听 Escape，
   // 不抢在它前面的话，用户关个菜单会连带把整条右栏折叠掉。
   const handleKeydown = (event) => {
-    if (event.key !== "Escape" || menu.hidden) return;
+    if (event.key === "Escape") {
+      if (menu.hidden) return;
+      event.preventDefault();
+      setMenuOpen(false);
+      return;
+    }
+    const current = event.target?.closest?.("[role=\"tab\"][data-rail-activate]");
+    if (!current || !tabStrip.contains(current)) return;
+    const tabs = [...tabStrip.querySelectorAll("[role=\"tab\"][data-rail-activate]")];
+    if (!tabs.length) return;
+    let index = tabs.indexOf(current);
+    if (event.key === "Home") index = 0;
+    else if (event.key === "End") index = tabs.length - 1;
+    else if (event.key === "ArrowRight" || event.key === "ArrowDown") index = (index + 1) % tabs.length;
+    else if (event.key === "ArrowLeft" || event.key === "ArrowUp") index = (index - 1 + tabs.length) % tabs.length;
+    else return;
     event.preventDefault();
-    setMenuOpen(false);
+    const next = tabs[index];
+    activate(next.dataset.railActivate);
+    requestAnimationFrame(() => [...tabStrip.querySelectorAll("[data-rail-activate]")]
+      .find((tab) => tab.dataset.railActivate === next.dataset.railActivate)?.focus());
   };
 
   root.addEventListener("click", handleClick);

@@ -79,9 +79,11 @@ test("provider dialog has no duplicate application selector and all flows use th
 });
 
 test("Claude Desktop is absent from provider-scheme UI but retained as a storage compatibility key", () => {
-  const providerMeta = sourceSection("const PROVIDER_APP_META", "// 供应商列表聚焦 app");
+  const providerMeta = sourceSection("const PROVIDER_APP_META", "const MCP_TARGET_META");
+  const mcpTargetMeta = sourceSection("const MCP_TARGET_META", "function providerBelongsToScheme");
   assert.doesNotMatch(providerMeta, /label:\s*"Claude Desktop"/);
   assert.match(providerMeta, /PROVIDER_STORAGE_APPS[^\n]+"claude-desktop"/);
+  assert.match(mcpTargetMeta, /app:\s*"claude-desktop",\s*label:\s*"Claude Desktop"/);
   assert.doesNotMatch(html, /team-provider-claude-desktop|provider-models-claude-desktop|provider-claude-desktop-model/);
   assert.doesNotMatch(html, />Claude Desktop</);
   assert.doesNotMatch(appSource, /"team-provider-claude-desktop"|"provider-models-claude-desktop"|"provider-claude-desktop-model"/);
@@ -208,6 +210,30 @@ test("team form preserves a hidden legacy Claude Desktop binding", () => {
     claude: "claude-new",
     "claude-desktop": "desktop-old",
   });
+});
+
+test("OpenCode provider dialog exposes identifier, format, headers, options and model table", () => {
+  assert.match(html, /id="provider-opencode-fields"/);
+  assert.match(html, /id="provider-opencode-key"/);
+  assert.match(html, /id="provider-opencode-format"/);
+  assert.match(html, />OpenAI Compatible</);
+  assert.match(html, /id="provider-opencode-headers"/);
+  assert.match(html, /id="provider-opencode-options"/);
+  assert.match(html, /id="provider-opencode-models"/);
+  assert.match(html, /id="provider-opencode-model"/);
+  assert.match(stateSource, /providerOpencodeHeaders:\s*\[\]/);
+  assert.match(stateSource, /providerOpencodeOptions:\s*\[\]/);
+  assert.match(stateSource, /providerOpencodeModels:\s*\[\]/);
+  assert.match(appSource, /function collectProviderOpencodeAppConfig/);
+  assert.match(appSource, /function fillProviderOpencodeAppConfig/);
+  assert.match(appSource, /X-Title/);
+  assert.match(appSource, /600000/);
+  assert.match(appSource, /OPENCODE_OPTION_RESERVED/);
+  assert.match(appSource, /settingsConfig\.options/);
+  assert.match(appSource, /providerKey/);
+  assert.match(appSource, /elements\["provider-opencode-fields"\]\.hidden = app !== "opencode"/);
+  assert.match(providerSource, /OPENCODE_NPM_BY_FORMAT/);
+  assert.match(providerSource, /settings\.options\.baseURL = provider\.baseUrl/);
 });
 
 test("backend team scheme skips legacy Claude Desktop bindings by default", async () => {

@@ -9,6 +9,7 @@ import {
   clipboardFileDataUrl,
   clipboardImageFiles,
   composerDraftHasActivity,
+  consumeSubmittedAttachments,
   ensureAttachmentContext,
   MAX_CONCURRENT_CLIPBOARD_UPLOADS,
   queueClipboardImageUploads,
@@ -85,6 +86,16 @@ test("paste binding prevents default only when an image is present", async () =>
   assert.equal(prevented, false);
   unbind();
   assert.equal(listeners.has("paste"), false);
+});
+
+test("submitted attachment consumption preserves files added while the request was in flight", () => {
+  const context = { attachments: ["old.png", "new.png"], uploads: [{ id: "upload-new" }] };
+  assert.equal(consumeSubmittedAttachments(context, ["old.png"]), false);
+  assert.deepEqual(context.attachments, ["new.png"]);
+  assert.deepEqual(context.uploads, [{ id: "upload-new" }]);
+  assert.equal(consumeSubmittedAttachments(context, ["new.png"]), false);
+  context.uploads.splice(0);
+  assert.equal(consumeSubmittedAttachments(context, []), true);
 });
 
 test("clipboard upload completion stays bound to the captured composer context", async () => {
@@ -270,7 +281,7 @@ test("composer wires image paste into attachment state and blocks send while upl
   assert.match(app, /currentAttachmentContextKey\(\) === contextKey/);
   assert.match(app, /composerDraftHasActivity\(\{[\s\S]*text: elements\["task-input"\]\?\.value,[\s\S]*context: draftContext/);
   assert.match(app, /后台自动选中旧 run[\s\S]*state\.selectionClearedByUser = true;/);
-  assert.match(app, /clearAttachmentContext\(attachmentContextKeyAtSubmit\)/);
+  assert.match(app, /consumeSubmittedAttachmentContext\(attachmentContextKeyAtSubmit, submissionSources\)/);
   assert.match(app, /if \(submissionSources\.length\) message\.sources = submissionSources;/);
   assert.match(app, /request\(`\/api\/runs\/\$\{encodeURIComponent\(run\.id\)\}\/messages`/);
   assert.doesNotMatch(app, /request\(`\/api\/runs\/\$\{encodeURIComponent\(run\.id\)\}\/sources`/);

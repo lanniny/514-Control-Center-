@@ -85,11 +85,11 @@
 }
 
 /* 状态文本 -> 色点 + 标签（is-ok/is-warning/is-error/is-pending/is-neutral 已有配色，点色跟随 currentColor） */
-:is(#view-overview, #view-observability, #view-sessions, #view-config, #view-router, #view-security) .status-label {
+:is(#view-overview, #view-observability, #view-sessions, #view-config, #team-router-workbench, #view-security) .status-label {
   gap: 6px;
 }
 
-:is(#view-overview, #view-observability, #view-sessions, #view-config, #view-router, #view-security) .status-label::before,
+:is(#view-overview, #view-observability, #view-sessions, #view-config, #team-router-workbench, #view-security) .status-label::before,
 #view-overview .run-status::before {
   content: "";
   width: 6px;
@@ -99,8 +99,8 @@
   background: currentColor;
 }
 
-:is(#view-overview, #view-observability, #view-sessions, #view-config, #view-router, #view-security) .status-label.is-neutral::before,
-:is(#view-overview, #view-observability, #view-sessions, #view-config, #view-router, #view-security) .status-label.is-pending::before {
+:is(#view-overview, #view-observability, #view-sessions, #view-config, #team-router-workbench, #view-security) .status-label.is-neutral::before,
+:is(#view-overview, #view-observability, #view-sessions, #view-config, #team-router-workbench, #view-security) .status-label.is-pending::before {
   opacity: 0.55;
 }
 
@@ -380,7 +380,9 @@
 
 #config-surface-capabilities .cap-skill-source {
   display: flex;
+  align-items: flex-start;
   justify-content: space-between;
+  gap: 10px;
 }
 
 #config-surface-capabilities .cap-path {
@@ -532,8 +534,8 @@
    -------------------------------------------------------------------------- */
 
 /* 视域内原生控件统一 forge 原语感（全局 .button/input 归 primitives.css，这里只做视域布局抛光） */
-#view-router .router-form textarea,
-#view-router .field-grid select,
+#team-router-workbench .router-form textarea,
+#team-router-workbench .team-router-fields select,
 #view-security .log-filter,
 #view-config .search-field input {
   border: 1px solid var(--border);
@@ -546,8 +548,8 @@
     box-shadow var(--dur-fast, 100ms) var(--ease-out, ease);
 }
 
-#view-router .router-form textarea:focus,
-#view-router .field-grid select:focus,
+#team-router-workbench .router-form textarea:focus,
+#team-router-workbench .team-router-fields select:focus,
 #view-security .log-filter:focus,
 #view-config .search-field input:focus {
   border-color: var(--ring, var(--primary, var(--rose)));
@@ -555,12 +557,12 @@
   outline: none;
 }
 
-#view-router .router-form textarea {
+#team-router-workbench .router-form textarea {
   padding: 12px;
   line-height: 1.6;
 }
 
-#view-router .field-grid select {
+#team-router-workbench .team-router-fields select {
   height: 36px;
 }
 
@@ -569,13 +571,13 @@
 }
 
 /* 视域内复选框统一主色 */
-#view-router .check-control input,
+#team-router-workbench .check-control input,
 #view-sessions .check-control input {
   accent-color: var(--primary, var(--rose));
 }
 
 /* 决策卡：elevated rounded-2xl 面板 + eyebrow + 大路由目标 */
-#view-router .decision-primary {
+#team-router-workbench .decision-primary {
   margin-top: 12px;
   padding: 16px 18px;
   border: 1px solid var(--border);
@@ -584,11 +586,11 @@
   box-shadow: var(--shadow-md, var(--shadow-low));
 }
 
-#view-router .decision-primary .agent-avatar {
+#team-router-workbench .decision-primary .agent-avatar {
   border-radius: 12px;
 }
 
-#view-router .decision-primary div > span {
+#team-router-workbench .decision-primary div > span {
   color: var(--muted-foreground, var(--text-muted));
   font-size: var(--text-xs, 11px);
   font-weight: 600;
@@ -596,7 +598,7 @@
   text-transform: uppercase;
 }
 
-#view-router .decision-primary strong {
+#team-router-workbench .decision-primary strong {
   margin-top: 3px;
   color: var(--foreground, var(--text-strong));
   font-size: var(--text-xl, 20px);
@@ -604,11 +606,11 @@
   letter-spacing: -0.02em;
 }
 
-#view-router .decision-facts {
+#team-router-workbench .decision-facts {
   border-bottom: 1px solid var(--border);
 }
 
-#view-router .decision-facts dt {
+#team-router-workbench .decision-facts dt {
   color: var(--muted-foreground, var(--text-soft));
   font-size: var(--text-xs, 11px);
   font-weight: 600;
@@ -616,21 +618,21 @@
   text-transform: uppercase;
 }
 
-#view-router .decision-facts dd {
+#team-router-workbench .decision-facts dd {
   color: var(--foreground, var(--text));
   font-size: var(--text-sm, 12.5px);
   font-variant-numeric: tabular-nums;
   font-weight: 600;
 }
 
-#view-router .reason-index {
+#team-router-workbench .reason-index {
   border-color: transparent;
   border-radius: 999px;
   background: var(--muted, var(--surface-muted));
   font-variant-numeric: tabular-nums;
 }
 
-#view-router .candidate-title {
+#team-router-workbench .candidate-title {
   color: var(--muted-foreground, var(--text-muted));
   font-size: var(--text-xs, 11px);
   font-weight: 600;
@@ -638,7 +640,7 @@
   text-transform: uppercase;
 }
 
-#view-router .model-role {
+#team-router-workbench .model-role {
   border-radius: 999px;
 }
 
@@ -710,9 +712,60 @@
 
 #view-security .remote-gate-card.is-allowed .remote-gate-status,
 #view-security .remote-gate-card.is-open .remote-gate-status {
-  border-color: color-mix(in srgb, var(--success, var(--green)) 30%, transparent);
-  background: var(--success-soft, var(--green-soft));
-  color: var(--success, var(--green));
+  border-color: color-mix(in srgb, var(--warning, var(--amber)) 30%, transparent);
+  background: var(--warning-soft, var(--amber-soft));
+  color: var(--warning, var(--amber));
+}
+
+#view-security .security-posture {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px;
+  margin: 0 0 18px;
+}
+
+#view-security .security-posture-chip {
+  display: grid;
+  gap: 2px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl, 14px);
+  background: var(--card, var(--surface));
+}
+
+#view-security .security-posture-chip strong {
+  font-size: 20px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+
+#view-security .security-posture-chip span {
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+#view-security .security-posture-chip.is-error {
+  border-color: color-mix(in srgb, var(--destructive, var(--red)) 35%, var(--border));
+}
+
+#view-security .security-posture-chip.is-warning {
+  border-color: color-mix(in srgb, var(--warning, var(--amber)) 35%, var(--border));
+}
+
+#view-security .remote-gate-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+
+#view-security .policy-value.is-warning,
+#view-security .secret-value.is-warning {
+  border-color: color-mix(in srgb, var(--warning, var(--amber)) 30%, var(--border));
+}
+
+#view-security .policy-value.is-error {
+  border-color: color-mix(in srgb, var(--destructive, var(--red)) 30%, var(--border));
 }
 
 /* 诊断日志 / handoff 原文 -> 终端表面（深底有意保留，两主题一致） */
@@ -751,23 +804,70 @@
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary, var(--rose)) 14%, transparent);
 }
 
-/* 启停矩阵：冻结首列（粘性 z 序压在 sticky 表头之下、普通格之上） */
+/* 启停矩阵：separate + auto layout。collapse/fixed + sticky 会在左上角叠出灰块 */
+#config-surface-capabilities table.cap-matrix,
+#config-surface-capabilities .cap-matrix {
+  border-collapse: separate;
+  border-spacing: 0;
+  table-layout: auto;
+}
+
+#config-surface-capabilities .cap-matrix thead {
+  isolation: isolate;
+  z-index: 5;
+}
+
+#config-surface-capabilities .cap-matrix thead th {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  min-width: 104px;
+  max-width: 148px;
+  vertical-align: bottom;
+  background: var(--muted, var(--surface-muted));
+  white-space: normal;
+}
+
 #config-surface-capabilities .cap-matrix th:first-child,
 #config-surface-capabilities .cap-matrix td:first-child {
   position: sticky;
   left: 0;
-  z-index: 2;
-  background: var(--card, var(--surface));
+  top: auto;
+  width: 280px;
+  min-width: 280px;
+  max-width: 280px;
+  overflow: hidden;
   box-shadow: inset -1px 0 0 var(--border);
 }
 
 #config-surface-capabilities .cap-matrix thead th:first-child {
-  z-index: 3;
+  top: 0;
+  z-index: 6;
   background: var(--muted, var(--surface-muted));
 }
 
-#config-surface-capabilities .cap-matrix td:first-child {
-  min-width: 170px;
+#config-surface-capabilities .cap-matrix tbody td:first-child {
+  z-index: 1;
+  background: var(--card, var(--surface));
+}
+
+#config-surface-capabilities .cap-matrix td[colspan] {
+  position: static;
+  left: auto;
+  width: auto;
+  min-width: 0;
+  max-width: none;
+  overflow: visible;
+  box-shadow: none;
+  background: transparent;
+}
+
+#config-surface-capabilities .cap-matrix tbody tr:nth-child(even) td:first-child {
+  background: color-mix(in srgb, var(--muted, var(--surface-muted)) 55%, var(--card, var(--surface)));
+}
+
+#config-surface-capabilities .cap-matrix tbody tr:hover td:first-child {
+  background: var(--rose-soft, var(--primary-soft));
 }
 
 #config-surface-capabilities .cap-matrix [data-member-column].is-member-focus {
@@ -843,6 +943,540 @@
   background: var(--muted, var(--surface-muted));
   color: var(--muted-foreground, var(--text-muted));
   font-size: var(--text-xs, 11px);
+}
+
+#config-surface-capabilities .cap-overview {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0 0 14px;
+}
+
+#config-surface-capabilities .cap-stat {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl, 14px);
+  background: var(--card, var(--surface));
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+#config-surface-capabilities .cap-stat:hover {
+  border-color: color-mix(in srgb, var(--primary, var(--rose)) 28%, var(--border));
+}
+
+#config-surface-capabilities .cap-stat:focus-visible,
+#config-surface-capabilities .cap-workspace-tab:focus-visible,
+#config-surface-capabilities .cap-mcp-filters button:focus-visible {
+  outline: 2px solid var(--ring, var(--primary));
+  outline-offset: 2px;
+}
+
+#config-surface-capabilities[data-cap-active-workspace="skills"] .cap-stat[data-cap-jump="skills"],
+#config-surface-capabilities[data-cap-active-workspace="mcp"] .cap-stat[data-cap-jump="mcp"] {
+  border-color: color-mix(in srgb, var(--primary, var(--rose)) 38%, var(--border));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary, var(--rose)) 12%, transparent);
+}
+
+#config-surface-capabilities .cap-stat-label,
+#config-surface-capabilities .cap-stat-sub {
+  color: var(--muted-foreground, var(--text-muted));
+  font-size: var(--text-xs, 11px);
+}
+
+#config-surface-capabilities .cap-stat-value {
+  color: var(--foreground, var(--text));
+  font-size: 22px;
+  font-weight: 650;
+  letter-spacing: -0.03em;
+  line-height: 1.15;
+}
+
+#config-surface-capabilities .cap-stat-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#config-surface-capabilities .cap-workspace-switcher {
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(132px, 1fr));
+  align-self: flex-start;
+  gap: 3px;
+  margin: 0 0 14px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg, 10px);
+  background: var(--muted, var(--surface-muted));
+}
+
+#config-surface-capabilities .cap-workspace-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 6px 14px;
+  border: 0;
+  border-radius: var(--radius-md, 8px);
+  background: transparent;
+  color: var(--muted-foreground, var(--text-muted));
+  font: inherit;
+  font-size: var(--text-sm, 13px);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+#config-surface-capabilities .cap-workspace-tab .icon {
+  width: 16px;
+  height: 16px;
+}
+
+#config-surface-capabilities .cap-workspace-tab:hover {
+  color: var(--foreground, var(--text));
+}
+
+#config-surface-capabilities .cap-workspace-tab.is-active {
+  background: var(--card, var(--surface));
+  color: var(--foreground, var(--text));
+  box-shadow: var(--shadow-sm, var(--shadow-low));
+}
+
+#cap-workspace-skills,
+#cap-workspace-mcp {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+#config-surface-capabilities .cap-workspace[hidden],
+#cap-workspace-skills[hidden],
+#cap-workspace-mcp[hidden] {
+  display: none;
+}
+
+#config-surface-capabilities .cap-workspace > .content-section:first-child {
+  border-top: 0;
+}
+
+#config-surface-capabilities .cap-matrix-section,
+#config-surface-capabilities .cap-mcp-section {
+  margin-bottom: 0;
+  padding: 14px 16px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl, 14px);
+  background: var(--card, var(--surface));
+}
+
+#config-surface-capabilities .cap-matrix-scroll {
+  max-height: min(68vh, 760px);
+}
+
+#config-surface-capabilities .cap-skill-copy {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 3px;
+}
+
+#config-surface-capabilities .cap-skill-copy strong {
+  color: var(--foreground, var(--text));
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+#config-surface-capabilities .cap-skill-desc {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--muted-foreground, var(--text-muted));
+  font-size: 11px;
+  line-height: 1.4;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+#config-surface-capabilities .cap-skill-badge {
+  align-self: flex-start;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--warning-soft, var(--amber-soft));
+  color: var(--warning, var(--amber));
+  font-size: 10px;
+  font-weight: 600;
+}
+
+#config-surface-capabilities .cap-skill-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+}
+
+#config-surface-capabilities .cap-col-identity {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  text-align: center;
+}
+
+#config-surface-capabilities .cap-col-label {
+  display: -webkit-box;
+  overflow: hidden;
+  min-width: 0;
+  max-width: 6.8rem;
+  line-height: 1.25;
+  white-space: normal;
+  text-align: center;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+#config-surface-capabilities .cap-col-avatar,
+#config-surface-capabilities .cap-col-icon {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  border-radius: 6px;
+}
+
+#config-surface-capabilities .cap-cell-toggle {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  min-height: 40px;
+  margin: 0;
+  cursor: pointer;
+}
+
+#config-surface-capabilities .cap-cell-toggle input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+}
+
+#config-surface-capabilities .cap-cell.is-declared {
+  background: color-mix(in srgb, var(--primary, var(--rose)) 8%, transparent);
+}
+
+#config-surface-capabilities .cap-agent-chip.is-focusable {
+  cursor: pointer;
+}
+
+#config-surface-capabilities .cap-agent-chip.is-member-focus {
+  border-color: color-mix(in srgb, var(--primary, var(--rose)) 45%, var(--border));
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--primary, var(--rose)) 25%, transparent);
+}
+
+#config-surface-capabilities .cap-matrix-toolbar,
+#config-surface-capabilities .cap-mcp-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 0 0 12px;
+}
+
+#config-surface-capabilities .cap-matrix-toolbar .button,
+#config-surface-capabilities .cap-mcp-toolbar .button {
+  flex: 0 0 auto;
+}
+
+#config-surface-capabilities .cap-mcp-toolbar .search-field {
+  flex: 1 1 240px;
+  min-width: 180px;
+  max-width: 420px;
+}
+
+#config-surface-capabilities .cap-mcp-filters {
+  display: inline-grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 3px;
+  padding: 3px;
+  border-radius: var(--radius-md, 8px);
+  background: var(--muted, var(--surface-muted));
+}
+
+#config-surface-capabilities .cap-mcp-filters button {
+  min-height: 30px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius-sm, 6px);
+  background: transparent;
+  color: var(--muted-foreground, var(--text-muted));
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+#config-surface-capabilities .cap-mcp-filters button.is-active {
+  background: var(--card, var(--surface));
+  color: var(--foreground, var(--text));
+  box-shadow: var(--shadow-sm, var(--shadow-low));
+}
+
+#config-surface-capabilities .cap-mcp-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 12px;
+}
+
+#config-surface-capabilities .cap-mcp-card {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl, 14px);
+  background: color-mix(in oklab, var(--card, var(--surface)) 96%, var(--muted, var(--surface-muted)));
+  transition:
+    transform var(--dur-med, 150ms) var(--ease-out, ease),
+    border-color var(--dur-med, 150ms) var(--ease-out, ease),
+    box-shadow var(--dur-med, 150ms) var(--ease-out, ease);
+}
+
+#config-surface-capabilities .cap-mcp-card.is-writable {
+  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--primary, var(--rose)) 55%, transparent);
+}
+
+#config-surface-capabilities .cap-mcp-card:hover {
+  border-color: color-mix(in srgb, var(--primary, var(--rose)) 24%, var(--border));
+  transform: translateY(-1px);
+}
+
+#config-surface-capabilities .cap-mcp-card.is-disabled {
+  opacity: 0.72;
+}
+
+#config-surface-capabilities .cap-mcp-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+#config-surface-capabilities .cap-mcp-card-head h3 {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--foreground, var(--text));
+  font-size: 14px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#config-surface-capabilities .cap-mcp-transport {
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--primary, var(--rose)) 12%, transparent);
+  color: var(--primary, var(--rose));
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+#config-surface-capabilities .cap-mcp-card[data-transport="http" i] .cap-mcp-transport,
+#config-surface-capabilities .cap-mcp-card[data-transport="sse" i] .cap-mcp-transport {
+  background: var(--info-soft);
+  color: var(--info);
+}
+
+#config-surface-capabilities .cap-mcp-card-head .status-label {
+  margin-left: auto;
+}
+
+.cap-wizard-dialog {
+  width: min(560px, calc(100vw - 28px));
+}
+
+.cap-wizard-dialog.cap-wizard-wide {
+  width: min(920px, calc(100vw - 28px));
+}
+
+.cap-wizard-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 1fr);
+  gap: 16px 20px;
+  align-items: start;
+}
+
+.cap-wizard-form-pane,
+.cap-wizard-json-pane {
+  min-width: 0;
+}
+
+.cap-wizard-json-pane textarea {
+  min-height: 22rem;
+  font-family: var(--mono, ui-monospace, Menlo, Consolas, monospace);
+  font-size: 12px;
+  line-height: 1.45;
+  tab-size: 2;
+  white-space: pre;
+}
+
+#cap-skill-wizard-preview {
+  background: color-mix(in srgb, var(--muted, var(--surface-muted)) 55%, var(--card, var(--surface)));
+}
+
+.cap-skill-model-chips {
+  display: flex;
+  flex: 1 1 220px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.cap-skill-model-chip {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--muted, var(--surface-muted));
+  color: var(--muted-foreground, var(--text-muted));
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.cap-skill-model-chip.is-member-focus {
+  background: color-mix(in srgb, var(--primary, var(--rose)) 18%, var(--muted, var(--surface-muted)));
+  color: var(--foreground, var(--text));
+}
+
+#config-surface-capabilities .cap-skill-title-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+#config-surface-capabilities .cap-skill-scope {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--muted, var(--surface-muted));
+  color: var(--muted-foreground, var(--text-muted));
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.cap-wizard-note {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 8px);
+  background: color-mix(in srgb, var(--muted, var(--surface-muted)) 70%, var(--card, var(--surface)));
+  color: var(--muted-foreground, var(--text-muted));
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.cap-wizard-note code {
+  font-size: 11px;
+}
+
+.cap-wizard-dialog .field {
+  margin-bottom: 12px;
+}
+
+.cap-wizard-dialog .field input,
+.cap-wizard-dialog .field textarea,
+.cap-wizard-dialog .field select {
+  width: 100%;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-small, 8px);
+  background: var(--card, var(--surface));
+  color: var(--foreground, var(--text));
+  font: inherit;
+  font-size: 13px;
+}
+
+.cap-wizard-dialog .field textarea {
+  resize: vertical;
+  min-height: 8.5rem;
+}
+
+.cap-wizard-apps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  margin: 4px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 8px);
+}
+
+.cap-wizard-apps legend {
+  padding: 0 4px;
+  color: var(--muted-foreground, var(--text-muted));
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.cap-wizard-app-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 8px 12px;
+  width: 100%;
+}
+
+#config-surface-capabilities .cap-mcp-entry {
+  margin: 0;
+  overflow: hidden;
+  color: var(--muted-foreground, var(--text-muted));
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#config-surface-capabilities .cap-mcp-card-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+#config-surface-capabilities .cap-mcp-meta {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted-foreground, var(--text-muted));
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#config-surface-capabilities .cap-mcp-card-foot .cap-source-button,
+#config-surface-capabilities .cap-mcp-card-foot .text-button {
+  margin-left: auto;
+}
+
+#config-surface-capabilities .cap-mcp-card-foot .text-button {
+  flex: 0 0 auto;
+}
+
+#config-surface-capabilities .cap-empty {
+  margin: 0;
+  padding: 28px 16px;
+  color: var(--muted-foreground, var(--text-muted));
+  font-size: 13px;
+  text-align: center;
 }
 
 /* --------------------------------------------------------------------------
@@ -1371,6 +2005,10 @@
   #config-surface-sources .runtime-seat-adapter-details {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  #config-surface-capabilities .cap-overview {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 /* --------------------------------------------------------------------------
@@ -1411,6 +2049,14 @@
 }
 
 @media (max-width: 720px) {
+  .cap-wizard-split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .cap-wizard-json-pane textarea {
+    min-height: 14rem;
+  }
+
   /* 窄屏：工具条上下堆叠（导航一行、目标一行），segmented control 横向滚动不换行 */
   #view-config .config-toolbar {
     align-items: stretch;
@@ -1486,6 +2132,23 @@
     min-width: 170px;
   }
 
+  #config-surface-capabilities .cap-workspace-switcher {
+    display: grid;
+    width: 100%;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  #config-surface-capabilities .cap-mcp-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  #config-surface-capabilities .cap-mcp-toolbar .search-field,
+  #config-surface-capabilities .cap-mcp-filters {
+    max-width: none;
+    width: 100%;
+  }
+
   #config-surface-sources .runtime-workspace-tabs {
     display: grid;
     width: 100%;
@@ -1549,6 +2212,14 @@
     min-width: 0;
     max-width: 100%;
   }
+
+  #config-surface-capabilities .cap-overview {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  #config-surface-capabilities .cap-mcp-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 /* --------------------------------------------------------------------------
@@ -1559,18 +2230,20 @@
   .view .metric-card,
   .view .data-table tbody tr,
   #config-surface-capabilities .cap-agent-chip,
+  #config-surface-capabilities .cap-mcp-card,
   #view-config .source-item,
   #view-config .version-row,
   #view-config .code-editor,
-  #view-router .router-form textarea,
-  #view-router .field-grid select,
+  #team-router-workbench .router-form textarea,
+  #team-router-workbench .team-router-fields select,
   #view-security .log-filter,
   #view-config .search-field input {
     transition: none;
   }
 
   .view .metric-card:hover,
-  #config-surface-capabilities .cap-agent-chip:hover {
+  #config-surface-capabilities .cap-agent-chip:hover,
+  #config-surface-capabilities .cap-mcp-card:hover {
     transform: none;
   }
 }

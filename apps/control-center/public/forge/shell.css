@@ -580,6 +580,7 @@
   width: 30px;
   height: 30px;
   flex: 0 0 auto;
+  overflow: hidden;
   place-items: center;
   border: 1px solid color-mix(in oklab, var(--agent-accent, var(--rose)) 40%, transparent);
   border-radius: 8px;
@@ -671,7 +672,7 @@
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  max-height: 132px;
+  max-height: 196px;
   overflow-y: auto;
   padding: 2px;
 }
@@ -702,11 +703,19 @@
   accent-color: var(--rose);
 }
 
-.chip:has(input:checked) {
+.chip:has(input:checked),
+.chip.is-declared {
   border-color: var(--rose-line);
   background: var(--rose-soft);
   color: var(--rose-deep);
   font-weight: 620;
+}
+
+.chip em {
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 550;
+  color: var(--text-muted);
 }
 
 .chip.is-ghost {
@@ -714,8 +723,24 @@
   opacity: 0.75;
 }
 
-.chip.is-off span {
+.chip.is-off span,
+.chip.is-gated span {
   text-decoration: line-through;
+}
+
+.chip.is-gated,
+.chip.is-off {
+  border-color: color-mix(in oklab, var(--warning, #c4a35a) 45%, var(--border));
+}
+
+.chip.is-partial em {
+  color: var(--warning, #c4a35a);
+}
+
+.team-kit-note {
+  margin: -4px 0 10px;
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
 .chip:has(input:disabled) {

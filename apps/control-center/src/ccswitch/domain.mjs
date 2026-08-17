@@ -197,6 +197,7 @@ function mcpToml(id, config) {
   if (config.command) lines.push(`command = ${tomlString(config.command)}`);
   if (Array.isArray(config.args)) lines.push(`args = ${tomlValue(config.args.map(String))}`);
   if (config.url) lines.push(`url = ${tomlString(config.url)}`);
+  if (config.cwd) lines.push(`cwd = ${tomlString(config.cwd)}`);
   if (config.env && typeof config.env === "object" && Object.keys(config.env).length) {
     lines.push("", `[mcp_servers.${tomlString(id)}.env]`);
     for (const [key, value] of Object.entries(config.env)) lines.push(`${tomlString(key)} = ${tomlString(value)}`);
@@ -222,9 +223,12 @@ function awsDate(date = new Date()) {
 
 function validateMcpConfig(input) {
   if (!input || typeof input !== "object" || Array.isArray(input)) fail("MCP config must be an object", "VALIDATION_FAILED");
+  const type = cleanText(input.type, "MCP type", 16);
+  if (type && !["stdio", "http", "sse"].includes(type)) fail("MCP type must be stdio, http, or sse", "VALIDATION_FAILED");
   const command = cleanText(input.command, "MCP command", 500);
   const url = input.url ? ensureHttpUrl(input.url, "MCP URL") : "";
   if (!command && !url) fail("MCP config requires command or url", "VALIDATION_FAILED");
+  const cwd = cleanText(input.cwd, "MCP cwd", 500);
   const args = Array.isArray(input.args) ? input.args.map((item) => cleanText(item, "MCP argument", 500)) : [];
   if (args.length > 100) fail("MCP args exceeds 100 entries", "VALIDATION_FAILED");
   const env = {};
@@ -232,7 +236,34 @@ function validateMcpConfig(input) {
     if (!ENV_PATTERN.test(key)) fail(`invalid MCP env key: ${key}`, "VALIDATION_FAILED");
     env[key] = cleanText(value, `MCP env ${key}`, 4000);
   }
-  return { ...(command ? { command } : {}), ...(url ? { url } : {}), args, env };
+  const headers = {};
+  if (input.headers != null) {
+    if (typeof input.headers !== "object" || Array.isArray(input.headers)) fail("MCP headers must be an object", "VALIDATION_FAILED");
+    const names = Object.keys(input.headers);
+    if (names.length > 40) fail("MCP headers exceeds 40 entries", "VALIDATION_FAILED");
+    for (const [key, value] of Object.entries(input.headers)) {
+      const header = cleanText(key, "MCP header name", 128, { required: true });
+      headers[header] = cleanText(value, `MCP header ${header}`, 4000);
+    }
+  }
+  const envPassthrough = Array.isArray(input.envPassthrough)
+    ? input.envPassthrough.map((name) => {
+        const key = cleanText(name, "MCP env passthrough", 128, { required: true });
+        if (!ENV_PATTERN.test(key)) fail(`invalid MCP env passthrough: ${key}`, "VALIDATION_FAILED");
+        return key;
+      })
+    : [];
+  if (envPassthrough.length > 50) fail("MCP envPassthrough exceeds 50 entries", "VALIDATION_FAILED");
+  return {
+    ...(type ? { type } : {}),
+    ...(command ? { command } : {}),
+    ...(url ? { url } : {}),
+    ...(cwd ? { cwd } : {}),
+    args,
+    env,
+    ...(Object.keys(headers).length ? { headers } : {}),
+    ...(envPassthrough.length ? { envPassthrough } : {}),
+  };
 }
 
 function publicState(state, storeStatus) {
@@ -240,6 +271,9 @@ function publicState(state, storeStatus) {
   for (const item of Object.values(output.mcps)) {
     for (const [key, value] of Object.entries(item.config?.env ?? {})) {
       if (/(?:key|token|secret|password|credential)/i.test(key)) item.config.env[key] = mask(value);
+    }
+    for (const [key, value] of Object.entries(item.config?.headers ?? {})) {
+      if (/(?:key|token|secret|password|credential|authorization)/i.test(key)) item.config.headers[key] = mask(value);
     }
   }
   if (output.settings.webdav) {

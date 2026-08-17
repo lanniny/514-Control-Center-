@@ -1,4 +1,5 @@
 import { request as apiRequest } from "../api.js";
+import { officialCliIconMarkup } from "./avatars.js";
 import { escapeHtml, formatDate } from "../utils.js";
 
 const PROVIDER_STORAGE_APPS = Object.freeze(["claude", "claude-desktop", "codex", "gemini", "grokbuild", "kimi", "opencode", "openclaw", "hermes"]);
@@ -6,7 +7,23 @@ const PROVIDER_SCHEME_APPS = Object.freeze(PROVIDER_STORAGE_APPS.filter((app) =>
 // kimi 无官方全局 Prompt 文件（文档未声明 ~/.kimi-code 级提示词），Prompt/Skill 同步面不收录
 const PROMPT_APPS = Object.freeze(PROVIDER_SCHEME_APPS.filter((app) => app !== "kimi"));
 const APP_LABELS = Object.freeze({ claude: "Claude Code", "claude-desktop": "Claude Desktop", codex: "Codex", gemini: "Gemini", grokbuild: "Grok Build", kimi: "Kimi Code", opencode: "OpenCode", openclaw: "OpenClaw", hermes: "Hermes" });
+const APP_SHORT = Object.freeze({ claude: "Claude", "claude-desktop": "Desktop", codex: "Codex", gemini: "Gemini", grokbuild: "Grok", kimi: "Kimi", opencode: "OpenCode", openclaw: "OpenClaw", hermes: "Hermes" });
+const APP_BRANDS = Object.freeze({ claude: "claude", "claude-desktop": "claude", codex: "codex", gemini: "gemini", grokbuild: "grok", kimi: "kimi", opencode: "opencode" });
 const AUTH_LABELS = Object.freeze({ github_copilot: "GitHub Copilot", codex_oauth: "Codex OAuth", xai_oauth: "xAI OAuth" });
+const AUTH_BRANDS = Object.freeze({ github_copilot: "", codex_oauth: "codex", xai_oauth: "grok" });
+const BREAKER_LABELS = Object.freeze({
+  closed: Object.freeze({ tone: "is-ok", label: "正常" }),
+  open: Object.freeze({ tone: "is-error", label: "熔断" }),
+  half_open: Object.freeze({ tone: "is-warning", label: "试探" }),
+  "half-open": Object.freeze({ tone: "is-warning", label: "试探" }),
+});
+const WORKBENCH_TABS = Object.freeze([
+  ["env", "环境", "wrench"],
+  ["proxy", "代理", "waypoints"],
+  ["resources", "资源", "library"],
+  ["sync", "同步", "cloud"],
+  ["accounts", "账户", "key-round"],
+]);
 const CLI_ENV_STATUS = Object.freeze({
   "up-to-date": Object.freeze({ tone: "is-ok", label: "已就绪" }),
   "upgrade-available": Object.freeze({ tone: "is-warning", label: "可升级" }),
@@ -22,8 +39,138 @@ const selected = (value, expected) => value === expected ? " selected" : "";
 const money = (value) => `$${Number(value || 0).toFixed(4)}`;
 const json = (value) => JSON.stringify(value ?? {}, null, 2);
 
+export function appBrandKey(app) {
+  return APP_BRANDS[app] || "";
+}
+
+export function appShortLabel(app) {
+  return APP_SHORT[app] || APP_LABELS[app] || String(app || "");
+}
+
+export function appFaceMarkup(app, className = "ccs-app-logo") {
+  return officialCliIconMarkup(appBrandKey(app), `cli-logo ${className}`)
+    || `<svg class="icon lucide ${className}" aria-hidden="true"><use href="#lucide-square-terminal"></use></svg>`;
+}
+
+export function breakerStateMeta(state) {
+  return BREAKER_LABELS[state] ?? { tone: "is-neutral", label: state || "未知" };
+}
+
+export function compactCount(value) {
+  const number = Number(value || 0);
+  if (!Number.isFinite(number)) return "—";
+  const abs = Math.abs(number);
+  if (abs >= 100_000_000) return `${(number / 100_000_000).toFixed(1)}亿`;
+  if (abs >= 10_000) return `${(number / 10_000).toFixed(1)}万`;
+  if (abs >= 1000) return `${(number / 1000).toFixed(1)}k`;
+  return number.toLocaleString("zh-CN");
+}
+
+export function formatRate(value) {
+  if (value == null || !Number.isFinite(Number(value))) return "—";
+  return `${(Number(value) * 100).toFixed(1)}%`;
+}
+
+export function syncChannelMeta(channel = {}) {
+  const configured = Boolean(channel.baseUrl || channel.bucket || channel.endpoint || channel.remotePath || channel.key);
+  if (channel.status?.lastError) {
+    return { tone: "error", label: "错误", detail: String(channel.status.lastError) };
+  }
+  if (!channel.enabled) {
+    return { tone: "muted", label: configured ? "已关闭" : "未配置", detail: "" };
+  }
+  if (channel.status?.lastSuccessAt) {
+    return { tone: "ok", label: "已同步", detail: channel.status.lastSuccessAt };
+  }
+  return { tone: "warn", label: "已启用", detail: "尚未成功同步" };
+}
+
+export function cliEnvPulse(tools = []) {
+  const counts = { ready: 0, upgrade: 0, missing: 0, broken: 0, total: tools.length };
+  for (const tool of tools) {
+    if (tool.status === "upgrade-available") counts.upgrade += 1;
+    else if (tool.status === "not-installed") counts.missing += 1;
+    else if (tool.status === "broken") counts.broken += 1;
+    else if (tool.status === "up-to-date" || tool.status === "installed") counts.ready += 1;
+  }
+  return counts;
+}
+
+export function resourcePulse(domain = {}) {
+  const prompts = Object.values(domain.prompts ?? {}).reduce((sum, group) => sum + Object.keys(group ?? {}).length, 0);
+  return {
+    prompts,
+    mcps: Object.keys(domain.mcps ?? {}).length,
+    skills: Object.keys(domain.skills ?? {}).length,
+    profiles: Object.keys(domain.profiles ?? {}).length,
+  };
+}
+
+export function workbenchPulse(snapshot = {}) {
+  const env = cliEnvPulse(snapshot.cliEnv?.tools ?? []);
+  const envBadge = env.broken ? `${env.broken} 异常` : env.upgrade ? `${env.upgrade} 可升级` : env.missing ? `${env.missing} 未装` : snapshot.cliEnvError ? "失败" : snapshot.cliEnv ? "就绪" : "未检查";
+  const running = Boolean(snapshot.proxy?.running);
+  const resources = resourcePulse(snapshot.domain ?? {});
+  const resourceTotal = resources.prompts + resources.mcps + resources.skills + resources.profiles;
+  const webdav = syncChannelMeta(snapshot.domain?.settings?.webdav ?? {});
+  const s3 = syncChannelMeta(snapshot.domain?.settings?.s3 ?? {});
+  const syncError = webdav.tone === "error" || s3.tone === "error";
+  const syncOn = Boolean(snapshot.domain?.settings?.webdav?.enabled || snapshot.domain?.settings?.s3?.enabled);
+  const accounts = (snapshot.auth?.providers ?? []).reduce((sum, item) => sum + (item.accounts?.length || 0), 0);
+  return {
+    env: { badge: envBadge, tone: env.broken || snapshot.cliEnvError ? "error" : (env.upgrade || env.missing) ? "warn" : snapshot.cliEnv ? "ok" : "muted" },
+    proxy: { badge: running ? "运行中" : snapshot.proxy ? "已停止" : "", tone: running ? "ok" : snapshot.proxy ? "muted" : "" },
+    resources: { badge: resourceTotal ? String(resourceTotal) : "", tone: "" },
+    sync: { badge: syncError ? "错误" : syncOn ? "已启用" : snapshot.domain ? "未配置" : "", tone: syncError ? "error" : syncOn ? "ok" : "muted" },
+    accounts: { badge: snapshot.auth ? (accounts ? `${accounts} 已登录` : "未登录") : "", tone: accounts ? "ok" : "muted" },
+  };
+}
+
+function quotaRows(payload, prefix = "") {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return [];
+  const rows = [];
+  for (const [key, value] of Object.entries(payload)) {
+    if (/token|secret|authorization|cookie|password|key/i.test(key)) continue;
+    const label = prefix ? `${prefix}.${key}` : key;
+    if (value == null || typeof value === "boolean" || typeof value === "number" || typeof value === "string") {
+      const text = String(value);
+      if (text && text.length <= 80) rows.push([label, text]);
+    } else if (!prefix && value && typeof value === "object" && !Array.isArray(value)) {
+      rows.push(...quotaRows(value, key));
+    }
+    if (rows.length >= 12) break;
+  }
+  return rows.slice(0, 12);
+}
+
+export function formatAuthResource(kind, payload) {
+  if (payload == null) return { mode: "empty", items: [] };
+  if (kind === "models") {
+    const list = Array.isArray(payload) ? payload
+      : Array.isArray(payload.data) ? payload.data
+      : Array.isArray(payload.models) ? payload.models
+      : [];
+    const names = list.map((item) => item?.id || item?.slug || item?.name || item?.model).filter(Boolean);
+    if (names.length) return { mode: "models", items: names };
+  }
+  if (kind === "quota") {
+    const rows = quotaRows(payload);
+    if (rows.length) return { mode: "quota", items: rows };
+  }
+  if (payload && typeof payload === "object") return { mode: "json", items: [payload] };
+  return { mode: "empty", items: [] };
+}
+
+function emptyState(text, hint = "") {
+  return `<div class="ccs-empty"><p>${escapeHtml(text)}</p>${hint ? `<small>${escapeHtml(hint)}</small>` : ""}</div>`;
+}
+
+function sectionLabel(title, note = "") {
+  return `<div class="ccs-section-label"><strong>${escapeHtml(title)}</strong>${note ? `<span>${escapeHtml(note)}</span>` : ""}</div>`;
+}
+
 function appChecks(prefix, enabled = {}, apps = PROVIDER_SCHEME_APPS) {
-  return `<div class="ccs-app-grid">${apps.map((app) => `<label class="ccs-check"><input type="checkbox" name="${prefix}-${app}"${checked(enabled[app])}><span>${APP_LABELS[app]}</span></label>`).join("")}</div>`;
+  return `<div class="ccs-app-grid">${apps.map((app) => `<label class="ccs-check ccs-app-chip"><input type="checkbox" name="${prefix}-${app}"${checked(enabled[app])}><span>${appFaceMarkup(app, "ccs-app-chip-logo")}<em>${escapeHtml(appShortLabel(app))}</em></span></label>`).join("")}</div>`;
 }
 
 function formApps(form, prefix, apps = PROVIDER_SCHEME_APPS) {
@@ -122,21 +269,39 @@ export function mountCcSwitchPanel({ root, notify = null, request: requestClient
   }
 
   function nativeMarkup() {
-    if (!state.native) return "";
-    if (state.native.error) return `<section class="ccs-tool ccs-native-bar"><strong>桌面原生</strong><span class="status-label is-error">${escapeHtml(state.native.error)}</span></section>`;
+    if (!state.native) return `<div class="ccs-native-slot" data-ccs-native hidden></div>`;
+    if (state.native.error) {
+      return `<section class="ccs-tool ccs-native-bar" data-ccs-native><div><strong>桌面原生</strong><span>本机壳探测失败</span></div><span class="status-label is-error">${escapeHtml(state.native.error)}</span></section>`;
+    }
     const caps = state.native.capabilities ?? {};
-    return `<section class="ccs-tool ccs-native-bar"><div><strong>桌面原生</strong><span>${caps.tray ? "托盘" : "无托盘"} · ${escapeHtml(caps.deepLinkScheme || "-")} · ${caps.portableMode ? "便携" : "安装"} · ${escapeHtml(caps.lightweightStrategy || "-")}</span></div><label class="ccs-check"><input type="checkbox" data-ccs-native-autolaunch${checked(state.native.autoLaunch)}><span>开机自启</span></label><button class="button secondary" type="button" data-ccs-action="native-lightweight">${icon(state.native.lightweight ? "monitor-up" : "monitor-down")}${state.native.lightweight ? "退出轻量" : "进入轻量"}</button><button class="icon-button" type="button" data-ccs-action="native-restart" title="重启桌面端" aria-label="重启桌面端">${icon("refresh-ccw")}</button><span class="status-label ${caps.updater?.enabled ? "is-ok" : "is-neutral"}">${caps.updater?.enabled ? "Updater 可用" : "Updater 禁用"}</span></section>`;
+    return `<section class="ccs-tool ccs-native-bar" data-ccs-native><div><strong>桌面原生</strong><span>${caps.tray ? "托盘" : "无托盘"} · ${escapeHtml(caps.deepLinkScheme || "—")} · ${caps.portableMode ? "便携" : "安装"} · ${escapeHtml(caps.lightweightStrategy || "—")}</span></div><label class="ccs-check"><input type="checkbox" data-ccs-native-autolaunch${checked(state.native.autoLaunch)}><span>开机自启</span></label><button class="button secondary" type="button" data-ccs-action="native-lightweight">${icon(state.native.lightweight ? "monitor-up" : "monitor-down")}${state.native.lightweight ? "退出轻量" : "进入轻量"}</button><button class="icon-button" type="button" data-ccs-action="native-restart" title="重启桌面端" aria-label="重启桌面端">${icon("refresh-ccw")}</button><span class="status-label ${caps.updater?.enabled ? "is-ok" : "is-neutral"}">${caps.updater?.enabled ? "Updater 可用" : "Updater 禁用"}</span></section>`;
+  }
+
+  function tabButtons() {
+    const pulse = workbenchPulse(state);
+    return WORKBENCH_TABS.map(([id, label, glyph]) => {
+      const meta = pulse[id] ?? {};
+      const badge = meta.badge ? `<em class="ccs-tab-badge${meta.tone ? ` is-${meta.tone}` : ""}">${escapeHtml(meta.badge)}</em>` : "";
+      return `<button type="button" role="tab" class="ccs-tab${state.tab === id ? " is-active" : ""}" data-ccs-tab="${id}" aria-selected="${state.tab === id}" tabindex="${state.tab === id ? "0" : "-1"}">${icon(glyph)}<span>${label}</span>${badge}</button>`;
+    }).join("");
+  }
+
+  function paintChrome() {
+    const tabs = root.querySelector("[data-ccs-tabs]");
+    if (tabs) tabs.innerHTML = tabButtons();
+    const native = root.querySelector("[data-ccs-native]");
+    if (native) native.outerHTML = nativeMarkup();
   }
 
   function shell() {
     // 页头只讲这块面板「是什么」：外部产品名与版本属实现来源，留在代码注释与 DESIGN-NOTES，不占用户界面
     return `<div class="ccs-heading"><div><p class="eyebrow">本机运行时</p><h2>运行与配置工作台</h2><p class="ccs-heading-sub">CLI 环境 · 本地代理 · 资源库 · 云同步 · OAuth 账户</p></div><div class="ccs-heading-actions"><span class="ccs-inline-status" data-ccs-status data-tone="neutral">就绪</span><button class="icon-button" type="button" data-ccs-action="refresh" title="刷新工作台" aria-label="刷新运行与配置工作台">${icon("refresh-cw")}</button></div></div>
-      <div class="ccs-tabs" role="tablist" aria-label="运行与配置工作台视图">${[["env", "环境", "wrench"], ["proxy", "代理", "waypoints"], ["resources", "资源", "library"], ["sync", "同步", "cloud"], ["accounts", "账户", "key-round"]].map(([id, label, glyph]) => `<button type="button" role="tab" class="ccs-tab${state.tab === id ? " is-active" : ""}" data-ccs-tab="${id}" aria-selected="${state.tab === id}">${icon(glyph)}<span>${label}</span></button>`).join("")}</div><div class="ccs-panel-body" data-ccs-body></div>`;
+      <div class="ccs-tabs" data-ccs-tabs role="tablist" aria-label="运行与配置工作台视图">${tabButtons()}</div>${nativeMarkup()}<div class="ccs-panel-body" data-ccs-body></div>`;
   }
 
   function render() {
     if (!root.querySelector("[data-ccs-body]")) root.innerHTML = shell();
-    root.querySelectorAll("[data-ccs-tab]").forEach((button) => { const active = button.dataset.ccsTab === state.tab; button.classList.toggle("is-active", active); button.setAttribute("aria-selected", String(active)); });
+    else paintChrome();
     root.querySelector("[data-ccs-body]").innerHTML = state.tab === "env" ? cliEnvMarkup() : state.tab === "proxy" ? proxyMarkup() : state.tab === "resources" ? resourcesMarkup() : state.tab === "sync" ? syncMarkup() : accountsMarkup();
   }
 
@@ -146,17 +311,30 @@ export function mountCcSwitchPanel({ root, notify = null, request: requestClient
     const names = new Map((state.providers?.providers ?? []).map((item) => [item.id, item.name]));
     const healthItems = state.proxyHealth.filter((item) => PROVIDER_SCHEME_APPS.includes(item.app));
     const logItems = state.proxyLogs.filter((item) => !item.app || PROVIDER_SCHEME_APPS.includes(item.app));
-    return `<div class="ccs-metrics"><div><span>状态</span><strong class="${status.running ? "is-ok" : "is-muted"}">${status.running ? "运行中" : "已停止"}</strong></div><div><span>地址</span><strong class="mono">${escapeHtml(status.origin || `${status.listenAddress || "127.0.0.1"}:${status.listenPort || 15721}`)}</strong></div><div><span>请求</span><strong>${Number(summary.requests || 0).toLocaleString()}</strong></div><div><span>Token</span><strong>${Number(summary.inputTokens || 0).toLocaleString()} / ${Number(summary.outputTokens || 0).toLocaleString()}</strong></div><div><span>费用</span><strong>${money(summary.costUsd)}</strong></div></div>${nativeMarkup()}
-      <div class="ccs-two-col"><section class="ccs-tool"><div class="ccs-tool-heading"><h3>代理控制</h3><span class="status-label ${status.running ? "is-ok" : "is-neutral"}">${status.running ? status.tokenMasked || "已鉴权" : "停止"}</span></div><form data-ccs-form="proxy"><div class="ccs-form-grid"><label class="field"><span class="field-label">监听地址</span><input name="listenAddress" value="${attr(status.listenAddress || "127.0.0.1")}"${status.running ? " disabled" : ""}></label><label class="field"><span class="field-label">端口</span><input name="listenPort" type="number" min="0" max="65535" value="${Number(status.listenPort ?? 15721)}"${status.running ? " disabled" : ""}></label><label class="field"><span class="field-label">失败阈值</span><input name="failureThreshold" type="number" min="1" max="100" value="${Number(status.circuitBreaker?.failureThreshold ?? 3)}"></label><label class="field"><span class="field-label">冷却 ms</span><input name="cooldownMs" type="number" min="100" max="3600000" value="${Number(status.circuitBreaker?.cooldownMs ?? 30000)}"></label></div><div class="ccs-actions"><button class="button secondary" type="submit">${icon("save")}保存</button>${status.running ? `<button class="button danger" type="button" data-ccs-action="proxy-stop">${icon("square")}停止并恢复</button>` : `<button class="button primary" type="button" data-ccs-action="proxy-start">${icon("play")}启动</button>`}</div></form></section>
-      <section class="ccs-tool"><div class="ccs-tool-heading"><h3>应用接管</h3><span>${PROVIDER_SCHEME_APPS.filter((app) => status.takeover?.[app]).length}/${PROVIDER_SCHEME_APPS.length}</span></div><div class="ccs-toggle-list">${PROVIDER_SCHEME_APPS.map((app) => `<label><span>${APP_LABELS[app]}</span><input type="checkbox" role="switch" data-ccs-takeover="${app}"${checked(status.takeover?.[app])}${status.running ? "" : " disabled"}></label>`).join("")}</div></section></div>
+    const takeoverCount = PROVIDER_SCHEME_APPS.filter((app) => status.takeover?.[app]).length;
+    const windowDays = Number(summary.windowDays || 30);
+    const metrics = [
+      ["状态", status.running ? "运行中" : "已停止", status.running ? "ok" : "muted"],
+      ["地址", status.origin || `${status.listenAddress || "127.0.0.1"}:${status.listenPort || 15721}`, "mono"],
+      ["请求", compactCount(summary.totalRequests ?? ((summary.requests || 0) + (summary.failedRequests || 0))), ""],
+      ["成功率", formatRate(summary.successRate), summary.successRate == null ? "muted" : Number(summary.successRate) >= 0.95 ? "ok" : "warn"],
+      ["Token", `${compactCount(summary.inputTokens)} / ${compactCount(summary.outputTokens)}`, ""],
+      ["费用", money(summary.costUsd), ""],
+    ];
+    return `<div class="ccs-metrics" aria-label="本地代理近 ${windowDays} 天">${metrics.map(([label, value, tone]) => `<div><span>${label}</span><strong class="${tone === "mono" ? "mono" : tone ? `is-${tone}` : ""}">${escapeHtml(value)}</strong></div>`).join("")}</div>
+      <p class="ccs-hint">用量来自代理请求账本，窗口 ${windowDays} 天；成功率在没有任何请求时显示为 —。</p>
+      <div class="ccs-two-col"><section class="ccs-tool"><div class="ccs-tool-heading"><h3>代理控制</h3><span class="status-label ${status.running ? "is-ok" : "is-neutral"}">${status.running ? status.tokenMasked || "已鉴权" : "已停止"}</span></div><form data-ccs-form="proxy"><div class="ccs-form-grid"><label class="field"><span class="field-label">监听地址</span><input name="listenAddress" value="${attr(status.listenAddress || "127.0.0.1")}"${status.running ? " disabled" : ""}></label><label class="field"><span class="field-label">端口</span><input name="listenPort" type="number" min="0" max="65535" value="${Number(status.listenPort ?? 15721)}"${status.running ? " disabled" : ""}></label><label class="field"><span class="field-label">失败阈值</span><input name="failureThreshold" type="number" min="1" max="100" value="${Number(status.circuitBreaker?.failureThreshold ?? 3)}"></label><label class="field"><span class="field-label">冷却 ms</span><input name="cooldownMs" type="number" min="100" max="3600000" value="${Number(status.circuitBreaker?.cooldownMs ?? 30000)}"></label></div><div class="ccs-actions"><button class="button secondary" type="submit">${icon("save")}保存</button>${status.running ? `<button class="button danger" type="button" data-ccs-action="proxy-stop">${icon("square")}停止并恢复</button>` : `<button class="button primary" type="button" data-ccs-action="proxy-start">${icon("play")}启动</button>`}</div></form></section>
+      <section class="ccs-tool"><div class="ccs-tool-heading"><h3>应用接管</h3><span>${takeoverCount}/${PROVIDER_SCHEME_APPS.length}</span></div><div class="ccs-takeover-grid">${PROVIDER_SCHEME_APPS.map((app) => `<label class="ccs-takeover${status.takeover?.[app] ? " is-on" : ""}"><span class="ccs-takeover-face">${appFaceMarkup(app)}</span><span><strong>${escapeHtml(APP_LABELS[app])}</strong><small>${status.takeover?.[app] ? "经本地代理出站" : "走各自 live 端点"}</small></span><input type="checkbox" role="switch" data-ccs-takeover="${app}"${checked(status.takeover?.[app])}${status.running ? "" : " disabled"}></label>`).join("")}</div><p class="ccs-hint">${status.running ? "接管后该 CLI 的 live 端点改写到本机代理；停止代理会恢复原 live。" : "启动代理后才能接管各 CLI 的 live 端点。"}</p></section></div>
       <section class="ccs-tool"><div class="ccs-tool-heading"><h3>出站代理</h3><span class="status-label ${status.upstreamProxy?.enabled ? "is-ok" : "is-neutral"}">${status.upstreamProxy?.enabled ? escapeHtml(status.upstreamProxy.urlMasked) : "直连"}</span></div><form data-ccs-form="upstream-proxy"><div class="ccs-inline-form"><input name="url" type="url" placeholder="http://127.0.0.1:7890"><button class="button secondary" type="submit">${icon("save")}应用</button><button class="button secondary" type="button" data-ccs-action="upstream-test">${icon("plug-zap")}测试</button><button class="button secondary" type="button" data-ccs-action="upstream-scan">${icon("radar")}扫描</button><button class="button danger" type="button" data-ccs-action="upstream-clear"${status.upstreamProxy?.enabled ? "" : " disabled"}>${icon("unplug")}直连</button></div></form>${state.upstreamScan.length ? `<div class="ccs-list compact">${state.upstreamScan.map((item) => `<div><span><strong class="mono">${escapeHtml(item.url)}</strong><small>${escapeHtml(item.proxyType)}</small></span><button class="button compact secondary" type="button" data-ccs-upstream-pick="${attr(item.url)}"${item.proxyType === "http" ? "" : " disabled"}>${icon("corner-down-left")}填入</button></div>`).join("")}</div>` : ""}</section>
-      <section class="ccs-tool"><div class="ccs-tool-heading"><h3>熔断器</h3><span>${healthItems.length}</span></div><div class="table-scroll"><table class="data-table ccs-table"><thead><tr><th>应用</th><th>供应商</th><th>状态</th><th>失败</th><th></th></tr></thead><tbody>${healthItems.length ? healthItems.map((item) => `<tr><td>${escapeHtml(APP_LABELS[item.app] || item.app)}</td><td>${escapeHtml(names.get(item.providerId) || item.providerId)}</td><td><span class="status-label ${item.state === "closed" ? "is-ok" : item.state === "open" ? "is-error" : "is-warning"}">${escapeHtml(item.state)}</span></td><td>${Number(item.failures || item.consecutiveFailures || 0)}</td><td><button class="icon-button" type="button" data-ccs-reset-breaker="${attr(item.app)}|${attr(item.providerId)}" title="重置熔断器" aria-label="重置熔断器">${icon("rotate-ccw")}</button></td></tr>`).join("") : `<tr><td colspan="5" class="subtle">暂无熔断状态</td></tr>`}</tbody></table></div></section>
-      <div class="ccs-two-col"><section class="ccs-tool"><div class="ccs-tool-heading"><h3>模型定价</h3><span>${Object.keys(state.pricing).length}</span></div><form data-ccs-form="pricing" class="ccs-inline-form"><input name="model" placeholder="model-id" required><input name="inputPerMillion" type="number" step="0.0001" min="0" placeholder="输入 / 1M"><input name="outputPerMillion" type="number" step="0.0001" min="0" placeholder="输出 / 1M"><button class="button secondary" type="submit">${icon("plus")}写入</button></form><div class="ccs-list compact">${Object.entries(state.pricing).map(([model, price]) => `<div><span><strong>${escapeHtml(model)}</strong><small>${money(price.inputPerMillion)} / ${money(price.outputPerMillion)}</small></span><button class="icon-button" type="button" data-ccs-price-delete="${attr(model)}" title="删除定价" aria-label="删除 ${attr(model)} 定价">${icon("trash-2")}</button></div>`).join("") || `<p class="subtle">暂无自定义定价</p>`}</div></section>
-      <section class="ccs-tool"><div class="ccs-tool-heading"><h3>请求日志</h3><span>${logItems.length}</span></div><div class="ccs-log-list">${logItems.slice(0, 12).map((item) => `<div><span class="status-dot ${item.success ? "is-ok" : "is-error"}"></span><strong>${escapeHtml(APP_LABELS[item.app] || item.app || "-")}</strong><span>${escapeHtml(names.get(item.providerId) || item.providerId || "-")}</span><span>${escapeHtml(item.model || "-")}</span><span>${Number(item.durationMs || 0)}ms</span><span>${money(item.costUsd)}</span></div>`).join("") || `<p class="subtle">暂无请求</p>`}</div></section></div>`;
+      <section class="ccs-tool"><div class="ccs-tool-heading"><h3>熔断器</h3><span>${healthItems.length}</span></div><div class="table-scroll"><table class="data-table ccs-table"><thead><tr><th>应用</th><th>供应商</th><th>状态</th><th>失败</th><th></th></tr></thead><tbody>${healthItems.length ? healthItems.map((item) => { const meta = breakerStateMeta(item.state); return `<tr><td>${escapeHtml(APP_LABELS[item.app] || item.app)}</td><td>${escapeHtml(names.get(item.providerId) || item.providerId)}</td><td><span class="status-label ${meta.tone}"${item.lastFailure ? ` title="${attr(item.lastFailure)}"` : ""}>${escapeHtml(meta.label)}</span></td><td>${Number(item.failures || item.consecutiveFailures || 0)}</td><td><button class="icon-button" type="button" data-ccs-reset-breaker="${attr(item.app)}|${attr(item.providerId)}" title="重置熔断器" aria-label="重置熔断器">${icon("rotate-ccw")}</button></td></tr>`; }).join("") : `<tr><td colspan="5">${emptyState("暂无熔断状态", "代理跑过请求后才会出现应用/供应商对。")}</td></tr>`}</tbody></table></div></section>
+      <div class="ccs-two-col"><section class="ccs-tool"><div class="ccs-tool-heading"><h3>模型定价</h3><span>${Object.keys(state.pricing).length}</span></div><form data-ccs-form="pricing" class="ccs-inline-form"><input name="model" placeholder="model-id" required><input name="inputPerMillion" type="number" step="0.0001" min="0" placeholder="输入 / 1M"><input name="outputPerMillion" type="number" step="0.0001" min="0" placeholder="输出 / 1M"><button class="button secondary" type="submit">${icon("plus")}写入</button></form><div class="ccs-list compact">${Object.entries(state.pricing).map(([model, price]) => `<div><span><strong>${escapeHtml(model)}</strong><small>${money(price.inputPerMillion)} / ${money(price.outputPerMillion)}</small></span><button class="icon-button" type="button" data-ccs-price-delete="${attr(model)}" title="删除定价" aria-label="删除 ${attr(model)} 定价">${icon("trash-2")}</button></div>`).join("") || emptyState("暂无自定义定价", "未写入时按内置价目计费。")}</div></section>
+      <section class="ccs-tool"><div class="ccs-tool-heading"><h3>请求日志</h3><span>${logItems.length}</span></div><div class="ccs-log-list">${logItems.slice(0, 12).map((item) => `<div><span class="status-dot ${item.success ? "is-ok" : "is-error"}"></span><strong>${escapeHtml(APP_LABELS[item.app] || item.app || "—")}</strong><span>${escapeHtml(names.get(item.providerId) || item.providerId || "—")}</span><span>${escapeHtml(item.model || "—")}</span><span>${Number(item.durationMs || 0)}ms</span><span>${money(item.costUsd)}</span></div>`).join("") || emptyState("暂无请求", "代理启动并接管后，这里会出现最近请求。")}</div></section></div>`;
   }
 
   function resourceTabs() {
-    return `<div class="ccs-subtabs" role="tablist">${[["prompts", "Prompt"], ["mcps", "MCP"], ["skills", "Skill"], ["profiles", "Profile"], ["workspace", "Workspace"], ["backups", "备份"], ["deeplink", "深链"]].map(([id, label]) => `<button type="button" class="${state.resourceTab === id ? "is-active" : ""}" data-ccs-resource-tab="${id}" role="tab" aria-selected="${state.resourceTab === id}">${label}</button>`).join("")}</div>`;
+    const pulse = resourcePulse(state.domain ?? {});
+    const counts = { prompts: pulse.prompts, mcps: pulse.mcps, skills: pulse.skills, profiles: pulse.profiles };
+    return `<div class="ccs-subtabs" role="tablist">${[["prompts", "Prompt"], ["mcps", "MCP"], ["skills", "Skill"], ["profiles", "Profile"], ["workspace", "Workspace"], ["backups", "备份"], ["deeplink", "深链"]].map(([id, label]) => `<button type="button" class="${state.resourceTab === id ? "is-active" : ""}" data-ccs-resource-tab="${id}" role="tab" aria-selected="${state.resourceTab === id}">${label}${counts[id] ? `<em>${counts[id]}</em>` : ""}</button>`).join("")}</div>`;
   }
 
   function resourcesMarkup() {
@@ -166,30 +344,30 @@ export function mountCcSwitchPanel({ root, notify = null, request: requestClient
 
   function promptsMarkup() {
     const items = Object.values(state.domain?.prompts?.[state.promptApp] ?? {}).sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
-    return `<div class="ccs-resource-layout"><section class="ccs-tool"><div class="ccs-tool-heading"><h3>Prompt</h3><select data-ccs-prompt-app>${PROMPT_APPS.map((app) => `<option value="${app}"${selected(app, state.promptApp)}>${APP_LABELS[app]}</option>`).join("")}</select></div><div class="ccs-list">${items.map((item) => `<div class="${item.enabled ? "is-selected" : ""}"><span><strong>${escapeHtml(item.name)}</strong><small>${item.enabled ? "已启用" : formatDate(item.updatedAt)}</small></span><span class="ccs-row-actions">${item.enabled ? `<button class="icon-button" type="button" data-ccs-prompt-disable="${attr(item.id)}" title="停用" aria-label="停用 ${attr(item.name)}">${icon("circle-pause")}</button>` : `<button class="icon-button" type="button" data-ccs-prompt-enable="${attr(item.id)}" title="启用" aria-label="启用 ${attr(item.name)}">${icon("circle-play")}</button>`}<button class="icon-button" type="button" data-ccs-prompt-edit="${attr(item.id)}" title="编辑" aria-label="编辑 ${attr(item.name)}">${icon("pencil")}</button><button class="icon-button" type="button" data-ccs-prompt-delete="${attr(item.id)}" title="删除" aria-label="删除 ${attr(item.name)}"${item.enabled ? " disabled" : ""}>${icon("trash-2")}</button></span></div>`).join("") || `<p class="subtle">暂无 Prompt</p>`}</div><button class="button secondary" type="button" data-ccs-action="prompt-import">${icon("file-input")}导入 live 文件</button></section>
+    return `<div class="ccs-resource-layout"><section class="ccs-tool"><div class="ccs-tool-heading"><h3>Prompt</h3><select data-ccs-prompt-app>${PROMPT_APPS.map((app) => `<option value="${app}"${selected(app, state.promptApp)}>${APP_LABELS[app]}</option>`).join("")}</select></div><div class="ccs-list">${items.map((item) => `<div class="${item.enabled ? "is-selected" : ""}"><span><strong>${escapeHtml(item.name)}</strong><small>${item.enabled ? "已启用" : formatDate(item.updatedAt)}</small></span><span class="ccs-row-actions">${item.enabled ? `<button class="icon-button" type="button" data-ccs-prompt-disable="${attr(item.id)}" title="停用" aria-label="停用 ${attr(item.name)}">${icon("circle-pause")}</button>` : `<button class="icon-button" type="button" data-ccs-prompt-enable="${attr(item.id)}" title="启用" aria-label="启用 ${attr(item.name)}">${icon("circle-play")}</button>`}<button class="icon-button" type="button" data-ccs-prompt-edit="${attr(item.id)}" title="编辑" aria-label="编辑 ${attr(item.name)}">${icon("pencil")}</button><button class="icon-button" type="button" data-ccs-prompt-delete="${attr(item.id)}" title="删除" aria-label="删除 ${attr(item.name)}"${item.enabled ? " disabled" : ""}>${icon("trash-2")}</button></span></div>`).join("") || emptyState("暂无 Prompt", "从 live 文件导入，或在右侧新建。")}</div><button class="button secondary" type="button" data-ccs-action="prompt-import">${icon("file-input")}导入 live 文件</button></section>
       <section class="ccs-tool"><div class="ccs-tool-heading"><h3>编辑 Prompt</h3><button class="icon-button" type="button" data-ccs-action="prompt-clear" title="新建" aria-label="新建 Prompt">${icon("file-plus-2")}</button></div><form data-ccs-form="prompt"><input type="hidden" name="id"><label class="field"><span class="field-label">名称</span><input name="name" maxlength="120" required></label><label class="field"><span class="field-label">说明</span><input name="description" maxlength="1000"></label><label class="field"><span class="field-label">内容</span><textarea name="content" rows="12" spellcheck="false"></textarea></label><label class="ccs-check inline"><input name="enabled" type="checkbox"><span>保存后启用</span></label><div class="ccs-actions"><button class="button primary" type="submit">${icon("save")}保存</button></div></form></section></div>`;
   }
 
   function mcpsMarkup() {
     const items = Object.values(state.domain?.mcps ?? {});
-    return `<div class="ccs-resource-layout"><section class="ccs-tool"><div class="ccs-tool-heading"><h3>MCP Server</h3><span>${items.length}</span></div><div class="ccs-list">${items.map((item) => `<div><span><strong>${escapeHtml(item.name)}</strong><small class="mono">${escapeHtml(item.config?.command || item.config?.url || item.id)}</small></span><span class="ccs-row-actions"><button class="icon-button" type="button" data-ccs-mcp-edit="${attr(item.id)}" title="编辑" aria-label="编辑 ${attr(item.name)}">${icon("pencil")}</button><button class="icon-button" type="button" data-ccs-mcp-delete="${attr(item.id)}" title="删除" aria-label="删除 ${attr(item.name)}">${icon("trash-2")}</button></span><div class="ccs-mini-apps">${PROVIDER_SCHEME_APPS.map((app) => `<label title="${APP_LABELS[app]}"><input type="checkbox" data-ccs-mcp-toggle="${attr(item.id)}|${app}"${checked(item.apps?.[app])}><span>${APP_LABELS[app].slice(0, 2)}</span></label>`).join("")}</div></div>`).join("") || `<p class="subtle">暂无 MCP</p>`}</div></section>
+    return `<div class="ccs-resource-layout"><section class="ccs-tool"><div class="ccs-tool-heading"><h3>MCP Server</h3><span>${items.length}</span></div><div class="ccs-list">${items.map((item) => `<div><span><strong>${escapeHtml(item.name)}</strong><small class="mono">${escapeHtml(item.config?.command || item.config?.url || item.id)}</small></span><span class="ccs-row-actions"><button class="icon-button" type="button" data-ccs-mcp-edit="${attr(item.id)}" title="编辑" aria-label="编辑 ${attr(item.name)}">${icon("pencil")}</button><button class="icon-button" type="button" data-ccs-mcp-delete="${attr(item.id)}" title="删除" aria-label="删除 ${attr(item.name)}">${icon("trash-2")}</button></span><div class="ccs-mini-apps">${PROVIDER_SCHEME_APPS.map((app) => `<label title="${APP_LABELS[app]}"><input type="checkbox" data-ccs-mcp-toggle="${attr(item.id)}|${app}"${checked(item.apps?.[app])}><span>${appFaceMarkup(app, "ccs-mini-logo")}<em>${escapeHtml(appShortLabel(app))}</em></span></label>`).join("")}</div></div>`).join("") || emptyState("暂无 MCP", "右侧用 command/url JSON 登记一个 server。")}</div></section>
       <section class="ccs-tool"><div class="ccs-tool-heading"><h3>编辑 MCP</h3><button class="icon-button" type="button" data-ccs-action="mcp-clear" title="新建" aria-label="新建 MCP">${icon("plus")}</button></div><form data-ccs-form="mcp"><label class="field"><span class="field-label">ID</span><input name="id" maxlength="96" required></label><label class="field"><span class="field-label">名称</span><input name="name" maxlength="120" required></label><label class="field"><span class="field-label">配置 JSON</span><textarea name="config" rows="9" spellcheck="false">{\n  "command": "npx",\n  "args": []\n}</textarea></label>${appChecks("mcp")}<div class="ccs-actions"><button class="button primary" type="submit">${icon("save")}保存</button></div></form></section></div>`;
   }
 
   function skillsMarkup() {
     const items = Object.values(state.domain?.skills ?? {});
-    return `<div class="ccs-resource-layout"><section class="ccs-tool"><div class="ccs-tool-heading"><h3>Skill</h3><span>${items.length}</span></div><div class="ccs-list">${items.map((item) => `<div><span><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.description || item.source?.repo || item.source || "local")}</small></span><button class="icon-button" type="button" data-ccs-skill-delete="${attr(item.id)}" title="卸载" aria-label="卸载 ${attr(item.name)}">${icon("trash-2")}</button><div class="ccs-mini-apps">${PROMPT_APPS.map((app) => `<label title="${APP_LABELS[app]}"><input type="checkbox" data-ccs-skill-toggle="${attr(item.id)}|${app}"${checked(item.apps?.[app])}><span>${APP_LABELS[app].slice(0, 2)}</span></label>`).join("")}</div></div>`).join("") || `<p class="subtle">暂无 Skill</p>`}</div></section>
+    return `<div class="ccs-resource-layout"><section class="ccs-tool"><div class="ccs-tool-heading"><h3>Skill</h3><span>${items.length}</span></div><div class="ccs-list">${items.map((item) => `<div><span><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.description || item.source?.repo || item.source || "local")}</small></span><button class="icon-button" type="button" data-ccs-skill-delete="${attr(item.id)}" title="卸载" aria-label="卸载 ${attr(item.name)}">${icon("trash-2")}</button><div class="ccs-mini-apps">${PROMPT_APPS.map((app) => `<label title="${APP_LABELS[app]}"><input type="checkbox" data-ccs-skill-toggle="${attr(item.id)}|${app}"${checked(item.apps?.[app])}><span>${appFaceMarkup(app, "ccs-mini-logo")}<em>${escapeHtml(appShortLabel(app))}</em></span></label>`).join("")}</div></div>`).join("") || emptyState("暂无 Skill", "右侧粘贴 SKILL.md，或从深链接导入。")}</div></section>
       <section class="ccs-tool"><div class="ccs-tool-heading"><h3>安装本地 Skill</h3></div><form data-ccs-form="skill"><label class="field"><span class="field-label">名称</span><input name="name" maxlength="64" pattern="[A-Za-z0-9][A-Za-z0-9._-]*" required></label><label class="field"><span class="field-label">说明</span><input name="description" maxlength="1000"></label><label class="field"><span class="field-label">SKILL.md</span><textarea name="skillMd" rows="12" spellcheck="false">---\nname: skill-name\ndescription: description\n---\n</textarea></label>${appChecks("skill", { claude: true, codex: true }, PROMPT_APPS)}<div class="ccs-actions"><button class="button primary" type="submit">${icon("package-plus")}安装</button></div></form></section></div>`;
   }
 
   function profilesMarkup() {
     const items = Object.values(state.domain?.profiles ?? {});
-    return `<div class="ccs-resource-layout"><section class="ccs-tool"><div class="ccs-tool-heading"><h3>Profile</h3><span>${items.length}</span></div><div class="ccs-list">${items.map((item) => `<div><span><strong>${escapeHtml(item.name)}</strong><small>${formatDate(item.updatedAt)}</small></span><span class="ccs-row-actions"><button class="button compact secondary" type="button" data-ccs-profile-apply="${attr(item.id)}">${icon("play")}应用</button><button class="icon-button" type="button" data-ccs-profile-delete="${attr(item.id)}" title="删除" aria-label="删除 ${attr(item.name)}">${icon("trash-2")}</button></span></div>`).join("") || `<p class="subtle">暂无 Profile</p>`}</div></section>
+    return `<div class="ccs-resource-layout"><section class="ccs-tool"><div class="ccs-tool-heading"><h3>Profile</h3><span>${items.length}</span></div><div class="ccs-list">${items.map((item) => `<div><span><strong>${escapeHtml(item.name)}</strong><small>${formatDate(item.updatedAt)}</small></span><span class="ccs-row-actions"><button class="button compact secondary" type="button" data-ccs-profile-apply="${attr(item.id)}">${icon("play")}应用</button><button class="icon-button" type="button" data-ccs-profile-delete="${attr(item.id)}" title="删除" aria-label="删除 ${attr(item.name)}">${icon("trash-2")}</button></span></div>`).join("") || emptyState("暂无 Profile", "拍摄当前 Prompt / MCP / Skill 投影状态。")}</div></section>
       <section class="ccs-tool"><div class="ccs-tool-heading"><h3>拍摄当前状态</h3></div><form data-ccs-form="profile"><label class="field"><span class="field-label">名称</span><input name="name" maxlength="120" required></label><label class="field"><span class="field-label">说明</span><input name="description" maxlength="1000"></label>${appChecks("profile", Object.fromEntries(PROVIDER_SCHEME_APPS.map((app) => [app, true])))}<div class="ccs-actions"><button class="button primary" type="submit">${icon("camera")}创建快照</button></div></form></section></div>`;
   }
 
   function workspaceMarkup() {
-    if (!state.workspace) return `<section class="ccs-tool"><p class="subtle">正在读取 Workspace…</p></section>`;
+    if (!state.workspace) return `<section class="ccs-tool">${emptyState("正在读取 Workspace…")}</section>`;
     const files = state.workspace.openclaw?.files ?? [];
     const daily = state.workspace.openclaw?.daily ?? [];
     const limits = state.workspace.hermes?.limits ?? {};
@@ -197,11 +375,11 @@ export function mountCcSwitchPanel({ root, notify = null, request: requestClient
     return `<div class="ccs-resource-layout"><section class="ccs-tool"><div class="ccs-tool-heading"><h3>OpenClaw Workspace</h3><button class="icon-button" type="button" data-ccs-action="workspace-reveal" title="打开目录" aria-label="打开 OpenClaw Workspace">${icon("folder-open")}</button></div><form data-ccs-form="workspace-file"><label class="field"><span class="field-label">文件</span><select name="filename">${files.map((item) => `<option value="${attr(item.filename)}"${selected(item.filename, state.workspaceFile)}>${escapeHtml(item.filename)}${item.exists ? "" : " · 新建"}</option>`).join("")}</select></label><label class="field"><span class="field-label">内容</span><textarea name="content" rows="14" spellcheck="false">${escapeHtml(state.workspaceContent)}</textarea></label><div class="ccs-actions"><button class="button primary" type="submit">${icon("save")}保存</button></div></form></section>
       <section class="ccs-tool"><div class="ccs-tool-heading"><h3>Hermes Memory</h3><span>${Number(limits[state.hermesKind] || 0).toLocaleString()} chars</span></div><form data-ccs-form="hermes-memory"><label class="field"><span class="field-label">类型</span><select name="kind"><option value="memory"${selected("memory", state.hermesKind)}>MEMORY.md</option><option value="user"${selected("user", state.hermesKind)}>USER.md</option></select></label><label class="ccs-check inline"><input name="enabled" type="checkbox"${checked(hermesEnabled)}><span>启用</span></label><label class="field"><span class="field-label">内容</span><textarea name="content" rows="14" spellcheck="false">${escapeHtml(state.hermesContent)}</textarea></label><div class="ccs-actions"><button class="button primary" type="submit">${icon("save")}保存</button></div></form></section></div>
       <div class="ccs-resource-layout"><section class="ccs-tool"><div class="ccs-tool-heading"><h3>Daily Memory</h3><button class="icon-button" type="button" data-ccs-action="daily-new" title="新建今日记忆" aria-label="新建今日记忆">${icon("file-plus-2")}</button></div><form data-ccs-form="daily-memory"><label class="field"><span class="field-label">日期文件</span><input name="filename" pattern="\\d{4}-\\d{2}-\\d{2}\\.md" value="${attr(state.dailyFilename)}" required></label><label class="field"><span class="field-label">内容</span><textarea name="content" rows="10" spellcheck="false">${escapeHtml(state.dailyContent)}</textarea></label><div class="ccs-actions"><button class="button primary" type="submit">${icon("save")}保存</button></div></form></section>
-      <section class="ccs-tool"><div class="ccs-tool-heading"><h3>每日记忆索引</h3><span>${daily.length}</span></div><form data-ccs-form="daily-search" class="ccs-inline-form"><input name="query" type="search" maxlength="200" placeholder="搜索 Daily Memory" required><button class="button secondary" type="submit">${icon("search")}搜索</button></form><div class="ccs-list compact">${(state.workspaceSearch.length ? state.workspaceSearch : daily).map((item) => `<div><span><strong>${escapeHtml(item.filename)}</strong><small>${escapeHtml(item.snippet || item.preview || `${item.size || 0} bytes`)}</small></span><span class="ccs-row-actions"><button class="icon-button" type="button" data-ccs-daily-edit="${attr(item.filename)}" title="编辑" aria-label="编辑 ${attr(item.filename)}">${icon("pencil")}</button><button class="icon-button" type="button" data-ccs-daily-delete="${attr(item.filename)}" title="删除" aria-label="删除 ${attr(item.filename)}">${icon("trash-2")}</button></span></div>`).join("") || `<p class="subtle">暂无 Daily Memory</p>`}</div></section></div>`;
+      <section class="ccs-tool"><div class="ccs-tool-heading"><h3>每日记忆索引</h3><span>${daily.length}</span></div><form data-ccs-form="daily-search" class="ccs-inline-form"><input name="query" type="search" maxlength="200" placeholder="搜索 Daily Memory" required><button class="button secondary" type="submit">${icon("search")}搜索</button></form><div class="ccs-list compact">${(state.workspaceSearch.length ? state.workspaceSearch : daily).map((item) => `<div><span><strong>${escapeHtml(item.filename)}</strong><small>${escapeHtml(item.snippet || item.preview || `${item.size || 0} bytes`)}</small></span><span class="ccs-row-actions"><button class="icon-button" type="button" data-ccs-daily-edit="${attr(item.filename)}" title="编辑" aria-label="编辑 ${attr(item.filename)}">${icon("pencil")}</button><button class="icon-button" type="button" data-ccs-daily-delete="${attr(item.filename)}" title="删除" aria-label="删除 ${attr(item.filename)}">${icon("trash-2")}</button></span></div>`).join("") || emptyState("暂无 Daily Memory")}</div></section></div>`;
   }
 
   function backupsMarkup() {
-    return `<section class="ccs-tool"><div class="ccs-tool-heading"><h3>完整备份</h3><form data-ccs-form="backup" class="ccs-inline-form"><input name="name" maxlength="80" placeholder="备份名称"><button class="button primary" type="submit">${icon("archive")}创建</button></form></div><div class="ccs-list" data-ccs-backup-list><p class="subtle">正在读取备份…</p></div></section>`;
+    return `<section class="ccs-tool"><div class="ccs-tool-heading"><h3>完整备份</h3><form data-ccs-form="backup" class="ccs-inline-form"><input name="name" maxlength="80" placeholder="备份名称"><button class="button primary" type="submit">${icon("archive")}创建</button></form></div><p class="ccs-hint">备份落在本机私有数据根，包含供应商档案、资源库和 OAuth 账户元数据；恢复会重写各应用 live。</p><div class="ccs-list" data-ccs-backup-list>${emptyState("正在读取备份…")}</div></section>`;
   }
 
   function deeplinkMarkup() {
@@ -228,21 +406,54 @@ export function mountCcSwitchPanel({ root, notify = null, request: requestClient
     }
   }
 
+  function syncChannelNote(meta) {
+    if (meta.tone === "error" && meta.detail) return `<p class="ccs-cli-error">${escapeHtml(meta.detail)}</p>`;
+    if (meta.tone === "ok" && meta.detail) return `<p class="ccs-hint">上次成功 ${escapeHtml(formatDate(meta.detail))}</p>`;
+    if (meta.detail) return `<p class="ccs-hint">${escapeHtml(meta.detail)}</p>`;
+    return "";
+  }
+
   function syncMarkup() {
     const domain = state.domain ?? {};
     const webdav = domain.settings?.webdav ?? {};
     const s3 = domain.settings?.s3 ?? {};
     const stream = domain.settings?.streamCheck ?? {};
-    return `<div class="ccs-two-col"><section class="ccs-tool"><div class="ccs-tool-heading"><h3>WebDAV</h3><span class="status-label ${webdav.status?.lastError ? "is-error" : webdav.status?.lastSuccessAt ? "is-ok" : "is-neutral"}">${webdav.status?.lastError ? "错误" : webdav.status?.lastSuccessAt ? "已同步" : "未同步"}</span></div><form data-ccs-form="webdav"><label class="ccs-check inline"><input name="enabled" type="checkbox"${checked(webdav.enabled)}><span>启用</span></label><label class="field"><span class="field-label">Base URL</span><input name="baseUrl" type="url" value="${attr(webdav.baseUrl)}" required></label><div class="ccs-form-grid"><label class="field"><span class="field-label">用户名</span><input name="username" value="${attr(webdav.username)}"></label><label class="field"><span class="field-label">密码</span><input name="password" type="password" placeholder="${attr(webdav.passwordMasked || "留空保持")}"></label></div><label class="field"><span class="field-label">远端路径</span><input name="remotePath" value="${attr(webdav.remotePath || "ccswitch/backup.json")}" required></label><div class="ccs-actions"><button class="button secondary" type="submit">${icon("save")}保存</button><button class="button secondary" type="button" data-ccs-sync="webdav|test">${icon("plug-zap")}测试</button><button class="button secondary" type="button" data-ccs-sync="webdav|upload">${icon("cloud-upload")}上传</button><button class="button secondary" type="button" data-ccs-sync="webdav|download">${icon("cloud-download")}下载</button></div></form></section>
-      <section class="ccs-tool"><div class="ccs-tool-heading"><h3>S3</h3><span class="status-label ${s3.status?.lastError ? "is-error" : s3.status?.lastSuccessAt ? "is-ok" : "is-neutral"}">${s3.status?.lastError ? "错误" : s3.status?.lastSuccessAt ? "已同步" : "未同步"}</span></div><form data-ccs-form="s3"><label class="ccs-check inline"><input name="enabled" type="checkbox"${checked(s3.enabled)}><span>启用</span></label><label class="field"><span class="field-label">Endpoint</span><input name="endpoint" type="url" value="${attr(s3.endpoint)}" placeholder="AWS 默认可留空"></label><div class="ccs-form-grid"><label class="field"><span class="field-label">Region</span><input name="region" value="${attr(s3.region || "us-east-1")}" required></label><label class="field"><span class="field-label">Bucket</span><input name="bucket" value="${attr(s3.bucket)}" required></label><label class="field"><span class="field-label">Access Key ID</span><input name="accessKeyId" value="${attr(s3.accessKeyId)}" required></label><label class="field"><span class="field-label">Secret Access Key</span><input name="secretAccessKey" type="password" placeholder="${attr(s3.secretAccessKeyMasked || "留空保持")}"></label></div><label class="field"><span class="field-label">Object Key</span><input name="key" value="${attr(s3.key || "ccswitch/backup.json")}" required></label><label class="ccs-check inline"><input name="forcePathStyle" type="checkbox"${checked(s3.forcePathStyle)}><span>Path-style</span></label><div class="ccs-actions"><button class="button secondary" type="submit">${icon("save")}保存</button><button class="button secondary" type="button" data-ccs-sync="s3|test">${icon("plug-zap")}测试</button><button class="button secondary" type="button" data-ccs-sync="s3|upload">${icon("cloud-upload")}上传</button><button class="button secondary" type="button" data-ccs-sync="s3|download">${icon("cloud-download")}下载</button></div></form></section></div>
-      <div class="ccs-two-col"><section class="ccs-tool"><div class="ccs-tool-heading"><h3>Stream Check</h3><span>${state.streamResults.length}</span></div><form data-ccs-form="stream" class="ccs-stream-form"><label class="field"><span class="field-label">超时 ms</span><input name="timeoutMs" type="number" min="500" max="120000" value="${Number(stream.timeoutMs || 10000)}"></label><label class="field"><span class="field-label">降级阈值 ms</span><input name="degradedMs" type="number" min="1" max="120000" value="${Number(stream.degradedMs || 3000)}"></label><label class="field"><span class="field-label">并发数</span><input name="concurrency" type="number" min="1" max="16" value="${Number(stream.concurrency || 4)}"></label><div class="ccs-stream-actions"><button class="button secondary" type="submit">${icon("save")}保存</button><button class="button primary" type="button" data-ccs-action="stream-check">${icon("activity")}检查全部</button></div></form><div class="ccs-list compact">${state.streamResults.map((item) => `<div><span><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.message || `${item.responseTimeMs || 0}ms`)}</small></span><span class="status-label ${item.status === "healthy" ? "is-ok" : item.status === "degraded" ? "is-warning" : "is-error"}">${escapeHtml(item.status)}</span></div>`).join("") || `<p class="subtle">暂无结果</p>`}</div></section>
-      <section class="ccs-tool"><div class="ccs-tool-heading"><h3>环境冲突</h3><button class="button compact secondary" type="button" data-ccs-action="env-check">${icon("shield-check")}检查</button></div><div class="ccs-list compact">${(state.env?.conflicts ?? []).map((item) => `<label class="ccs-env-row"><input type="checkbox" data-env-name="${attr(item.name || item.key)}" data-env-scope="${attr(item.scope || "Process")}"><span><strong>${escapeHtml(item.name || item.key)}</strong><small>${escapeHtml(`${APP_LABELS[item.app] || item.app || ""} · ${item.scope || "Process"}`)}</small></span><code>${escapeHtml(item.valueMasked || "••••")}</code></label>`).join("") || `<p class="subtle">未发现冲突</p>`}</div><button class="button danger" type="button" data-ccs-action="env-delete"${state.env?.conflicts?.length ? "" : " disabled"}>${icon("trash-2")}删除所选并备份</button></section></div>
-      <section class="ccs-tool"><div class="ccs-tool-heading"><h3>配置目录</h3><button class="button compact secondary" type="button" data-ccs-action="sync-live">${icon("refresh-cw")}重写 live</button></div><div class="ccs-path-grid">${PROVIDER_SCHEME_APPS.map((app) => `<form data-ccs-config-dir="${app}"><label><span>${APP_LABELS[app]}</span><input name="path" value="${attr(domain.settings?.configDirs?.[app] || "")}" placeholder="${attr(state.configPaths[app] || "默认路径")}"></label><button class="icon-button" type="submit" title="保存目录" aria-label="保存 ${APP_LABELS[app]} 配置目录">${icon("save")}</button></form>`).join("")}</div></section>`;
+    const webdavMeta = syncChannelMeta(webdav);
+    const s3Meta = syncChannelMeta(s3);
+    const conflicts = state.env?.conflicts ?? [];
+    return `${sectionLabel("云端备份", "整包快照，下载会覆盖本机并重写 live")}
+      <div class="ccs-two-col"><section class="ccs-tool"><div class="ccs-tool-heading"><h3>WebDAV</h3><span class="status-label is-${webdavMeta.tone === "ok" ? "ok" : webdavMeta.tone === "error" ? "error" : webdavMeta.tone === "warn" ? "warning" : "neutral"}">${escapeHtml(webdavMeta.label)}</span></div><form data-ccs-form="webdav"><label class="ccs-check inline"><input name="enabled" type="checkbox"${checked(webdav.enabled)}><span>启用</span></label><label class="field"><span class="field-label">Base URL</span><input name="baseUrl" type="url" value="${attr(webdav.baseUrl)}" required></label><div class="ccs-form-grid"><label class="field"><span class="field-label">用户名</span><input name="username" value="${attr(webdav.username)}"></label><label class="field"><span class="field-label">密码</span><input name="password" type="password" placeholder="${attr(webdav.passwordMasked || "留空保持")}"></label></div><label class="field"><span class="field-label">远端路径</span><input name="remotePath" value="${attr(webdav.remotePath || "ccswitch/backup.json")}" required></label>${syncChannelNote(webdavMeta)}<div class="ccs-actions"><button class="button secondary" type="submit">${icon("save")}保存</button><button class="button secondary" type="button" data-ccs-sync="webdav|test">${icon("plug-zap")}测试</button><button class="button secondary" type="button" data-ccs-sync="webdav|upload">${icon("cloud-upload")}上传</button><button class="button secondary" type="button" data-ccs-sync="webdav|download">${icon("cloud-download")}下载</button></div></form></section>
+      <section class="ccs-tool"><div class="ccs-tool-heading"><h3>S3</h3><span class="status-label is-${s3Meta.tone === "ok" ? "ok" : s3Meta.tone === "error" ? "error" : s3Meta.tone === "warn" ? "warning" : "neutral"}">${escapeHtml(s3Meta.label)}</span></div><form data-ccs-form="s3"><label class="ccs-check inline"><input name="enabled" type="checkbox"${checked(s3.enabled)}><span>启用</span></label><label class="field"><span class="field-label">Endpoint</span><input name="endpoint" type="url" value="${attr(s3.endpoint)}" placeholder="AWS 默认可留空"></label><div class="ccs-form-grid"><label class="field"><span class="field-label">Region</span><input name="region" value="${attr(s3.region || "us-east-1")}" required></label><label class="field"><span class="field-label">Bucket</span><input name="bucket" value="${attr(s3.bucket)}" required></label><label class="field"><span class="field-label">Access Key ID</span><input name="accessKeyId" value="${attr(s3.accessKeyId)}" required></label><label class="field"><span class="field-label">Secret Access Key</span><input name="secretAccessKey" type="password" placeholder="${attr(s3.secretAccessKeyMasked || "留空保持")}"></label></div><label class="field"><span class="field-label">Object Key</span><input name="key" value="${attr(s3.key || "ccswitch/backup.json")}" required></label><label class="ccs-check inline"><input name="forcePathStyle" type="checkbox"${checked(s3.forcePathStyle)}><span>Path-style</span></label>${syncChannelNote(s3Meta)}<div class="ccs-actions"><button class="button secondary" type="submit">${icon("save")}保存</button><button class="button secondary" type="button" data-ccs-sync="s3|test">${icon("plug-zap")}测试</button><button class="button secondary" type="button" data-ccs-sync="s3|upload">${icon("cloud-upload")}上传</button><button class="button secondary" type="button" data-ccs-sync="s3|download">${icon("cloud-download")}下载</button></div></form></section></div>
+      ${sectionLabel("本机健康", "供应商连通性与会覆盖 live 的环境变量")}
+      <div class="ccs-two-col"><section class="ccs-tool"><div class="ccs-tool-heading"><h3>Stream Check</h3><span>${state.streamResults.length}</span></div><form data-ccs-form="stream" class="ccs-stream-form"><label class="field"><span class="field-label">超时 ms</span><input name="timeoutMs" type="number" min="500" max="120000" value="${Number(stream.timeoutMs || 10000)}"></label><label class="field"><span class="field-label">降级阈值 ms</span><input name="degradedMs" type="number" min="1" max="120000" value="${Number(stream.degradedMs || 3000)}"></label><label class="field"><span class="field-label">并发数</span><input name="concurrency" type="number" min="1" max="16" value="${Number(stream.concurrency || 4)}"></label><div class="ccs-stream-actions"><button class="button secondary" type="submit">${icon("save")}保存</button><button class="button primary" type="button" data-ccs-action="stream-check">${icon("activity")}检查全部</button></div></form><div class="ccs-list compact">${state.streamResults.map((item) => `<div><span><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml(item.message || `${item.responseTimeMs || 0}ms`)}</small></span><span class="status-label ${item.status === "healthy" ? "is-ok" : item.status === "degraded" ? "is-warning" : "is-error"}">${escapeHtml(item.status === "healthy" ? "正常" : item.status === "degraded" ? "降级" : item.status === "failed" ? "失败" : item.status)}</span></div>`).join("") || emptyState("暂无结果", "对已配置供应商发一次轻量探测。")}</div></section>
+      <section class="ccs-tool"><div class="ccs-tool-heading"><h3>环境冲突</h3><button class="button compact secondary" type="button" data-ccs-action="env-check">${icon("shield-check")}检查</button></div><div class="ccs-list compact">${conflicts.map((item) => `<label class="ccs-env-row"><input type="checkbox" data-env-name="${attr(item.name || item.key)}" data-env-scope="${attr(item.scope || "Process")}"><span><strong>${escapeHtml(item.name || item.key)}</strong><small>${escapeHtml(`${APP_LABELS[item.app] || item.app || ""} · ${item.scope || "Process"}`)}</small></span><code>${escapeHtml(item.valueMasked || "••••")}</code></label>`).join("") || emptyState(state.env ? "未发现冲突" : "尚未检查", "系统环境变量会盖过 live 配置。")}</div><button class="button danger" type="button" data-ccs-action="env-delete"${conflicts.length ? "" : " disabled"}>${icon("trash-2")}删除所选并备份</button></section></div>
+      ${sectionLabel("配置目录", "空值走默认路径；重写 live 会按这些目录投影")}
+      <section class="ccs-tool"><div class="ccs-tool-heading"><h3>各 CLI 配置根</h3><button class="button compact secondary" type="button" data-ccs-action="sync-live">${icon("refresh-cw")}重写 live</button></div><div class="ccs-path-grid">${PROVIDER_SCHEME_APPS.map((app) => `<form data-ccs-config-dir="${app}"><label><span>${appFaceMarkup(app, "ccs-path-logo")}${escapeHtml(APP_LABELS[app])}</span><input name="path" value="${attr(domain.settings?.configDirs?.[app] || "")}" placeholder="${attr(state.configPaths[app] || "默认路径")}"></label><button class="icon-button" type="submit" title="保存目录" aria-label="保存 ${APP_LABELS[app]} 配置目录">${icon("save")}</button></form>`).join("")}</div></section>`;
+  }
+
+  function authResourceMarkup(kind, payload) {
+    const view = formatAuthResource(kind, payload);
+    if (view.mode === "models") {
+      const extra = view.items.length > 48 ? view.items.length - 48 : 0;
+      return `<ul class="ccs-model-pills">${view.items.slice(0, 48).map((name) => `<li>${escapeHtml(name)}</li>`).join("")}${extra ? `<li class="is-more">+${extra}</li>` : ""}</ul>`;
+    }
+    if (view.mode === "quota") {
+      return `<dl class="ccs-quota">${view.items.map(([key, value]) => `<div><dt>${escapeHtml(key)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("")}</dl>`;
+    }
+    if (view.mode === "json") return `<pre class="ccs-resource-output">${escapeHtml(json(payload))}</pre>`;
+    return "";
   }
 
   function accountsMarkup() {
     const providers = state.auth?.providers ?? [];
-    return `<div class="ccs-account-grid">${providers.map((entry) => { const flow = state.authFlows[entry.provider]; const resource = state.authResource[entry.provider]; return `<section class="ccs-tool"><div class="ccs-tool-heading"><h3>${AUTH_LABELS[entry.provider]}</h3><span class="status-label ${entry.authenticated ? "is-ok" : "is-neutral"}">${entry.authenticated ? `${entry.accounts.length} 个账户` : "未登录"}</span></div>${flow ? `<div class="ccs-device-flow"><strong class="mono">${escapeHtml(flow.userCode)}</strong><a class="button secondary" href="${attr(flow.verificationUri)}" target="_blank" rel="noopener">${icon("external-link")}打开验证页</a><button class="button primary" type="button" data-ccs-auth-poll="${entry.provider}">${icon("refresh-cw")}检查授权</button></div>` : `<button class="button primary" type="button" data-ccs-auth-start="${entry.provider}">${icon("log-in")}开始设备登录</button>`}<div class="ccs-list compact">${entry.accounts.map((account) => `<div><span><strong>${escapeHtml(account.login)}</strong><small>${account.isDefault ? "默认" : formatDate(account.authenticatedAt)}</small></span><span class="ccs-row-actions">${account.isDefault ? "" : `<button class="icon-button" type="button" data-ccs-auth-default="${entry.provider}|${attr(account.id)}" title="设为默认" aria-label="设为默认账户">${icon("star")}</button>`}<button class="icon-button" type="button" data-ccs-auth-remove="${entry.provider}|${attr(account.id)}" title="移除账户" aria-label="移除账户">${icon("user-minus")}</button></span></div>`).join("") || `<p class="subtle">暂无账户</p>`}</div><div class="ccs-actions"><button class="button secondary" type="button" data-ccs-auth-resource="${entry.provider}|models"${entry.authenticated ? "" : " disabled"}>${icon("boxes")}模型</button><button class="button secondary" type="button" data-ccs-auth-resource="${entry.provider}|quota"${entry.authenticated ? "" : " disabled"}>${icon("gauge")}额度</button><button class="button danger" type="button" data-ccs-auth-logout="${entry.provider}"${entry.authenticated ? "" : " disabled"}>${icon("log-out")}注销</button></div>${resource ? `<pre class="ccs-resource-output">${escapeHtml(json(resource))}</pre>` : ""}</section>`; }).join("") || `<section class="ccs-tool"><p class="subtle">账户服务不可用</p></section>`}</div>`;
+    if (!providers.length) return `<section class="ccs-tool">${emptyState("账户服务不可用", "OAuth 设备流未加载。刷新工作台后再试。")}</section>`;
+    return `<p class="ccs-hint">官方登录态由各 CLI / 设备流托管，这里只保存账户元数据；凭据不会写进供应商档案。</p><div class="ccs-account-grid">${providers.map((entry) => {
+      const flow = state.authFlows[entry.provider];
+      const resource = state.authResource[entry.provider];
+      const brand = AUTH_BRANDS[entry.provider] || "";
+      const logo = officialCliIconMarkup(brand, "cli-logo ccs-account-logo") || icon("key-round");
+      return `<section class="ccs-tool ccs-account-card"><div class="ccs-tool-heading"><span class="ccs-account-title">${logo}<h3>${AUTH_LABELS[entry.provider]}</h3></span><span class="status-label ${entry.authenticated ? "is-ok" : "is-neutral"}">${entry.authenticated ? `${entry.accounts.length} 个账户` : "未登录"}</span></div>${flow ? `<div class="ccs-device-flow"><span>在验证页输入设备码</span><strong class="mono">${escapeHtml(flow.userCode)}</strong><a class="button secondary" href="${attr(flow.verificationUri)}" target="_blank" rel="noopener">${icon("external-link")}打开验证页</a><button class="button primary" type="button" data-ccs-auth-poll="${entry.provider}">${icon("refresh-cw")}检查授权</button></div>` : `<button class="button primary" type="button" data-ccs-auth-start="${entry.provider}">${icon("log-in")}开始设备登录</button>`}<div class="ccs-list compact">${entry.accounts.map((account) => `<div><span class="ccs-account-face">${account.avatarUrl ? `<img src="${attr(account.avatarUrl)}" alt="" class="ccs-account-avatar">` : logo}<span><strong>${escapeHtml(account.login)}</strong><small>${account.isDefault ? "默认账户" : formatDate(account.authenticatedAt)}</small></span></span><span class="ccs-row-actions">${account.isDefault ? "" : `<button class="icon-button" type="button" data-ccs-auth-default="${entry.provider}|${attr(account.id)}" title="设为默认" aria-label="设为默认账户">${icon("star")}</button>`}<button class="icon-button" type="button" data-ccs-auth-remove="${entry.provider}|${attr(account.id)}" title="移除账户" aria-label="移除账户">${icon("user-minus")}</button></span></div>`).join("") || emptyState("暂无账户", "走设备登录后会出现在这里。")}</div><div class="ccs-actions"><button class="button secondary" type="button" data-ccs-auth-resource="${entry.provider}|models"${entry.authenticated ? "" : " disabled"}>${icon("boxes")}模型</button><button class="button secondary" type="button" data-ccs-auth-resource="${entry.provider}|quota"${entry.authenticated ? "" : " disabled"}>${icon("gauge")}额度</button><button class="button danger" type="button" data-ccs-auth-logout="${entry.provider}"${entry.authenticated ? "" : " disabled"}>${icon("log-out")}注销</button></div>${resource ? authResourceMarkup(resource.kind || (Array.isArray(resource.data) || Array.isArray(resource.models) ? "models" : "quota"), resource.payload ?? resource) : ""}</section>`;
+    }).join("")}</div>`;
   }
 
   async function refreshWorkspace() {
@@ -313,14 +524,16 @@ export function mountCcSwitchPanel({ root, notify = null, request: requestClient
 
   function cliEnvMarkup() {
     const tools = state.cliEnv?.tools ?? [];
+    const pulse = cliEnvPulse(tools);
     const upgradable = tools.filter((tool) => tool.status === "upgrade-available" && tool.install);
     const busyAny = Object.keys(state.cliEnvBusy).length > 0;
     const head = `<div class="ccs-cli-head"><div><h3>本地 CLI 环境</h3><p class="subtle">对照 registry 检查本机 CLI 后端版本，可一键安装/升级。${state.cliEnv?.generatedAt ? `上次检查 ${formatDate(state.cliEnv.generatedAt)}` : ""}</p></div><div class="ccs-cli-head-actions"><button class="button secondary${state.cliEnvLoading ? " ccs-cli-busy" : ""}" type="button" data-ccs-action="clienv-refresh"${state.cliEnvLoading ? " disabled" : ""}>${icon(state.cliEnvLoading ? "loader-circle" : "refresh-cw")}${state.cliEnvLoading ? "检查中…" : "刷新"}</button><button class="button primary${busyAny ? " ccs-cli-busy" : ""}" type="button" data-ccs-action="clienv-upgrade-all"${upgradable.length && !busyAny ? "" : " disabled"}>${icon(busyAny ? "loader-circle" : "upload")}全部升级${upgradable.length ? ` (${upgradable.length})` : ""}</button></div></div>`;
-    if (state.cliEnvError && !tools.length) return `${head}<section class="ccs-tool"><p class="subtle">环境检查失败：${escapeHtml(state.cliEnvError)}</p></section>`;
-    if (!tools.length) return `${head}<section class="ccs-tool"><p class="subtle">${state.cliEnvLoading ? "正在探测本机 CLI 与 registry 最新版本…" : "点击「刷新」开始环境检查。"}</p></section>`;
+    const summary = tools.length ? `<ul class="ccs-pulse">${[["已就绪", pulse.ready, "ok"], ["可升级", pulse.upgrade, "warn"], ["未安装", pulse.missing, "muted"], ["异常", pulse.broken, "error"]].filter(([, count]) => count).map(([label, count, tone]) => `<li class="is-${tone}"><strong>${count}</strong><span>${label}</span></li>`).join("")}</ul>` : "";
+    if (state.cliEnvError && !tools.length) return `${head}<section class="ccs-tool">${emptyState(`环境检查失败：${state.cliEnvError}`, "可再点刷新，或展开下方手动命令。")}</section>`;
+    if (!tools.length) return `${head}<section class="ccs-tool">${emptyState(state.cliEnvLoading ? "正在探测本机 CLI 与 registry 最新版本…" : "点击「刷新」开始环境检查。")}</section>`;
     const cards = `<div class="ccs-cli-grid">${tools.map((tool) => cliEnvCardMarkup(tool)).join("")}</div>`;
     const manual = `<details class="ccs-cli-manual"><summary>${icon("terminal")}<span>手动安装命令</span></summary><div class="ccs-cli-manual-body">${tools.map((tool) => `<div class="ccs-cli-cmd"><span># ${escapeHtml(tool.label)}</span><code>${escapeHtml(tool.install?.display ?? tool.installNote ?? "—")}</code>${tool.install ? `<button class="icon-button" type="button" data-ccs-cli-copy="${attr(tool.id)}" title="复制 ${attr(tool.label)} 安装命令" aria-label="复制 ${attr(tool.label)} 安装命令">${icon("copy")}</button>` : ""}</div>`).join("")}</div></details>`;
-    return `${head}${cards}${manual}`;
+    return `${head}${summary}${cards}${manual}`;
   }
 
   async function loadCliEnv(refresh = false) {
@@ -335,6 +548,7 @@ export function mountCcSwitchPanel({ root, notify = null, request: requestClient
     } finally {
       state.cliEnvLoading = false;
       if (state.tab === "env") render();
+      else paintChrome();
     }
     return state.cliEnv;
   }
@@ -498,7 +712,7 @@ export function mountCcSwitchPanel({ root, notify = null, request: requestClient
     if (button.dataset.ccsAuthDefault) { const [provider, id] = button.dataset.ccsAuthDefault.split("|"); await act(() => request(`/api/ccswitch/auth/${provider}/default/${encodeURIComponent(id)}`, { method: "PUT", body: {} }), "默认账户已更新").catch(() => {}); return; }
     if (button.dataset.ccsAuthRemove) { if (!(await askConfirm({ eyebrow: "OAuth 账户", title: "移除这个账户？", rows: [["影响", "本机保存的该账户凭据将被清除"]], confirmLabel: "移除", danger: true }))) return; const [provider, id] = button.dataset.ccsAuthRemove.split("|"); await act(() => request(`/api/ccswitch/auth/${provider}/accounts/${encodeURIComponent(id)}`, { method: "DELETE", body: { confirmed: true } }), "账户已移除").catch(() => {}); return; }
     if (button.dataset.ccsAuthLogout) { const provider = button.dataset.ccsAuthLogout; if (await askConfirm({ eyebrow: "OAuth 账户", title: `注销 ${AUTH_LABELS[provider]} 的全部账户？`, rows: [["影响", "该服务下所有已登录账户的凭据一并清除"]], warning: "注销后需要重新走设备登录流程。", confirmLabel: "全部注销", danger: true })) await act(() => request(`/api/ccswitch/auth/${provider}/logout`, { method: "POST", body: { confirmed: true } }), "账户已注销").catch(() => {}); return; }
-    if (button.dataset.ccsAuthResource) { const [provider, kind] = button.dataset.ccsAuthResource.split("|"); try { state.authResource[provider] = await request(`/api/ccswitch/auth/${provider}/${kind}`).then((r) => r.result.payload); render(); message(`${AUTH_LABELS[provider]} ${kind === "models" ? "模型" : "额度"}已读取`); } catch (error) { message(error.message, "error"); } }
+    if (button.dataset.ccsAuthResource) { const [provider, kind] = button.dataset.ccsAuthResource.split("|"); try { const payload = await request(`/api/ccswitch/auth/${provider}/${kind}`).then((r) => r.result.payload); state.authResource[provider] = { kind, payload }; render(); message(`${AUTH_LABELS[provider]} ${kind === "models" ? "模型" : "额度"}已读取`); } catch (error) { message(error.message, "error"); } }
   }
 
   root.addEventListener("submit", (event) => void handleSubmit(event));

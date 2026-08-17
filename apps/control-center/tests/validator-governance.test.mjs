@@ -5,6 +5,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAdapters } from "../src/adapters/index.mjs";
 import { ADAPTER_BINDINGS, ADAPTER_TEMPLATES, createTeamCatalog } from "../src/adapters/manifest.mjs";
+import { ProviderStore } from "../src/providers.mjs";
 import { validateContent, validateRepositoryTruth } from "../src/validator.mjs";
 
 const appRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -117,6 +118,197 @@ test("seat provider bindings degrade to adapter-managed instead of crashing the 
   });
   assert.equal(adapters.get("qa-degraded-seat")?.id, "opencode-run-json");
   await Promise.all([...adapters.values()].map((adapter) => adapter.close?.()));
+});
+
+test("adapter provider binding descriptor is re-resolved for every execution attempt", async () => {
+  const profile = {
+    id: "qa-dynamic-provider-seat",
+    builtin: false,
+    adapter: "opencode-run-json",
+    command: "opencode",
+    providerId: "provider-dynamic-0001",
+    capabilities: [],
+  };
+  let provider = null;
+  let beforeProjection = null;
+  const projections = [];
+  const providerStore = {
+    current: {},
+    proxyRuntime: { takeover: new Set() },
+    get() {
+      if (!provider) throw Object.assign(new Error("missing"), { code: "PROVIDER_NOT_FOUND" });
+      return provider;
+    },
+    async withProviderProjection(app, providerIdOrResolver, operation) {
+      await beforeProjection?.();
+      const providerId = typeof providerIdOrResolver === "function"
+        ? await providerIdOrResolver()
+        : providerIdOrResolver;
+      if (providerId) {
+        projections.push({ app, providerId });
+        this.current[app] = providerId;
+      }
+      return operation(providerId ?? null);
+    },
+  };
+  const adapters = createAdapters({
+    profiles: [profile],
+    eventStore: { emit: async () => {} },
+    cwd: repoRoot,
+    approvalResolver: null,
+    providerStore,
+  });
+  const adapter = adapters.get(profile.id);
+  adapter.send = async () => ({ sessionId: "qa-session", text: "ok" });
+  assert.deepEqual(adapter.getProviderBinding(), {
+    requestedProviderId: profile.providerId,
+    effectiveProviderId: null,
+    mode: "adapter-managed",
+    degradedReason: "provider-missing",
+    degradedDetail: { providerId: profile.providerId, reason: "provider-missing", detail: "PROVIDER_NOT_FOUND" },
+    providerApp: "opencode",
+    adapterId: "opencode-run-json",
+    routeMode: "adapter-managed",
+    bindingScope: "adapter",
+    upstreamProviderId: null,
+    upstreamAttribution: "unavailable",
+  });
+  assert.equal((await adapter.send({})).providerBinding.mode, "adapter-managed");
+  assert.equal(projections.length, 0);
+
+  provider = { id: profile.providerId, apps: { opencode: true } };
+  assert.equal(adapter.getProviderBinding().mode, "bound");
+  assert.equal(adapter.getProviderBinding().effectiveProviderId, profile.providerId);
+  assert.equal(adapter.getProviderBinding().bindingScope, "upstream");
+  assert.equal(adapter.getProviderBinding().upstreamProviderId, profile.providerId);
+  assert.equal(adapter.getProviderBinding().upstreamAttribution, "exact");
+  assert.equal((await adapter.send({})).providerBinding.effectiveProviderId, profile.providerId);
+  assert.deepEqual(projections, [{ app: "opencode", providerId: profile.providerId }]);
+
+  beforeProjection = async () => {
+    providerStore.proxyRuntime.takeover.add("opencode");
+    beforeProjection = null;
+  };
+  const queuedEnable = await adapter.send({});
+  assert.equal(queuedEnable.providerBinding.routeMode, "local-proxy");
+  assert.equal(queuedEnable.providerBinding.bindingScope, "dispatch");
+  assert.equal(queuedEnable.providerBinding.upstreamProviderId, null);
+  assert.equal(queuedEnable.providerBinding.upstreamAttribution, "proxy-request-unlinked");
+
+  const proxyBinding = adapter.getProviderBinding();
+  assert.equal(proxyBinding.routeMode, "local-proxy");
+  assert.equal(proxyBinding.bindingScope, "dispatch");
+  assert.equal(proxyBinding.effectiveProviderId, profile.providerId);
+  assert.equal(proxyBinding.upstreamProviderId, null);
+  assert.equal(proxyBinding.upstreamAttribution, "proxy-request-unlinked");
+  assert.equal((await adapter.send({})).providerBinding.bindingScope, "dispatch");
+  assert.equal(projections.length, 3);
+
+  beforeProjection = async () => {
+    providerStore.proxyRuntime.takeover.delete("opencode");
+    beforeProjection = null;
+  };
+  const queuedDisable = await adapter.send({});
+  assert.equal(queuedDisable.providerBinding.routeMode, "direct-projection");
+  assert.equal(queuedDisable.providerBinding.bindingScope, "upstream");
+  assert.equal(queuedDisable.providerBinding.upstreamProviderId, profile.providerId);
+  assert.equal(queuedDisable.providerBinding.upstreamAttribution, "exact");
+
+  beforeProjection = async () => {
+    provider = { id: profile.providerId, apps: { opencode: false } };
+    beforeProjection = null;
+  };
+  const disabledWhileQueued = await adapter.send({});
+  assert.equal(disabledWhileQueued.providerBinding.mode, "adapter-managed");
+  assert.equal(disabledWhileQueued.providerBinding.degradedReason, "provider-app-disabled");
+  assert.equal(projections.length, 4);
+
+  provider = { id: profile.providerId, apps: { opencode: true } };
+  beforeProjection = async () => {
+    provider = null;
+    beforeProjection = null;
+  };
+  const removedWhileQueued = await adapter.send({});
+  assert.equal(removedWhileQueued.providerBinding.mode, "adapter-managed");
+  assert.equal(removedWhileQueued.providerBinding.degradedReason, "provider-missing");
+  assert.equal(projections.length, 4);
+  await adapter.close?.();
+});
+
+test("adapter provider binding falls back after a real projection TOCTOU invalidates the provider", async (t) => {
+  const root = await mkdtemp(resolve(appRoot, ".test-adapter-provider-race-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const store = await new ProviderStore({
+    dataRoot: resolve(root, "data"),
+    runtimeHome: resolve(root, "home"),
+  }).init();
+  const incumbent = await store.create({
+    name: "Projection incumbent",
+    baseUrl: "https://incumbent.example.test/v1",
+    apiKey: "sk-incumbent-test",
+    apps: { claude: true, opencode: true },
+    models: { opencode: { model: "incumbent-model" } },
+  });
+  const target = await store.create({
+    name: "Projection target",
+    baseUrl: "https://target.example.test/v1",
+    apiKey: "sk-target-test",
+    apps: { claude: true, opencode: true },
+    models: { opencode: { model: "target-model" } },
+  });
+  await store.switchTo("opencode", incumbent.id);
+
+  let invalidated = false;
+  // 保持真实 ProviderStore 的 projection lock，只在 resolver 返回旧 id 后注入
+  // 一个真实 update；这样能稳定覆盖 resolver 与 #switchToSerialized 之间的窗口。
+  const providerStore = new Proxy(store, {
+    get(realStore, property) {
+      if (property === "withProviderProjection") {
+        return (app, resolver, operation) => realStore.withProviderProjection(
+          app,
+          async () => {
+            const providerId = await resolver();
+            if (!invalidated) {
+              invalidated = true;
+              await realStore.update(target.id, { apps: { opencode: false } });
+            }
+            return providerId;
+          },
+          operation,
+        );
+      }
+      const value = Reflect.get(realStore, property, realStore);
+      return typeof value === "function" ? value.bind(realStore) : value;
+    },
+  });
+  const adapters = createAdapters({
+    profiles: [{
+      id: "qa-real-provider-race",
+      builtin: false,
+      adapter: "opencode-run-json",
+      command: "opencode",
+      providerId: target.id,
+      capabilities: [],
+    }],
+    eventStore: { emit: async () => {} },
+    cwd: repoRoot,
+    approvalResolver: null,
+    providerStore,
+  });
+  const adapter = adapters.get("qa-real-provider-race");
+  let sends = 0;
+  adapter.send = async () => {
+    sends += 1;
+    return { sessionId: "degraded-session", text: "adapter-managed" };
+  };
+
+  const result = await adapter.send({ prompt: "race" });
+  assert.equal(invalidated, true);
+  assert.equal(sends, 1, "invalidated projection must retry exactly once through the adapter");
+  assert.equal(result.providerBinding.mode, "adapter-managed");
+  assert.equal(result.providerBinding.degradedReason, "provider-app-disabled");
+  assert.equal(store.get(target.id).apps.opencode, false);
+  await adapter.close?.();
 });
 
 test("module schema rejects a structurally incomplete registry", async () => {

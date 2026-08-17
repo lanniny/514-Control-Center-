@@ -76,6 +76,23 @@ test("remoteRunner.validateRemote/assertRunnable：形状校验 + 门闸/404/409
   assert.equal(ok.path, "/srv/app");
   assert.ok(ssh.execCalls.some((call) => call.command.includes("test -d '/srv/app'"))); // 远端探针仅此一次
   assert.equal(createRemoteRunner({ getService: () => ssh }).workspaceLabel("h1", "/srv/app"), "ssh://h1/srv/app");
+
+  let gateOpen = true;
+  const gatedSsh = fakeSsh({ channel: fakeChannel() });
+  const gated = createRemoteRunner({
+    getService: () => gatedSsh,
+    gates: {
+      assert() {
+        if (!gateOpen) throw Object.assign(new Error("blocked"), { code: "REMOTE_GATE_BLOCKED" });
+      },
+    },
+  });
+  assert.doesNotThrow(() => gated.assertDispatchable("h1", "/srv/app"));
+  const spawn = gated.spawnImpl("h1", "/srv/app");
+  gateOpen = false;
+  assert.throws(() => gated.assertDispatchable("h1", "/srv/app"), { code: "REMOTE_GATE_BLOCKED" });
+  assert.throws(() => spawn("kimi", [], {}), { code: "REMOTE_GATE_BLOCKED" });
+  assert.equal(gatedSsh.openCalls.length, 0, "gate revoke reached the SSH channel");
 });
 
 test("fake child：PGID 首行剥离、协议字节忠实、stdin 缓冲泄入、exit/close 同序、无 pid", async () => {
@@ -209,10 +226,11 @@ test("createRemoteAdapter：工厂表同源注入——spawn 型 runProcessImpl 
   }), (error) => ["REMOTE_ADAPTER_UNSUPPORTED", "ADAPTER_MANIFEST_INVALID"].includes(error.code)); // grok-mcp 远程如实拒绝
 });
 
-function fakeRunner(calls = []) {
+function fakeRunner(calls = [], dispatchCalls = []) {
   return {
     validateRemote: (input) => ({ hostId: String(input.hostId), path: String(input.path) }),
     assertRunnable: async (hostId, path) => { calls.push([hostId, path]); },
+    assertDispatchable: (hostId, path) => { dispatchCalls.push([hostId, path]); },
     workspaceLabel: (hostId, path) => `ssh://${hostId}${path}`,
     spawnImpl: () => () => { throw new Error("not in this test"); },
     runProcessImpl: () => () => { throw new Error("not in this test"); },
@@ -254,6 +272,15 @@ test("orchestrator.create 远程分支：remote 持久化 / 与 cwd 互斥 / 无
     { code: "REMOTE_UNAVAILABLE" },
   );
   await noRunner.close();
+
+  const legacyRunner = fakeRunner();
+  delete legacyRunner.assertDispatchable;
+  const legacyOrchestrator = await orchestratorFixture(root, { remoteRunner: legacyRunner }).init();
+  await assert.rejects(
+    () => legacyOrchestrator.create({ prompt: "x", remote: { hostId: "h1", path: "/srv" } }),
+    { code: "REMOTE_UNAVAILABLE" },
+  );
+  await legacyOrchestrator.close();
 });
 
 test("orchestrator.remoteAdapterFor 缓存同一只 / dispose 调 close；审批消息远程口径", async (t) => {
@@ -291,4 +318,20 @@ test("orchestrator.remoteAdapterFor 缓存同一只 / dispose 调 close；审批
   assert.equal(message.params.workspace, "ssh://h1/srv/app"); // 规范化串，绝不进本机 resolve()
   assert.equal(message.params.workspaceSource, "run.remote");
   assert.equal(message.params.isolation, "remote-unsupported");
+});
+
+test("orchestrator rechecks remote authorization at every provider dispatch boundary", async () => {
+  const dispatchCalls = [];
+  const orchestrator = orchestratorFixture("C:/bounded", { remoteRunner: fakeRunner([], dispatchCalls) });
+  const run = { id: "r-dispatch", remote: { hostId: "h1", path: "/srv/app" } };
+  orchestrator.assertRemoteDispatchable(run);
+  assert.deepEqual(dispatchCalls, [["h1", "/srv/app"]]);
+
+  const source = await import("node:fs/promises").then(({ readFile }) => readFile(new URL("../src/orchestrator.mjs", import.meta.url), "utf8"));
+  const turn = source.slice(source.indexOf("async turn("), source.indexOf("async execute("));
+  assert.match(turn, /try \{\s*this\.assertRemoteDispatchable\(run\);\s*response = await adapter\.send/);
+  const fallbackOwner = turn.indexOf("this.assertLifecycleOwner(run, controller);", turn.indexOf('"adapter.fallback"'));
+  const fallbackGate = turn.indexOf("this.assertRemoteDispatchable(run);", fallbackOwner);
+  const fallbackSend = turn.indexOf("response = await fallback.send(sendInput);", fallbackGate);
+  assert.ok(fallbackOwner >= 0 && fallbackOwner < fallbackGate && fallbackGate < fallbackSend);
 });
