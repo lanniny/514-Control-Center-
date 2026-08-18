@@ -273,6 +273,7 @@ let memberLibrary = null;
 let runtimeSeatManager = null;
 let memberConfigTargetEpoch = 0;
 const loadRunsRequestGate = createLatestRequestGate();
+const loadHealthRequestGate = createLatestRequestGate();
 
 function clearMemberConfigTarget({ cancelPending = true } = {}) {
   state.configMemberFocusId = null;
@@ -790,6 +791,15 @@ function cacheElements() {
     "obs-routegate-body",
     "obs-delta-body",
     "obs-drift-body",
+    "obs-ops-first",
+    "obs-ops-first-detail",
+    "obs-ops-outcomes",
+    "obs-ops-outcomes-detail",
+    "obs-ops-cost",
+    "obs-ops-cost-detail",
+    "obs-ops-stale",
+    "obs-ops-stale-detail",
+    "obs-ops-body",
     "obs-handoff-body",
     "obs-handoff-meta",
     "obs-handoff-content",
@@ -1787,9 +1797,11 @@ async function loadBootstrap() {
 }
 
 async function loadHealth() {
+  const generation = loadHealthRequestGate.begin();
   const started = performance.now();
   try {
     const payload = await request(API.health);
+    if (!loadHealthRequestGate.isCurrent(generation)) return payload;
     state.health = payload;
     state.components = normalizeHealth(payload);
     applyHealthToModels(payload);
@@ -1802,6 +1814,7 @@ async function loadHealth() {
     });
     return payload;
   } catch (error) {
+    if (!loadHealthRequestGate.isCurrent(generation)) throw error;
     state.components = DEFAULT_COMPONENTS.map((item) =>
       item.id === "control-api" ? { ...item, status: "error", detail: error.message } : { ...item },
     );
@@ -1814,11 +1827,13 @@ async function loadHealth() {
     });
     throw error;
   } finally {
-    renderOverview();
-    renderDiagnostics();
-    renderTeamPulse();
-    refreshTeamData();
-    missionControlDock?.refreshIdle?.();
+    if (loadHealthRequestGate.isCurrent(generation)) {
+      renderOverview();
+      renderDiagnostics();
+      renderTeamPulse();
+      refreshTeamData();
+      missionControlDock?.refreshIdle?.();
+    }
   }
 }
 
@@ -2443,7 +2458,12 @@ function configTargetLoadIssue(reason, fallback) {
   const message = reason?.message ?? fallback;
   const code = reason?.payload?.code ?? reason?.payload?.error?.code ?? "";
   const blocked = reason?.status === 501 || code === "REMOTE_GATE_BLOCKED";
-  return { kind: blocked ? "gated" : "error", message: blocked ? "远程能力尚未授权" : message, detail: message };
+  return {
+    kind: blocked ? "gated" : "error",
+    message: blocked ? "远程能力尚未授权" : message,
+    detail: message,
+    nextStep: blocked ? "到远程门闸授权，而不是当故障重试" : null,
+  };
 }
 
 async function loadConfigHosts({ force = false } = {}) {
@@ -4494,22 +4514,25 @@ async function openConfigSyncDialog(host) {
 async function loadObservability() {
   state.obsLoaded = true;
   try {
-    const [summary, routeGate, delta, handoffs] = await Promise.all([
+    const [summary, routeGate, delta, handoffs, ops] = await Promise.all([
       request(API.obsSummary),
       request(API.obsRouteGate),
       request(API.obsDelta),
       request(API.obsHandoffs),
+      request(API.obsOps),
     ]);
     state.obsSummary = summary;
     state.obsRouteGate = routeGate;
     state.obsDelta = delta;
     state.obsHandoffs = handoffs.handoffs ?? [];
+    state.obsOps = ops;
   } catch (error) {
     state.obsLoaded = false;
     const failRow = (cols) => `<tr><td colspan="${cols}" class="subtle">加载失败：${escapeHtml(error.message)} — 点击「刷新数据」重试</td></tr>`;
     elements["obs-routegate-body"].innerHTML = failRow(4);
     elements["obs-delta-body"].innerHTML = failRow(3);
     elements["obs-handoff-body"].innerHTML = failRow(4);
+    if (elements["obs-ops-body"]) elements["obs-ops-body"].innerHTML = failRow(3);
     toast(`体系观测数据加载失败：${error.message}`, "error");
     return; // 失败行不进 renderObservability——handoff 表会被空 state 无条件重绘成"暂无"，失败态要留住
   }
@@ -4530,6 +4553,71 @@ async function runDriftCheck() {
     elements["obs-drift-button"].disabled = false;
   }
   renderObservability();
+}
+
+function formatOpsUnknown(value, suffix = "") {
+  if (value == null || (typeof value === "number" && !Number.isFinite(value))) return "未知";
+  return `${value}${suffix}`;
+}
+
+function formatOpsRate(rate) {
+  if (rate == null || !Number.isFinite(rate)) return "未知";
+  return `${Math.round(rate * 100)}%`;
+}
+
+function formatOpsUsd(value) {
+  if (value == null || !Number.isFinite(value)) return "未知";
+  return `$${value.toFixed(4)}`;
+}
+
+function renderOpsMetrics(ops) {
+  if (!ops || !elements["obs-ops-body"]) return;
+  const first = ops.firstUsefulResponse || {};
+  const outcomes = ops.outcomes || {};
+  const cost = ops.costUsd || {};
+  const stale = ops.stale || {};
+  const approval = ops.approvalWait || {};
+  const fallback = ops.routeFallback || {};
+  const evidence = ops.evidence || {};
+  const transport = ops.promptTransport || {};
+  elements["obs-ops-first"].textContent = formatOpsUnknown(first.p50Ms, " ms");
+  elements["obs-ops-first-detail"].textContent = first.samples
+    ? `${first.samples} 个样本 · ${first.unknown || 0} 个未知时钟`
+    : "无样本时不填 0";
+  elements["obs-ops-outcomes"].textContent = [
+    formatOpsRate(outcomes.successRate),
+    formatOpsRate(outcomes.failureRate),
+    formatOpsRate(outcomes.recoveryRate),
+  ].join(" / ");
+  elements["obs-ops-outcomes-detail"].textContent = outcomes.total
+    ? `成功 ${outcomes.succeeded || 0} · 失败 ${outcomes.failed || 0} · 恢复 ${outcomes.recoveryRequired || 0}`
+    : "空窗口比率保持未知";
+  elements["obs-ops-cost"].textContent = cost.receiptTurns
+    ? `${cost.known || 0}/${cost.receiptTurns} 已知`
+    : "未知";
+  const knownMean = formatOpsUsd(cost.knownMeanUsd);
+  elements["obs-ops-cost-detail"].textContent = cost.unknown
+    ? `${cost.unknown} 次回执无成本，不计入均值（已知均值 ${knownMean}）`
+    : `缺失成本不当 $0 · 已知均值 ${knownMean}`;
+  elements["obs-ops-stale"].textContent = formatOpsUnknown(stale.total);
+  elements["obs-ops-stale-detail"].textContent = stale.healthCacheStale
+    ? `健康缓存过期 · 在途 stale ${stale.staleRunCount || 0}`
+    : `健康缓存有效 · 在途 stale ${stale.staleRunCount || 0}`;
+  const rows = [
+    ["首个有效响应 p50", formatOpsUnknown(first.p50Ms, " ms"), `${first.samples || 0} 样本 / ${first.unknown || 0} 未知`],
+    ["成功 / 失败 / 恢复率", `${formatOpsRate(outcomes.successRate)} / ${formatOpsRate(outcomes.failureRate)} / ${formatOpsRate(outcomes.recoveryRate)}`, "无结局样本时为未知"],
+    ["审批等待 p50", formatOpsUnknown(approval.p50Ms, " ms"), `仅 pending 队列可观测 · ${approval.pending || 0} 条`],
+    ["stale 合计", formatOpsUnknown(stale.total), `健康 ${stale.staleHealthItemCount || 0} + run ${stale.staleRunCount || 0}`],
+    ["route fallback", formatOpsUnknown(fallback.events), `路由 ${fallback.runs || 0} + adapter ${fallback.adapterEvents || 0}`],
+    ["证据完整率", formatOpsRate(evidence.rate), `${evidence.complete || 0}/${evidence.terminal || 0} 终态执行`],
+    ["costUsd 可用率", formatOpsRate(cost.availability), `已知均值 ${knownMean}，未知 ${cost.unknown || 0}`],
+    ["中文传输失败", formatOpsUnknown(transport.failures), `UNSAFE ${transport.codes?.PROMPT_TRANSPORT_UNSAFE || 0} · CORRUPT ${transport.codes?.PROMPT_TRANSPORT_CORRUPT || 0}`],
+  ];
+  elements["obs-ops-body"].innerHTML = rows.map(([name, value, note]) => `<tr>
+    <td>${escapeHtml(name)}</td>
+    <td class="mono">${escapeHtml(value)}</td>
+    <td class="subtle">${escapeHtml(note)}</td>
+  </tr>`).join("");
 }
 
 function renderObservability() {
@@ -4600,6 +4688,7 @@ function renderObservability() {
     )
     .join("") || `<tr><td colspan="4">暂无 handoff</td></tr>`;
   elements["obs-handoff-meta"].textContent = `${state.obsHandoffs.length} 个交接件 · 点击行查看内容`;
+  renderOpsMetrics(state.obsOps);
 }
 
 async function openHandoff(name) {
@@ -14225,38 +14314,55 @@ function runFailureMarkup(run) {
 
 // run 产物 diff（codeg 对标 P2）：有隔离工作树的终态 run 可查看产物比对——按钮挂完成/失败卡，
 // 面板挂会话流尾部；内容服务端已脱敏+截断（>200KB 标截断）
+// EX-07 / R3-02 准备交付：终态 run 给出差异、风险、恢复，不静默 merge；远程标明 remote-unsupported
+function shouldPaintSettlement(run) {
+  if (!run) return false;
+  if (run.status === "recovery_required" || run.recoveryRequired === true) return true;
+  return TERMINAL_RUN_STATES.has(run.status);
+}
+
 function runDiffButtonMarkup(run) {
-  if (!run.worktreePath || !TERMINAL_RUN_STATES.has(run.status)) return "";
+  if (!run.worktreePath || run.remote || !TERMINAL_RUN_STATES.has(run.status)) return "";
   const open = state.runDiffView?.runId === run.id;
   return `<button class="text-button" type="button" data-run-diff="${escapeHtml(run.id)}">${open ? "收起产物 diff" : "产物 diff"}</button>`;
 }
 
-// EX-07 结算入口（读模型）：终态 worktree 给出核对 / 续跑 / 复制路径 / git 命令，不静默 merge
 function worktreeSettlementMarkup(run) {
-  if (!run.worktreePath || !TERMINAL_RUN_STATES.has(run.status)) return "";
-  const leaf = String(run.worktreePath).split(/[\\/]/).pop();
+  if (!shouldPaintSettlement(run)) return "";
+  const view = state.runSettlementView?.runId === run.id ? state.runSettlementView : null;
+  if (!view) queueMicrotask(() => { void loadRunSettlement(run.id); });
+  const envelope = view?.status === "ok" ? view.data : null;
+  const verdict = envelope?.verdict || (run.remote ? "remote-unsupported" : run.worktreePath ? "partial" : "partial");
+  const nextText = envelope?.nextAction?.reason || envelope?.nextAction?.text
+    || (run.remote
+      ? "远程 run 不支持本机 worktree 结算，不会自动 merge"
+      : "改动仍在隔离工作树。先核对 diff，再决定是否继续——不会自动合并到主目录。");
+  const leaf = run.worktreePath ? String(run.worktreePath).split(/[\\/]/).pop() : (run.remote ? "remote" : "no-worktree");
   const sessionMap = Array.isArray(run.sessions)
     ? Object.fromEntries(run.sessions.map((item) => [item.agentId || item.name, item.sessionId || item.id]).filter(([k, v]) => k && v))
     : (run.sessions || {});
   const hintsHtml = resumeHintsMarkup(resumeHintsFromSessions(sessionMap), { escapeHtml });
-  const gitCommands = [
-    `cd "${run.worktreePath}"`,
-    "git status",
-    "git diff --stat",
-  ].join("\n");
+  const gitCommands = run.worktreePath && !run.remote
+    ? [`cd "${run.worktreePath}"`, "git status", "git diff --stat"].join("\n")
+    : "";
+  const risks = (envelope?.risks || []).slice(0, 4)
+    .map((item) => `<li>${escapeHtml(item.reason || item.id)}</li>`)
+    .join("");
   return `
-    <div class="settlement-card" data-stream-key="tail:settlement">
+    <div class="settlement-card" data-stream-key="tail:settlement" data-settlement-verdict="${escapeHtml(verdict)}">
       <div class="settlement-head">
-        <strong>工作树结算</strong>
-        <span class="subtle" title="${escapeHtml(run.worktreePath)}">${lucideIcon("git-branch", "icon lucide")} ${escapeHtml(leaf)}</span>
+        <strong>准备交付</strong>
+        <span class="subtle" title="${escapeHtml(run.worktreePath || run.remote?.hostId || "")}">${lucideIcon("git-branch", "icon lucide")} ${escapeHtml(leaf)} · ${escapeHtml(verdict)}</span>
       </div>
-      <p class="settlement-copy">改动仍在隔离工作树。先核对 diff，再决定是否在新任务/新工作树中继续——不会自动合并到主目录。</p>
+      <p class="settlement-copy">${escapeHtml(nextText)}</p>
+      ${risks ? `<ul class="settlement-risks">${risks}</ul>` : ""}
+      <p class="settlement-copy subtle">自动落地关闭：merge / rebase / commit / push / git add 均不会由控制面执行。</p>
       <div class="settlement-actions">
-        ${runDiffButtonMarkup(run)}
-        <button class="text-button" type="button" data-settlement-continue-worktree="${escapeHtml(run.id)}">在新工作树继续</button>
-        <button class="text-button" type="button" data-settlement-copy-path="${escapeHtml(run.worktreePath)}">复制路径</button>
-        <button class="text-button" type="button" data-settlement-copy-git="${escapeHtml(gitCommands)}">复制 git 命令</button>
-        <button class="text-button" type="button" data-settlement-reveal="${escapeHtml(run.worktreePath)}">打开资源管理器</button>
+        ${run.remote || !run.worktreePath ? "" : runDiffButtonMarkup(run)}
+        ${run.remote || !run.worktreePath ? "" : `<button class="text-button" type="button" data-settlement-continue-worktree="${escapeHtml(run.id)}">在新工作树继续</button>`}
+        ${gitCommands ? `<button class="text-button" type="button" data-settlement-copy-path="${escapeHtml(run.worktreePath)}">复制路径</button>` : ""}
+        ${gitCommands ? `<button class="text-button" type="button" data-settlement-copy-git="${escapeHtml(gitCommands)}">复制 git 命令</button>` : ""}
+        ${gitCommands ? `<button class="text-button" type="button" data-settlement-reveal="${escapeHtml(run.worktreePath)}">打开资源管理器</button>` : ""}
       </div>
       ${hintsHtml}
     </div>`;
@@ -15368,7 +15474,8 @@ function renderSelectedRun({ preserveStreamState = true } = {}) {
   // 第六轮 slim 顶栏（LO 2026-08-17 供图）：可见 pill 只留必须常驻的步骤预算，其余审计段
   // （run id 短码/创建时间/总轮次/交互序号/worktree 全路径）收进 tooltip——信息不丢，形态向参考收敛。
   const metaParts = [maxSteps > 0 ? `本次步骤 ${interactionStep}/${maxSteps}` : `总轮次 ${totalRounds}`];
-  if (run.orchestrationMode === "pipeline") metaParts.push("Pipeline");
+  if (run.orchestrationMode === "social") metaParts.push("社会模拟");
+  else metaParts.push("Pipeline");
   elements["conversation-meta"].textContent = metaParts.join(" · ");
   elements["conversation-meta"].title = [
     `run ${run.id}`,
@@ -17310,6 +17417,9 @@ function renderRouter() {
       ["独立验证", routerVerifierLabel(route)],
       ["策略依据", route.policy],
       ["软偏好", route.fallbackUsed ? "已偏离首选席" : (route.preferredProvider ? "命中首选或显式选择" : "无软偏好")],
+      ["权限档", route.permissionMode || "--"],
+      ["成本", route.cost?.status === "known" ? `$${route.cost.usd}` : "未知"],
+      ["回退额外", route.fallback?.used ? `调用 ${route.fallback.extraCalls} / 审批 ${route.fallback.extraApprovals}` : "无"],
     ]
       .filter(([, value]) => value != null && value !== "" && value !== "--")
       .map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(String(value))}</dd></div>`)
@@ -17517,9 +17627,15 @@ async function createRun(event) {
     state.pendingNativeCommand = false;
     return toast("原生命令需要在一个已有会话中执行（/resume 可切回最近会话）", "warning", 3600);
   }
-  // v3.6：社会模拟是默认内置模式（无需前缀）；/pipeline 为旧拓扑后门
-  const legacy = /^\/pipeline\s+/i.test(prompt);
-  const effectivePrompt = legacy ? prompt.replace(/^\/pipeline\s+/i, "").trim() : prompt;
+  // v42 R2-03：默认 pipeline；/social 显式 opt-in；/pipeline 仍可强制流水线
+  const socialOptIn = /^\/social(?:\s+|$)/i.test(prompt);
+  const pipelineForced = /^\/pipeline\s+/i.test(prompt);
+  const effectivePrompt = socialOptIn
+    ? prompt.replace(/^\/social\s*/i, "").trim()
+    : pipelineForced
+      ? prompt.replace(/^\/pipeline\s+/i, "").trim()
+      : prompt;
+  const legacy = !socialOptIn;
   if (!effectivePrompt) return toast("任务内容为空", "warning");
   // 档位对标 CLI：/effort 折叠下拉恒有值；权限折叠下拉（plan/build）；路由风险固定 medium
   const risk = "medium";
@@ -17556,7 +17672,7 @@ async function createRun(event) {
         risk,
         execute: true,
         collaborationMode: "deep",
-        orchestrationMode: legacy ? "pipeline" : undefined, // v3.6：默认社会模拟；/pipeline 走旧拓扑
+        orchestrationMode: socialOptIn ? "social" : "pipeline",
         startAgentId: composerTarget.memberId, // 活动目标标签就是首个直接收件人
         requestedProvider: composerTarget.memberId, // 直接收件人的 runtime profile 必须实际满足本轮能力
         requestedAgentIds: submission.requestedAgentIds.length ? [...submission.requestedAgentIds] : undefined,
@@ -19454,6 +19570,21 @@ async function toggleRunDiff(runId) {
   renderSelectedRun();
 }
 
+async function loadRunSettlement(runId) {
+  if (!runId) return;
+  if (state.runSettlementView?.runId === runId && (state.runSettlementView.status === "loading" || state.runSettlementView.status === "ok")) return;
+  state.runSettlementView = { runId, status: "loading" };
+  try {
+    const data = await request(API.runSettlement(runId));
+    if (state.runSettlementView?.runId !== runId) return;
+    state.runSettlementView = { runId, status: "ok", data };
+  } catch (error) {
+    if (state.runSettlementView?.runId !== runId) return;
+    state.runSettlementView = { runId, status: "error", error: error.message };
+  }
+  renderSelectedRun();
+}
+
 // ===== 会话头 chips / 更改 pill / Composer 分支 chip（参考桌面 agent 台顶栏形态，LO 2026-08-16 供图） =====
 // 单一数据源：GET /api/workbench/environment（run→任务工作树；无 run→控制面仓库根）。
 // 缓存按 runId/"idle" 分键、30s TTL；回填只写 chip/pill 局部 DOM，不触发整树重绘，避免与 SSE 渲染互踩。
@@ -19792,6 +19923,7 @@ function activateTab(key, { focusTab = false } = {}) {
   state.selectionClearedByUser = false;
   state.sessionPreview = null; // 切页即离开历史预览
   state.runDiffView = null; // 切页收起产物面板
+  state.runSettlementView = null;
   persistTabs();
   renderTabs();
   renderMemberStrip();

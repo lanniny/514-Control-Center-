@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, rm, writeFile, mkdir } from "node:fs/promises";
-import { resolve, join } from "node:path";
+import { basename, resolve, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runDiffForRun } from "../src/run-diff.mjs";
+import { runDiffForRun, summarizeRunDiff } from "../src/run-diff.mjs";
 import { runProcess } from "../src/process-runner.mjs";
 
 const appRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -53,6 +53,8 @@ test("run diff returns status/stat/diff for a dirty worktree (real git)", async 
   assert.ok(result.stat.includes("app.js"), `stat 应含 app.js：${result.stat}`);
   assert.ok(result.diff.includes("const v = 2"), `diff 应含改动行：${result.diff}`);
   assert.equal(result.truncated, false);
+  assert.equal(result.worktree, basename(worktree));
+  assert.equal(result.base, basename(repo));
 });
 
 test("run diff reports a clean worktree honestly (empty outputs)", async (t) => {
@@ -61,4 +63,36 @@ test("run diff reports a clean worktree honestly (empty outputs)", async (t) => 
   assert.equal(result.status.trim(), "");
   assert.equal(result.diff.trim(), "");
   assert.equal(result.truncated, false);
+});
+
+test("run diff fails closed when any git probe exits non-zero", async (t) => {
+  const { worktree, repo } = await gitRepoWithWorktree(t);
+  const runner = async (_command, args) => {
+    if (args.includes("status")) return { code: 128, stdout: "", stderr: `fatal: cannot read ${worktree}` };
+    return { code: 0, stdout: "", stderr: "" };
+  };
+  await assert.rejects(
+    () => summarizeRunDiff({ id: "r-failed", worktreePath: worktree, worktreeBase: repo }, { runner }),
+    (error) => error.code === "DIFF_UNAVAILABLE"
+      && error.operation === "git status"
+      && !error.message.includes(worktree),
+  );
+});
+
+test("run diff scrubs absolute workspace paths from every output channel", async (t) => {
+  const { worktree, repo } = await gitRepoWithWorktree(t);
+  const runner = async (_command, args) => ({
+    code: 0,
+    stdout: args.includes("status")
+      ? ` M ${worktree}/app.js\n`
+      : args.includes("--stat")
+        ? ` ${repo}/app.js | 1 +\n 1 file changed, 1 insertion(+)\n`
+        : `diff --git a/${worktree}/app.js b/${worktree}/app.js\n`,
+    stderr: "",
+  });
+  const result = await runDiffForRun({ id: "r-scrub", worktreePath: worktree, worktreeBase: repo }, { runner });
+  for (const value of [result.worktree, result.base, result.status, result.stat, result.diff]) {
+    assert.equal(String(value).includes(worktree), false);
+    assert.equal(String(value).includes(repo), false);
+  }
 });

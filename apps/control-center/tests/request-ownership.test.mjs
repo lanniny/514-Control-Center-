@@ -41,3 +41,11 @@ test("loadRuns commits state only while it owns the latest generation", async ()
   assert.ok(body.indexOf("const generation = loadRunsRequestGate.begin()") < body.indexOf("await request(API.runs)"));
   assert.ok(body.indexOf("if (!loadRunsRequestGate.isCurrent(generation)) return payload") < body.indexOf("state.runs ="));
 });
+
+test("loadHealth commits state only while it owns the latest generation", async () => {
+  const source = await readFile(new URL("../public/app.js", import.meta.url), "utf8");
+  const body = source.slice(source.indexOf("async function loadHealth()"), source.indexOf("async function loadUsageOverview"));
+  assert.ok(body.indexOf("const generation = loadHealthRequestGate.begin()") < body.indexOf("await request(API.health)"));
+  assert.ok(body.indexOf("if (!loadHealthRequestGate.isCurrent(generation)) return payload") < body.indexOf("state.health ="));
+  assert.match(body, /if \(loadHealthRequestGate\.isCurrent\(generation\)\)/);
+});

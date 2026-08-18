@@ -85,6 +85,7 @@ test("team QA only allows explicit read-only remote gate 501 responses", () => {
     "GET /api/market/installed",
     "GET /api/market/repos",
     "GET /api/market/skills",
+    "GET /api/office/history",
     "GET /api/office/templates",
     "GET /api/pty",
     "GET /api/ssh/hosts",

@@ -220,6 +220,7 @@ test("trigger records runHistory and cancel stops a non-terminal last run", asyn
   const item = await store.create({ name: "hist", prompt: "do work", schedule: "manual", permissionMode: "review" });
   assert.equal(item.permissionMode, "review");
   const run = await store.trigger(item.id);
+  assert.equal(run.input.orchestrationMode, "pipeline");
   const after = store.get(item.id);
   assert.equal(after.lastRunId, run.id);
   assert.equal(after.runHistory.length, 1);
@@ -251,6 +252,7 @@ test("trigger creates a real run with the composer snapshot and records lastRun"
   assert.equal(orchestrator.created[0].prompt, "评审最近改动");
   assert.equal(orchestrator.created[0].startAgentId, "codex-technical");
   assert.deepEqual(orchestrator.created[0].requestedAgentIds, ["claude-fable", "kimi-frontend"]);
+  assert.equal(orchestrator.created[0].orchestrationMode, "social");
   assert.deepEqual(orchestrator.created[0].sources, [{ kind: "file", path: sourcePath, name: "automation-source.md" }]);
   assert.equal(orchestrator.created[0].execute, true);
   const fresh = store.get(item.id);

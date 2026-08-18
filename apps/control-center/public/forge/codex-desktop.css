@@ -998,6 +998,19 @@ body.atelier .sidebar .nav-item.nav-primary.is-active {
   background: var(--amber);
 }
 
+.environment-state.is-consistent {
+  background: var(--green);
+}
+
+.environment-state.is-stale,
+.environment-state.is-degraded {
+  background: var(--amber);
+}
+
+.environment-state.is-unknown {
+  background: var(--text-soft);
+}
+
 .environment-group summary > span {
   flex: 1 1 auto;
 }

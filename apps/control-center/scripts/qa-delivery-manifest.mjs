@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { execFile } from "node:child_process";
-import { realpath, readdir } from "node:fs/promises";
+import { readFile, realpath, readdir } from "node:fs/promises";
 import { promisify } from "node:util";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,10 +15,17 @@ export const DEFAULT_FOCUS_PATHS = Object.freeze([
   "apps/control-center/public",
   "apps/control-center/tests",
   "apps/control-center/scripts",
+  "apps/control-center/server.mjs",
+  "apps/control-center/delivery-ownership.json",
+  "apps/control-center/package.json",
+  "apps/control-center/package-lock.json",
 ]);
 
+export const OWNERSHIP_CLASSES = Object.freeze(["must_ship", "generated", "scratch", "deferred"]);
+const INTENTIONAL_UNTRACKED = new Set(["generated", "scratch", "deferred"]);
+
 const CODE_EXTENSIONS = new Set([
-  ".cjs", ".css", ".html", ".jsx", ".js", ".json", ".mjs", ".py", ".rs", ".ts", ".tsx", ".yaml", ".yml",
+  ".cjs", ".css", ".html", ".jsx", ".js", ".json", ".mjs", ".ps1", ".py", ".rs", ".ts", ".tsx", ".yaml", ".yml",
 ]);
 
 function toRepoPath(path) {
@@ -43,6 +50,64 @@ function pathKey(path) {
   return process.platform === "win32" ? path.toLowerCase() : path;
 }
 
+export function globToRegExp(pattern) {
+  const escaped = String(pattern)
+    .split("/")
+    .map((part) => {
+      if (part === "**") return ".*";
+      return part
+        .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+        .replace(/\*/g, "[^/]*");
+    })
+    .join("/");
+  return new RegExp(`^${escaped}$`);
+}
+
+export function classifyOwnedPath(repoPath, ownership) {
+  if (!ownership?.rules) return null;
+  const normalized = toRepoPath(repoPath);
+  let matched = null;
+  for (const rule of ownership.rules) {
+    if (globToRegExp(rule.pattern).test(normalized)) {
+      matched = {
+        class: OWNERSHIP_CLASSES.includes(rule.class) ? rule.class : "must_ship",
+        owner: rule.owner || "unassigned",
+        kind: rule.kind || "source",
+        pattern: rule.pattern,
+      };
+    }
+  }
+  return matched;
+}
+
+export function assertPackageLockConsistent(pkg, lock) {
+  if (!pkg || !lock) {
+    throw new Error("package.json or package-lock.json is missing");
+  }
+  if (Number(lock.lockfileVersion) < 3) {
+    throw new Error(`package-lock.json lockfileVersion ${lock.lockfileVersion} is below 3`);
+  }
+  if (lock.name && pkg.name && lock.name !== pkg.name) {
+    throw new Error(`package-lock name ${lock.name} does not match package.json ${pkg.name}`);
+  }
+  const declared = { ...pkg.dependencies, ...pkg.devDependencies };
+  const missing = Object.keys(declared).filter((name) => !lock.packages?.[`node_modules/${name}`]);
+  if (missing.length) {
+    throw new Error(`package-lock.json is missing declared packages: ${missing.join(", ")}`);
+  }
+  return true;
+}
+
+async function loadOwnership(repoRoot, ownershipPath) {
+  const candidate = ownershipPath || resolve(repoRoot, "apps/control-center/delivery-ownership.json");
+  try {
+    return JSON.parse(await readFile(candidate, "utf8"));
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
 async function listPhysicalFiles(repoRealRoot, current, result = []) {
   let currentRealPath;
   try {
@@ -58,6 +123,10 @@ async function listPhysicalFiles(repoRealRoot, current, result = []) {
   try {
     entries = await readdir(current, { withFileTypes: true });
   } catch (error) {
+    if (error?.code === "ENOTDIR") {
+      result.push(current);
+      return result;
+    }
     if (error?.code === "ENOENT") return result;
     throw error;
   }
@@ -100,7 +169,11 @@ function normalizeFocusPaths(repoRoot, focusPaths) {
   });
 }
 
-export async function collectDeliveryManifest({ repoRoot = defaultRepoRoot, focusPaths = DEFAULT_FOCUS_PATHS } = {}) {
+export async function collectDeliveryManifest({
+  repoRoot = defaultRepoRoot,
+  focusPaths = DEFAULT_FOCUS_PATHS,
+  ownershipPath = null,
+} = {}) {
   const resolvedRepoRoot = resolve(repoRoot);
   const normalizedFocusPaths = normalizeFocusPaths(resolvedRepoRoot, focusPaths);
   const uniqueFocusPaths = [...new Map(normalizedFocusPaths.map((path) => [pathKey(path), path])).values()];
@@ -123,6 +196,26 @@ export async function collectDeliveryManifest({ repoRoot = defaultRepoRoot, focu
   const sortedUntrackedFiles = [...untrackedFiles].sort();
   const untrackedSourceOrTests = sortedUntrackedFiles.filter(isCodeOrTestPath);
   const missingSourceOrTests = deletedTrackedFiles.filter(isCodeOrTestPath);
+  const ownership = await loadOwnership(resolvedRepoRoot, ownershipPath);
+  const classifiedUntracked = untrackedSourceOrTests.map((path) => ({
+    path,
+    ...(classifyOwnedPath(path, ownership) || { class: "undeclared", owner: "unassigned", kind: "source" }),
+  }));
+  const undeclaredSourceOrTests = classifiedUntracked
+    .filter((item) => item.class === "undeclared" || item.class === "must_ship")
+    .map((item) => item.path);
+  const intentionalUntracked = classifiedUntracked
+    .filter((item) => INTENTIONAL_UNTRACKED.has(item.class))
+    .map((item) => item.path);
+  const associations = {
+    source: [...trackedFiles, ...untrackedSourceOrTests].filter((path) => (classifyOwnedPath(path, ownership)?.kind || (isCodeOrTestPath(path) ? "source" : "other")) === "source").length,
+    test: [...trackedFiles, ...untrackedSourceOrTests].filter((path) => path.includes("/tests/") || classifyOwnedPath(path, ownership)?.kind === "test").length,
+    config: [...trackedFiles].filter((path) => classifyOwnedPath(path, ownership)?.kind === "config").length,
+    doc: [...trackedFiles].filter((path) => classifyOwnedPath(path, ownership)?.kind === "doc").length,
+  };
+  const strictFailure = ownership
+    ? undeclaredSourceOrTests.length > 0 || missingSourceOrTests.length > 0
+    : untrackedSourceOrTests.length > 0 || missingSourceOrTests.length > 0;
 
   return {
     repoRoot: resolvedRepoRoot,
@@ -133,8 +226,18 @@ export async function collectDeliveryManifest({ repoRoot = defaultRepoRoot, focu
     untrackedSourceOrTests,
     deletedTrackedFiles,
     missingSourceOrTests,
+    ownership: ownership
+      ? {
+        schema: ownership.schema || null,
+        cut: ownership.cut || null,
+        undeclaredSourceOrTests,
+        intentionalUntracked,
+        classifiedUntracked,
+      }
+      : null,
+    associations,
     clean: sortedUntrackedFiles.length === 0 && deletedTrackedFiles.length === 0,
-    strictFailure: untrackedSourceOrTests.length > 0 || missingSourceOrTests.length > 0,
+    strictFailure,
   };
 }
 
@@ -150,7 +253,11 @@ export function renderDeliveryReport(manifest, { json = false } = {}) {
     `repo: ${manifest.repoRoot}`,
     `focus: ${manifest.focusPaths.join(", ")}`,
     `tracked: ${manifest.trackedFiles.length}; physical: ${manifest.physicalFiles.length}`,
+    `cut: ${manifest.ownership?.cut?.id || "unspecified"}; formalRelease: ${manifest.ownership?.cut?.formalRelease === true ? "yes" : "no"}`,
+    `associations: source=${manifest.associations?.source ?? 0} test=${manifest.associations?.test ?? 0} config=${manifest.associations?.config ?? 0} doc=${manifest.associations?.doc ?? 0}`,
     `status: ${manifest.clean ? "clean" : "drift"}; strict: ${manifest.strictFailure ? "fail" : "pass"}`,
+    formatList("undeclared source/test", manifest.ownership?.undeclaredSourceOrTests || manifest.untrackedSourceOrTests),
+    formatList("intentional untracked", manifest.ownership?.intentionalUntracked || []),
     formatList("untracked source/test", manifest.untrackedSourceOrTests),
     formatList("untracked other focus files", manifest.untrackedFiles.filter((entry) => !manifest.untrackedSourceOrTests.includes(entry))),
     formatList("deleted tracked source/test", manifest.missingSourceOrTests),
@@ -172,6 +279,11 @@ export async function main(argv = process.argv.slice(2), {
     return 2;
   }
   try {
+    if (strict) {
+      const pkg = JSON.parse(await readFile(resolve(appRoot, "package.json"), "utf8"));
+      const lock = JSON.parse(await readFile(resolve(appRoot, "package-lock.json"), "utf8"));
+      assertPackageLockConsistent(pkg, lock);
+    }
     const manifest = await collectDeliveryManifest({ repoRoot });
     stdout.write(renderDeliveryReport(manifest, { json }));
     return strict && manifest.strictFailure ? 1 : 0;

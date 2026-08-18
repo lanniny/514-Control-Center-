@@ -163,9 +163,9 @@ function matchingHealth(components, agent) {
 function healthStatus(component) {
   if (!component) return "unknown";
   const status = String(component.rawStatus ?? component.status ?? component.state ?? "unknown").toLowerCase();
-  if (component.available === true || ["ok", "online", "healthy", "ready", "active"].includes(status)) return "ready";
   if (["degraded", "warning", "external-unverified", "dormant"].includes(status)) return "degraded";
   if (component.available === false || ["disabled", "missing", "offline", "error", "failed"].includes(status)) return "offline";
+  if (["ok", "online", "healthy", "ready", "active"].includes(status) || component.available === true) return "ready";
   return "unknown";
 }
 

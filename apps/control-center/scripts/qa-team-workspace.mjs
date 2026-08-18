@@ -22,6 +22,7 @@ export const ALLOWED_GATE_BLOCKS = new Set([
   "GET /api/channels",
   "GET /api/channels/events",
   "GET /api/office/templates",
+  "GET /api/office/history",
   "GET /api/market/skills",
   "GET /api/market/installed",
   "GET /api/market/repos",

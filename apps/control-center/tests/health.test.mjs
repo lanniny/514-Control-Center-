@@ -319,3 +319,17 @@ test("pulse cancellation releases a caller waiting on observability without wait
   await assert.rejects(pending, (error) => error === reason);
   release({ generatedAt: "2026-07-23T00:00:00.000Z" });
 });
+
+test("peekMeta reports a missing cache as stale without probing", () => {
+  const service = new HealthService([profile], {
+    ttlMs: 30_000,
+    externalProbes: new Map([[profile.id, () => {
+      throw new Error("peekMeta must not probe");
+    }]]),
+  });
+  const meta = service.peekMeta();
+  assert.equal(meta.available, false);
+  assert.equal(meta.stale, true);
+  assert.equal(meta.profileCount, 1);
+  assert.equal(meta.ageMs, null);
+});

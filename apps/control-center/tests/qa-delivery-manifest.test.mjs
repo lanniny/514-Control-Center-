@@ -3,7 +3,13 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { collectDeliveryManifest, main, renderDeliveryReport } from "../scripts/qa-delivery-manifest.mjs";
+import {
+  assertPackageLockConsistent,
+  classifyOwnedPath,
+  collectDeliveryManifest,
+  main,
+  renderDeliveryReport,
+} from "../scripts/qa-delivery-manifest.mjs";
 
 async function createGitFixture() {
   const root = await mkdtemp(resolve(process.cwd(), ".test-delivery-manifest-"));
@@ -130,9 +136,62 @@ test("delivery manifest deduplicates repeated focus roots and rejects a symlinke
   );
 });
 
+test("delivery ownership treats declared scratch as intentional and undeclared source as strict fail", async (t) => {
+  const root = await createGitFixture();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(resolve(root, "apps/control-center/src/new.mjs"), "export default false;\n", "utf8");
+  await writeFile(resolve(root, "apps/control-center/src/local-scratch.mjs"), "export default false;\n", "utf8");
+  await writeFile(resolve(root, "apps/control-center/delivery-ownership.json"), `${JSON.stringify({
+    schema: "514cc.delivery-ownership/v1",
+    cut: { id: "fixture", formalRelease: false },
+    rules: [
+      { pattern: "apps/control-center/src/**", class: "must_ship", owner: "control-center", kind: "source" },
+      { pattern: "apps/control-center/src/local-scratch.mjs", class: "scratch", owner: "qa", kind: "scratch" },
+    ],
+  }, null, 2)}\n`, "utf8");
+
+  const manifest = await collectDeliveryManifest({
+    repoRoot: root,
+    focusPaths: ["apps/control-center/src"],
+  });
+  assert.deepEqual(manifest.ownership.intentionalUntracked, ["apps/control-center/src/local-scratch.mjs"]);
+  assert.deepEqual(manifest.ownership.undeclaredSourceOrTests, ["apps/control-center/src/new.mjs"]);
+  assert.equal(manifest.strictFailure, true);
+  assert.equal(classifyOwnedPath("apps/control-center/src/local-scratch.mjs", manifest.ownership && {
+    rules: [
+      { pattern: "apps/control-center/src/**", class: "must_ship", owner: "control-center", kind: "source" },
+      { pattern: "apps/control-center/src/local-scratch.mjs", class: "scratch", owner: "qa", kind: "scratch" },
+    ],
+  }).class, "scratch");
+});
+
+test("package-lock consistency rejects missing declared packages", () => {
+  assert.equal(assertPackageLockConsistent(
+    { name: "demo", dependencies: { leftpad: "1.0.0" } },
+    { name: "demo", lockfileVersion: 3, packages: { "node_modules/leftpad": { version: "1.0.0" } } },
+  ), true);
+  assert.throws(
+    () => assertPackageLockConsistent(
+      { name: "demo", dependencies: { leftpad: "1.0.0" } },
+      { name: "demo", lockfileVersion: 3, packages: {} },
+    ),
+    /missing declared packages/,
+  );
+});
+
 test("delivery manifest CLI reports repository probe failures with exit code 2", async (t) => {
   const root = await mkdtemp(resolve(process.cwd(), ".test-delivery-not-git-"));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  t.after(async () => {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        await rm(root, { recursive: true, force: true });
+        return;
+      } catch (error) {
+        if (error?.code !== "EBUSY" || attempt === 4) return;
+        await new Promise((resolve) => setTimeout(resolve, 80 * (attempt + 1)));
+      }
+    }
+  });
   await writeFile(resolve(root, ".git"), "gitdir: missing-git-dir\n", "utf8");
   const stderr = { value: "", write(chunk) { this.value += chunk; } };
   const code = await main([], { repoRoot: root, stdout: { write() {} }, stderr });

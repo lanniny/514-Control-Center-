@@ -3275,6 +3275,7 @@ test("logical team members sharing one runtime profile keep isolated sessions an
     execute: true,
     permissionMode: "plan",
     teamId: team.id,
+    orchestrationMode: "social",
     requestedAgentIds: ["member-alpha", "member-beta"],
     maxRounds: 6,
   });

@@ -191,6 +191,13 @@ test("workbench environment HTTP surface is authenticated, run-scoped and persis
       const initial = await authorizedJson(origin, token, `/api/workbench/environment?runId=${runId}`);
       assert.equal(initial.response.status, 200);
       assert.equal(initial.payload.schema, "514cc.workbench.environment/v1");
+      assert.equal(initial.payload.projectBridge?.schema, "514cc.project-bridge/v1");
+      assert.match(String(initial.payload.projectBridge?.anchorId || ""), /^[0-9a-f]{32}$/);
+      assert.notEqual(initial.payload.projectBridge?.consistency, "consistent");
+      const ignoredCwd = await authorizedJson(origin, token, "/api/project-bridge?cwd=C:/definitely-not-a-project");
+      assert.equal(ignoredCwd.response.status, 200);
+      assert.equal(ignoredCwd.payload.schema, "514cc.project-bridge/v1");
+      assert.doesNotMatch(String(ignoredCwd.payload.canonicalCwd || ""), /definitely-not-a-project/i);
       assert.equal(initial.payload.runId, runId);
       assert.equal(initial.payload.workspace.source, "run");
       assert.equal(initial.payload.git.available, true);

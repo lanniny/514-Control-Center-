@@ -1,0 +1,28 @@
+{
+  "schema": "514cc.delivery-ownership/v1",
+  "cut": {
+    "id": "v42-r0",
+    "title": "Control Center trusted baseline",
+    "formalRelease": false,
+    "note": "R0 only. Formal version remains v3.5.0 until LO approves the upgrade."
+  },
+  "owners": {
+    "control-center": "AEMEATH",
+    "qa": "AEMEATH",
+    "docs": "AEMEATH"
+  },
+  "rules": [
+    { "pattern": "apps/control-center/*.mjs", "class": "must_ship", "owner": "control-center", "kind": "source" },
+    { "pattern": "apps/control-center/src/**", "class": "must_ship", "owner": "control-center", "kind": "source" },
+    { "pattern": "apps/control-center/public/**", "class": "must_ship", "owner": "control-center", "kind": "source" },
+    { "pattern": "apps/control-center/tests/**", "class": "must_ship", "owner": "qa", "kind": "test" },
+    { "pattern": "apps/control-center/scripts/**", "class": "must_ship", "owner": "qa", "kind": "source" },
+    { "pattern": "apps/control-center/delivery-ownership.json", "class": "must_ship", "owner": "qa", "kind": "config" },
+    { "pattern": "apps/control-center/package.json", "class": "must_ship", "owner": "control-center", "kind": "config" },
+    { "pattern": "apps/control-center/package-lock.json", "class": "must_ship", "owner": "control-center", "kind": "config" },
+    { "pattern": "apps/control-center/*.md", "class": "must_ship", "owner": "docs", "kind": "doc" },
+    { "pattern": "apps/control-center/.test-*/**", "class": "scratch", "owner": "qa", "kind": "scratch" },
+    { "pattern": "apps/control-center/public/scratch-preview-*.html", "class": "scratch", "owner": "qa", "kind": "scratch" },
+    { "pattern": "apps/control-center/.qa-*/**", "class": "scratch", "owner": "qa", "kind": "scratch" }
+  ]
+}

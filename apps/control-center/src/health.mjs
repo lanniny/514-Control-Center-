@@ -146,6 +146,34 @@ export class HealthService {
     });
   }
 
+  peek() {
+    return Array.isArray(this.cache?.items) ? this.cache.items : [];
+  }
+
+  peekMeta() {
+    if (!this.cache) {
+      return {
+        available: false,
+        capturedAt: null,
+        ageMs: null,
+        ttlMs: this.ttlMs,
+        stale: true,
+        items: [],
+        profileCount: this.profiles.length,
+      };
+    }
+    const ageMs = Math.max(0, Date.now() - this.cache.at);
+    return {
+      available: true,
+      capturedAt: new Date(this.cache.at).toISOString(),
+      ageMs,
+      ttlMs: this.ttlMs,
+      stale: ageMs >= this.ttlMs,
+      items: this.cache.items,
+      profileCount: this.profiles.length,
+    };
+  }
+
   async all({ refresh = false, signal } = {}) {
     throwIfAborted(signal);
     if (!refresh && this.cache && Date.now() - this.cache.at < this.ttlMs) return this.cache.items;

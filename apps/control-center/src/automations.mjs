@@ -182,6 +182,7 @@ export class AutomationStore {
           ...item,
           prompt: normalizedContent.prompt,
           requestedAgentIds: normalizeRequestedAgentIds(item.requestedAgentIds),
+          orchestrationMode: item.orchestrationMode === "social" ? "social" : "pipeline",
           sources: normalizedContent.sources,
         });
       }
@@ -290,6 +291,7 @@ export class AutomationStore {
       teamId: input.teamId ?? "team-514cc",
       startAgentId: input.startAgentId ?? null,
       requestedAgentIds: normalizeRequestedAgentIds(input.requestedAgentIds),
+      orchestrationMode: input.orchestrationMode === "social" ? "social" : "pipeline",
       permissionMode: ["build", "review"].includes(input.permissionMode) ? input.permissionMode : "plan",
       model: input.model || null,
       effort: input.effort || null,
@@ -330,6 +332,9 @@ export class AutomationStore {
       }
       if (patch.requestedAgentIds !== undefined) {
         current.requestedAgentIds = normalizeRequestedAgentIds(patch.requestedAgentIds);
+      }
+      if (patch.orchestrationMode !== undefined) {
+        current.orchestrationMode = patch.orchestrationMode === "social" ? "social" : "pipeline";
       }
       if (patch.permissionMode !== undefined) {
         const mode = String(patch.permissionMode ?? "plan").toLowerCase();
@@ -409,13 +414,15 @@ export class AutomationStore {
     const idempotencyKey = `automation:${id}:${pending.id}`;
     let run;
     try {
+      const requestedAgentIds = item.requestedAgentIds?.length ? [...item.requestedAgentIds] : undefined;
       run = await this.orchestrator.create({
         prompt,
         execute: true,
         permissionMode: item.permissionMode,
         teamId: item.teamId,
         startAgentId: item.startAgentId || undefined,
-        requestedAgentIds: item.requestedAgentIds?.length ? [...item.requestedAgentIds] : undefined,
+        requestedAgentIds,
+        orchestrationMode: item.orchestrationMode === "social" || requestedAgentIds ? "social" : "pipeline",
         model: item.model || undefined,
         effort: item.effort || undefined,
         cwd: item.cwd || undefined,

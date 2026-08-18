@@ -2214,6 +2214,7 @@ test("structured multi-mention validates team ownership, mode and stable orderin
         permissionMode: "plan",
         teamId: "team-514cc",
         requestedAgentIds: ["codex-technical", "claude-fable"],
+        orchestrationMode: "social",
         ...budget,
       }),
       { code: "INSUFFICIENT_ROUNDS", minimumRounds: 5 },
@@ -2226,6 +2227,7 @@ test("structured multi-mention validates team ownership, mode and stable orderin
     permissionMode: "plan",
     teamId: "team-514cc",
     requestedAgentIds: ["codex-technical", "codex-technical", "claude-fable"],
+    orchestrationMode: "social",
     maxStepsPerInteraction: 5,
   });
   assert.deepEqual(preview.requestedAgentIds, ["codex-technical", "claude-fable"]);
@@ -2328,16 +2330,24 @@ test("social mode drops ping-pong directives beyond 2 hops instead of looping fo
   assert.ok(messages.some((message) => message.kind === "decide"));
 });
 
-test("social is the default orchestration mode (no explicit flag needed)", async (t) => {
-  const { root, calls, orchestrator } = await fixture({
+test("pipeline is the default orchestration mode; social requires explicit opt-in", async (t) => {
+  const { root, orchestrator } = await fixture({
     "claude-fable": ["直接答复。"],
   });
   t.after(() => rm(root, { recursive: true, force: true }));
-  const run = await orchestrator.create({ prompt: "默认模式验证", execute: true, permissionMode: "plan", teamId: "team-514cc" });
-  const terminal = await waitTerminal(orchestrator, run.id);
-  assert.equal(terminal.status, "succeeded", terminal.error);
-  assert.equal(terminal.orchestrationMode, "social");
-  assert.deepEqual(calls.map((call) => call.id), ["claude-fable"]); // 单成员会话只有起始轮（冗余收敛轮已取消）
+  const run = await orchestrator.create({ prompt: "默认模式验证", execute: false, permissionMode: "plan", teamId: "team-514cc" });
+  assert.equal(run.orchestrationMode, "pipeline");
+  assert.equal(run.socialContract.optedIn, false);
+  const social = await orchestrator.create({
+    prompt: "显式社会模拟",
+    execute: false,
+    permissionMode: "plan",
+    teamId: "team-514cc",
+    orchestrationMode: "social",
+  });
+  assert.equal(social.orchestrationMode, "social");
+  assert.equal(social.socialContract.optedIn, true);
+  assert.equal(social.socialContract.pingPongLimit, 2);
 });
 
 test("ask/answer: [[msg:lo]] pauses the run and continue() resumes back to the asker", async (t) => {
@@ -2981,7 +2991,7 @@ test("clearFinished removes the bus file and roster entries of cleared runs", as
     "claude-fable": ["直接答复。"],
   });
   t.after(() => rm(root, { recursive: true, force: true }));
-  const run = await orchestrator.create({ prompt: "清理验证", execute: true, permissionMode: "plan", teamId: "team-514cc" });
+  const run = await orchestrator.create({ prompt: "清理验证", execute: true, permissionMode: "plan", teamId: "team-514cc", orchestrationMode: "social" });
   await waitTerminal(orchestrator, run.id);
   const bus = new BusStore({ dataRoot: root });
   assert.ok((await bus.read(run.id)).length > 0, "前置：bus 有消息");

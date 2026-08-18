@@ -296,6 +296,18 @@ test("GitActionBroker blocks commit and push from detached worktrees", async () 
   }
 });
 
+test("GitActionBroker refuses merge-like landing actions", async () => {
+  const git = gitRunner();
+  const broker = new GitActionBroker({ runner: git.runner });
+  for (const action of ["merge", "rebase", "reset", "checkout"]) {
+    await assert.rejects(
+      () => broker.plan({ cwd: "C:/repo", action }),
+      { code: "MERGE_UNSUPPORTED" },
+    );
+  }
+  assert.equal(git.calls.length, 0);
+});
+
 test("GitActionBroker rechecks attached HEAD after planning a commit", async () => {
   const git = gitRunner();
   const broker = new GitActionBroker({ runner: git.runner });

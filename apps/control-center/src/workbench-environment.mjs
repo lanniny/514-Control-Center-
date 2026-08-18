@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { basename, isAbsolute, resolve, win32 } from "node:path";
 import { scrub } from "./redaction.mjs";
 import { runProcess } from "./process-runner.mjs";
+import { synthesizeRunSettlement } from "./run-settlement.mjs";
 
 export const WORKBENCH_ENVIRONMENT_SCHEMA = "514cc.workbench.environment/v1";
 export const GIT_ACTION_PLAN_TTL_MS = 5 * 60_000;
@@ -282,10 +283,29 @@ export async function collectWorkbenchEnvironment({
   processes = [],
   signal,
   workspaceSource = run ? "run" : "control-center",
+  releaseTruth = null,
+  releaseRecord = null,
+  settlement = null,
+  projectBridge = null,
+  readiness = null,
 } = {}) {
   const git = await collectGitSummary(cwd, { signal });
   const pullRequest = await collectPullRequest(git, { signal });
   const projectedGit = { ...git, actions: gitActionAvailability(git) };
+  const resolvedSettlement = settlement || (run?.id
+    ? synthesizeRunSettlement({
+      run,
+      diffSummary: git.available && run.worktreePath && !run.remote
+        ? {
+          available: true,
+          dirty: Number(git.changes?.total) > 0,
+          filesChanged: Number.isFinite(Number(git.changes?.total)) ? Number(git.changes.total) : null,
+          additions: Number.isFinite(Number(git.changes?.additions)) ? Number(git.changes.additions) : null,
+          deletions: Number.isFinite(Number(git.changes?.deletions)) ? Number(git.changes.deletions) : null,
+        }
+        : null,
+    })
+    : null);
   return {
     schema: WORKBENCH_ENVIRONMENT_SCHEMA,
     capturedAt: new Date().toISOString(),
@@ -313,6 +333,11 @@ export async function collectWorkbenchEnvironment({
         name: short(item?.name, 180) || basename(String(item?.path || "source")),
       })),
     },
+    ...(releaseTruth ? { releaseTruth } : {}),
+    ...(releaseRecord ? { releaseRecord } : {}),
+    ...(resolvedSettlement ? { settlement: resolvedSettlement } : {}),
+    ...(projectBridge ? { projectBridge } : {}),
+    ...(readiness ? { readiness } : {}),
   };
 }
 
@@ -524,7 +549,12 @@ export class GitActionBroker {
   async plan({ cwd, action, message = "", revalidateWorkspace = null } = {}) {
     this.#prune();
     if (!cwd) throw validationError("Git 工作目录缺失");
-    if (!new Set(["commit", "push"]).has(action)) throw validationError("Git 动作只允许 commit 或 push");
+    if (!new Set(["commit", "push"]).has(action)) {
+      if (["merge", "rebase", "reset", "checkout", "cherry-pick"].includes(action)) {
+        throw validationError("结算中心不自动 merge/rebase；只生成 plan、差异和风险", "MERGE_UNSUPPORTED");
+      }
+      throw validationError("Git 动作只允许 commit 或 push");
+    }
     const normalizedMessage = String(message ?? "").trim();
     if (action === "commit" && (!normalizedMessage || normalizedMessage.length > 2_000 || normalizedMessage.includes("\0"))) {
       throw validationError("提交说明必须为 1-2000 个字符");

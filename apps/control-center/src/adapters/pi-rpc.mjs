@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { attachLfJsonl, encodeJsonLine } from "../jsonl.mjs";
 import { childProcessEnv, spawnCommand, terminateChildProcessAndWait } from "../process-runner.mjs";
+import { preparePromptTransport } from "../prompt-transport.mjs";
 import {
   createBoundedTaskTracker,
   createScrubbedLineCollector,
@@ -354,6 +355,15 @@ export class PiRpcAdapter {
     try {
       if (signal?.aborted) abort();
       await onTurnSubmitting?.({ sessionId: resolvedSessionId, protocol: "pi-rpc", clientUserMessageId });
+      await preparePromptTransport({
+        prompt,
+        transport: "jsonl",
+        adapterId: this.id,
+        command: this.command,
+        eventStore: this.eventStore,
+        runId,
+        agentId,
+      });
       await this.commandRequest(state, { type: "prompt", message: prompt }, 30_000, turnFailure);
       await onTurnAccepted?.({ sessionId: resolvedSessionId, protocol: "pi-rpc", clientUserMessageId });
       return await turn;

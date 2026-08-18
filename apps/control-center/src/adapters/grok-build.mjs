@@ -5,6 +5,7 @@
 // 只在首个 thought 时 emit 一条 thinking 标记。会话由 grok 自身持久化（~/.grok）。
 import { randomUUID } from "node:crypto";
 import { runProcess } from "../process-runner.mjs";
+import { preparePromptTransport } from "../prompt-transport.mjs";
 import { isAbnormalProviderTurnStop } from "../provider-turn-outcome.mjs";
 import { createLfCollector } from "./stream-utils.mjs";
 
@@ -182,6 +183,15 @@ export class GrokBuildAdapter {
       sessionResumable: Boolean(sessionId),
       protocol: "grok-headless-resume",
       clientUserMessageId,
+    });
+    await preparePromptTransport({
+      prompt,
+      transport: "argv",
+      adapterId: this.id,
+      command: this.command,
+      eventStore: this.eventStore,
+      runId,
+      agentId,
     });
     let result;
     try {

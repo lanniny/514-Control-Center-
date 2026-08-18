@@ -9,6 +9,7 @@
 // effort 透传 `--variant`（provider 自定义推理档，1.18 --help 实证；档位语义由 provider 决定）。
 import { randomUUID } from "node:crypto";
 import { runProcess } from "../process-runner.mjs";
+import { preparePromptTransport } from "../prompt-transport.mjs";
 import { createBoundedTaskTracker, createLfCollector } from "./stream-utils.mjs";
 
 export function extractOpencodeEventError(event) {
@@ -114,6 +115,15 @@ export class OpencodeCliAdapter {
     );
     if (sessionId) await onSessionStarted?.({ sessionId, protocol: "opencode-run-json" });
     await onTurnSubmitting?.({ sessionId: sessionId || null, protocol: "opencode-run-json", clientUserMessageId: randomUUID() });
+    await preparePromptTransport({
+      prompt,
+      transport: "argv",
+      adapterId: this.id,
+      command: this.command,
+      eventStore: this.eventStore,
+      runId,
+      agentId,
+    });
     let result;
     let processError = null;
     try {

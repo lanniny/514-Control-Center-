@@ -855,7 +855,9 @@ test("Codex output-limit finalization bounds a never-settling EventStore", async
     maxTurnOutputBytes: 5,
     outputLimitSettleMs: 250,
     eventPersistenceTimeoutMs: 20,
-    eventStore: { emit: async () => new Promise(() => {}) },
+    eventStore: {
+      emit: async (type) => type === "prompt.transport" ? undefined : new Promise(() => {}),
+    },
   });
   await assert.rejects(
     () => adapter.send({ prompt: "hanging persistence", runId: "run-codex-persistence-timeout" }),

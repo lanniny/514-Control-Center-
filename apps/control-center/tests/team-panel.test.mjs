@@ -14,7 +14,7 @@ import {
   selectPipelineRoot,
   sessionAgentIds,
 } from "../public/team-panel.js";
-import { buildCollabLoadResult, buildTeamActivityCounts, pickTeam, suggestMarkup } from "../public/collab-flow.js";
+import { buildAttentionHeroStat, buildCollabLoadResult, buildTeamActivityCounts, pickTeam, suggestMarkup } from "../public/collab-flow.js";
 
 test("team panel derives real team seats, provider health, task load and delegation flow", () => {
   const team = {
@@ -218,6 +218,24 @@ test("collaboration refresh result distinguishes success, partial failure and to
   assert.deepEqual(failure.failedSources, ["teams", "runs", "health", "delta", "handoffs", "routegate"]);
 });
 
+test("attention hero keeps failed or incomplete attention data unknown instead of zero", () => {
+  assert.deepEqual(buildAttentionHeroStat(null), {
+    value: "—",
+    sub: "注意力数据未知",
+    known: false,
+  });
+  assert.deepEqual(buildAttentionHeroStat({ counts: { activeSeats: 0, queueDepth: 0, pendingAskCount: 0 } }), {
+    value: 0,
+    sub: "当前无执行中任务",
+    known: true,
+  });
+  assert.deepEqual(buildAttentionHeroStat({ counts: { activeSeats: 1 } }), {
+    value: 1,
+    sub: "队列与待答数据未知",
+    known: true,
+  });
+});
+
 test("default team suggestion follows the configured coordinator instead of Claude", () => {
   const markup = suggestMarkup("整理一下下一步", new Set(["claude-fable", "codex-technical"]), "codex-technical");
   assert.match(markup, /codex-technical/);
@@ -245,6 +263,15 @@ test("suggestion skips offline preferred seats and picks the next usable one", (
   const markup = suggestMarkup("帮我写代码实现这个功能", new Set(["codex-technical", "grok-build"]), null, seats);
   assert.match(markup, /data-suggest-agent="grok-build"/);
   assert.doesNotMatch(markup, /data-suggest-agent="codex-technical"/);
+});
+
+test("available true cannot paint degraded health as ready", () => {
+  const snapshot = buildTeamPanelData({
+    team: { id: "team-514cc", name: "514cc", coordinator: "claude-fable", members: ["claude-fable"] },
+    components: [{ id: "claude-fable", status: "degraded", available: true }],
+    runs: [],
+  });
+  assert.equal(snapshot.agents[0].status, "degraded");
 });
 
 test("busy seat suggestion is annotated with running load", () => {

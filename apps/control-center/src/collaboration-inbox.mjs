@@ -12,10 +12,10 @@ export const INBOX_LIMITS = Object.freeze({
   maxConcurrentReads: 4,
 });
 
-const ACTIVE_RUN_STATES = new Set([
+export const ACTIVE_RUN_STATES = new Set([
   "queued", "planning", "running", "waiting_agent", "executing", "integrating", "verifying", "active",
 ]);
-const ATTENTION_RUN_STATES = new Set([
+export const ATTENTION_RUN_STATES = new Set([
   "waiting_approval", "approval_required", "recovery_required", "failed", "ambiguous", "blocked",
 ]);
 
@@ -128,6 +128,7 @@ export async function collectTeamInbox({
   maxRuns = INBOX_LIMITS.maxRuns,
   maxMessages = INBOX_LIMITS.maxMessages,
   maxConcurrentReads = INBOX_LIMITS.maxConcurrentReads,
+  lifecycleByKey = null,
   signal,
 } = {}) {
   const normalizedTeamId = String(teamId ?? "").trim();
@@ -187,14 +188,33 @@ export async function collectTeamInbox({
   const answeredAskIds = new Set(allMessages
     .map((message) => askReferenceKey(message.runId, message.answerToAskId))
     .filter(Boolean));
-  const messages = allMessages.slice(0, messageLimit).map(({ run, ...message }) => ({
-    ...message,
-    runStatus: run.status,
-    runTitle: run.title,
-    runAttention: run.attention,
-  }));
+  const messages = allMessages.slice(0, messageLimit).map(({ run, ...message }) => {
+    const askKey = askReferenceKey(message.runId, message.kind === "ask" ? message.id : message.answerToAskId);
+    const stored = askKey ? lifecycleByKey?.[askKey] : null;
+    const inferred = message.kind === "answer"
+      ? "answered"
+      : message.kind === "ask" && askKey && answeredAskIds.has(askKey)
+        ? "answered"
+        : message.kind === "ask"
+          ? "delivered"
+          : null;
+    return {
+      ...message,
+      runStatus: run.status,
+      runTitle: run.title,
+      runAttention: run.attention,
+      lifecycle: stored?.state || message.lifecycle || inferred,
+      lifecycleRevision: Number.isSafeInteger(stored?.revision)
+        ? stored.revision
+        : message.kind === "ask"
+          ? 0
+          : null,
+    };
+  });
   const pendingAsks = messages.filter((message) => {
     const askKey = askReferenceKey(message.runId, message.id);
+    const stored = askKey ? lifecycleByKey?.[askKey] : null;
+    if (stored && ["failed", "expired", "acknowledged"].includes(stored.state)) return false;
     return message.needsOperator && (!askKey || !answeredAskIds.has(askKey));
   });
   const recentAnswers = messages.filter((message) => message.kind === "answer").slice(0, 16);

@@ -21,8 +21,13 @@ import { ProviderStore } from "./providers.mjs";
 import { CcSwitchProxyService } from "./ccswitch/proxy.mjs";
 import { CcSwitchDomainService } from "./ccswitch/domain.mjs";
 import { CcSwitchAuthService } from "./ccswitch/auth.mjs";
-import { DATA_ROOT, REPO_ROOT } from "./paths.mjs";
+import { APP_ROOT, DATA_ROOT, REPO_ROOT } from "./paths.mjs";
 import { acquireInstanceLock } from "./instance-lock.mjs";
+import { createAnchorStore } from "./project-bridge.mjs";
+import { createInboxLifecycleStore } from "./inbox-lifecycle.mjs";
+import { createFirstRunDraftStore } from "./first-run-readiness.mjs";
+import { createReleaseCommandEvidenceStore } from "./release-record.mjs";
+import { createReleaseCommandRunner } from "./release-command-runner.mjs";
 import { createRemoteGateService } from "./security/remote-gates.mjs";
 import { createRemoteRunner } from "./ssh/remote-run.mjs";
 import { getSshService } from "./ssh/routes.mjs";
@@ -295,6 +300,7 @@ export async function createControlCenter(options = {}) {
   let closed = false;
   let closeFailure = null;
   let closePromise = null;
+  let closeResult = null;
   // 每个关闭步骤只启动一次；超时后下一次 close() 继续等待同一 Promise，避免
   // 对仍在运行的资源操作重复发起并发清理。已拒绝的步骤会在下一次尝试重新创建。
   const closeTasks = new Map();
@@ -368,6 +374,8 @@ export async function createControlCenter(options = {}) {
   }
 
   let reloadInProgress = false;
+  // state getter 内部引用 state 自身的惰性句柄（releaseCommandRunner 需要 evidenceStore）。
+  const app = { lazy: {} };
   state = {
     repoRoot,
     dataRoot,
@@ -396,7 +404,34 @@ export async function createControlCenter(options = {}) {
     configManager,
     modelDiscovery,
     get generation() { return generation; },
+    get pid() { return process.pid; },
+    get startedAt() { return instanceLock.owner.startedAt; },
+    projectAnchors: createAnchorStore(),
+    inboxLifecycle: createInboxLifecycleStore({ dataRoot }),
+    firstRunDraft: createFirstRunDraftStore({ dataRoot }),
+    releaseCommandEvidence: createReleaseCommandEvidenceStore({ dataRoot }),
+    get releaseCommandRunner() {
+      // 惰性构建：runner 需要 evidenceStore 引用，而本对象字面量尚未构造完成。
+      app.lazy.releaseCommandRunner ??= createReleaseCommandRunner({
+        appRoot: options.appRoot ? resolve(options.appRoot) : APP_ROOT,
+        evidenceStore: state.releaseCommandEvidence,
+        collectRuntimeIdentity: () => ({
+          pid: state.pid,
+          generation: state.generation,
+          startedAt: state.startedAt,
+        }),
+      });
+      return app.lazy.releaseCommandRunner;
+    },
     async reloadRuntime({ sourceId = "manual", reason = "manual reload", catalogGuarded = false } = {}) {
+      const releaseAttempt = app.lazy.releaseCommandRunner?.snapshot().active;
+      if (releaseAttempt) {
+        return {
+          status: "restart-required",
+          generation,
+          reason: `release QA runner ${releaseAttempt.runId} is active`,
+        };
+      }
       if (reloadInProgress) {
         return {
           status: "restart-required",
@@ -481,7 +516,15 @@ export async function createControlCenter(options = {}) {
       }
     },
     async close({ budgetMs = DEFAULT_CLOSE_BUDGET_MS, deadlineMs = null, onPhase = null } = {}) {
-      if (closed) return;
+      if (closed) {
+        return closeResult || {
+          schema: "514cc.close-result/v1",
+          closed: true,
+          idempotent: true,
+          retryable: false,
+          phases: [],
+        };
+      }
       if (closePromise) return closePromise;
       const resumeAutomations = Boolean(automations.timer);
       closePromise = (async () => {
@@ -492,11 +535,18 @@ export async function createControlCenter(options = {}) {
         const deadline = Number.isFinite(requestedDeadline) && requestedDeadline > 0
           ? Math.min(budgetDeadline, requestedDeadline)
           : budgetDeadline;
+        const phases = [];
         const reportPhase = (step, startedAt, error = null) => {
+          const entry = {
+            step,
+            ms: Date.now() - startedAt,
+            ok: !error,
+            code: error?.code ?? null,
+            remainingMs: Math.max(0, deadline - Date.now()),
+          };
+          phases.push(entry);
           if (typeof onPhase !== "function") return;
-          try {
-            onPhase({ step, ms: Date.now() - startedAt, ok: !error, code: error?.code ?? null });
-          } catch {}
+          try { onPhase(entry); } catch {}
         };
         const runCloseStep = async (step, operation) => {
           let task = closeTasks.get(step);
@@ -530,6 +580,7 @@ export async function createControlCenter(options = {}) {
         } catch (error) {
           reportPhase("automations.stop", phaseAt, error);
           if (resumeAutomations) automations.start();
+          closeTasks.delete("automations.stop");
           throw error;
         }
         let proxyStatus;
@@ -550,7 +601,9 @@ export async function createControlCenter(options = {}) {
           });
           reportPhase("ccswitchProxy.close", phaseAt);
         } catch (error) {
+          reportPhase("ccswitchProxy.close", phaseAt, error);
           if (resumeAutomations) automations.start();
+          closeTasks.delete("automations.stop");
           throw error;
         }
 
@@ -562,6 +615,9 @@ export async function createControlCenter(options = {}) {
         const finalizationReserveMs = Math.min(250, Math.max(0, deadline - Date.now()));
         const resourceDeadline = Math.max(Date.now() + 1, deadline - finalizationReserveMs);
         const cleanupSteps = [
+          ...(app.lazy.releaseCommandRunner
+            ? [["releaseCommandRunner.close", () => app.lazy.releaseCommandRunner.close()]]
+            : []),
           ["approvalBroker.denyAll", () => approvalBroker.denyAll()],
           ["orchestrator.close", () => orchestrator.close({ deadlineMs: resourceDeadline })],
           ["eventStore.close", () => eventStore.close({ deadlineMs: resourceDeadline })],
@@ -592,6 +648,8 @@ export async function createControlCenter(options = {}) {
             ),
             {
               code: "CONTROL_CENTER_CLOSE_FAILED",
+              retryable: true,
+              phases,
               cleanupErrors: cleanupErrors.map(({ step, code, message }) => ({ step, code, message })),
             },
           );
@@ -599,6 +657,14 @@ export async function createControlCenter(options = {}) {
         }
         closed = true;
         closeFailure = null;
+        closeResult = {
+          schema: "514cc.close-result/v1",
+          closed: true,
+          idempotent: false,
+          retryable: false,
+          phases,
+        };
+        return closeResult;
       })();
       try {
         return await closePromise;

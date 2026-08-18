@@ -25,6 +25,7 @@ test("Kimi immediately handles EventStore rejections and drains them when the pr
     eventStore: {
       emit: async (type) => {
         attempts.push(type);
+        if (type === "prompt.transport") return;
         throw new Error("event store unavailable");
       },
     },

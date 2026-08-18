@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { BUS_TAIL_LIMITS } from "./bus.mjs";
 import { scrub } from "./redaction.mjs";
+import { synthesizeRunSettlement } from "./run-settlement.mjs";
 
 export const MISSION_CONTROL_SCHEMA = "514cc.mission-control.snapshot/v3";
 
@@ -402,6 +403,7 @@ export function projectMissionControl({
   events = [],
   eventsMayBeTruncated = false,
   busDiagnostics = null,
+  evidenceArtifacts = [],
 } = {}) {
   if (!run || typeof run !== "object" || !run.id) {
     throw Object.assign(new Error("run is required for a mission snapshot"), { code: "VALIDATION_FAILED" });
@@ -633,6 +635,18 @@ export function projectMissionControl({
       count: null,
       endpoint: worktreeAvailable ? `/api/runs/${encodeURIComponent(runId)}/diff` : null,
     },
+    ...list(evidenceArtifacts).map((item) => ({
+      id: shortText(item?.id, 80) || stableId("artifact", runId, item?.kind, item?.label),
+      kind: shortText(item?.kind, 24, "handoff"),
+      label: shortText(item?.label, 180, "证据"),
+      availability: shortText(item?.availability, 24, "unavailable"),
+      count: Number.isSafeInteger(item?.count) ? item.count : null,
+      endpoint: item?.endpoint || null,
+      digest: item?.digest || null,
+      generatedAt: timestamp(item?.generatedAt),
+      verifyCommand: shortText(item?.verifyCommand, 160) || null,
+      published: false,
+    })),
   ];
 
   const boundedEvents = orderedByTime(
@@ -790,6 +804,11 @@ export function projectMissionControl({
     connections,
     approvals: boundedApprovals,
     artifacts,
+    settlement: synthesizeRunSettlement({
+      run,
+      artifacts,
+      now: () => asOf || timestamp(run.updatedAt) || timestamp(run.createdAt) || "1970-01-01T00:00:00.000Z",
+    }),
     evidence: {
       status: evidenceStatus,
       eventCount: boundedEvents.length,

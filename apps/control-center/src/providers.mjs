@@ -2032,7 +2032,24 @@ export class ProviderStore {
         candidate.appOrder[app] = candidate.appOrder[app].filter((qid) => qid !== id);
       }
       await this.#commitState(candidate);
-      return { removed: id };
+      let staleReferences = [];
+      let referenceRecheck = { status: "ok" };
+      if (typeof this.referencesForProvider === "function") {
+        try {
+          staleReferences = await this.#references(id, "deletion-recheck");
+          if (staleReferences.length) {
+            referenceRecheck = { status: "race", staleReferences };
+            await this.eventStore?.emit?.("provider.reference_race", {
+              providerId: id,
+              action: "remove",
+              references: staleReferences,
+            }).catch(() => {});
+          }
+        } catch (error) {
+          referenceRecheck = { status: "check_failed", code: error?.code ?? null };
+        }
+      }
+      return { removed: id, staleReferences, referenceRecheck };
     });
   }
 

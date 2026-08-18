@@ -31,8 +31,17 @@ import { collectPulseSnapshot } from "./src/pulse.mjs";
 import { eventForUi } from "./src/event-view.mjs";
 import { auditBusDiagnostics, MISSION_CONTROL_LIMITS, projectMissionControl } from "./src/mission-control.mjs";
 import { collectTeamInbox, INBOX_LIMITS } from "./src/collaboration-inbox.mjs";
+import { collectTeamAttention } from "./src/team-attention.mjs";
 import { inspectRunWorkspace } from "./src/workspace-explorer.mjs";
 import { collectWorkbenchEnvironment, GitActionBroker } from "./src/workbench-environment.mjs";
+import { collectReleaseTruth } from "./src/release-truth.mjs";
+import { collectReleaseRecord, summarizeServerObservedValidation } from "./src/release-record.mjs";
+import { collectOpsMetrics } from "./src/ops-metrics.mjs";
+import { collectProjectBridge } from "./src/project-bridge.mjs";
+import { projectRunReplay } from "./src/run-replay.mjs";
+import { collectRunEvidenceArtifacts } from "./src/run-artifacts.mjs";
+import { collectRunSettlement } from "./src/run-settlement.mjs";
+import { collectFirstRunReadiness } from "./src/first-run-readiness.mjs";
 import { attestRunWorkspace, resolveRunWorkspace } from "./src/run-workspace.mjs";
 import { normalizeRunSources, publicSourceEntries, redactSourcePaths as redactPublicSourcePaths, visualSourceType } from "./src/run-sources.mjs";
 import {
@@ -213,6 +222,101 @@ function projectRouteToTeamMembers(route, team, preferredMemberIds = []) {
     independent: project(route.independent, [selected?.id]),
     candidates: (route.candidates || []).map((candidate) => project(candidate)).filter(Boolean),
   };
+}
+
+function liveRuntimeIdentity() {
+  return {
+    pid: state.pid,
+    generation: state.generation,
+    cwd: state.repoRoot,
+    startedAt: state.startedAt,
+  };
+}
+
+async function collectLiveReleaseTruth({ commandEvidence = null } = {}) {
+  const runtime = liveRuntimeIdentity();
+  const evidence = commandEvidence ?? await state.releaseCommandEvidence.snapshot().catch(() => ({}));
+  return collectReleaseTruth({
+    repoRoot: state.repoRoot,
+    runtime,
+    validationEvidence: summarizeServerObservedValidation(evidence, { runtime }),
+  });
+}
+
+async function collectLiveReadiness({ probeHealth = false } = {}) {
+  const draft = await state.firstRunDraft.load();
+  const health = probeHealth
+    ? await state.healthService.all({ refresh: false }).catch(() => [])
+    : [];
+  const healthMeta = probeHealth && typeof state.healthService.peekMeta === "function"
+    ? state.healthService.peekMeta()
+    : null;
+  const gates = typeof state.remoteGates?.list === "function" ? state.remoteGates.list() : [];
+  return collectFirstRunReadiness({
+    projectBridge: await collectProjectBridge({
+      cwd: state.repoRoot,
+      runtime: { pid: state.pid, generation: state.generation, startedAt: state.startedAt },
+      processes: state.childRegistry.snapshot(),
+      store: state.projectAnchors,
+    }),
+    teams: state.teams.list(),
+    runtimeCatalog: state.runtimeCatalog || [],
+    health: Array.isArray(health) ? health : health?.items || [],
+    healthMeta,
+    releaseTruth: await collectLiveReleaseTruth(),
+    draft,
+    remoteGates: Array.isArray(gates) ? gates : gates?.items || [],
+  });
+}
+
+async function collectLiveReleaseRecord({ releaseTruth = null } = {}) {
+  const commandEvidence = await state.releaseCommandEvidence.snapshot().catch(() => ({}));
+  const runtime = liveRuntimeIdentity();
+  const truth = releaseTruth || await collectLiveReleaseTruth({ commandEvidence });
+  return collectReleaseRecord({
+    repoRoot: state.repoRoot,
+    runtime,
+    releaseTruth: truth,
+    commandEvidence,
+    executeCommands: false,
+  });
+}
+
+async function readRuntimeRoster() {
+  try {
+    return JSON.parse(await readFile(join(state.dataRoot, "roster.json"), "utf8"));
+  } catch {
+    return { agents: {} };
+  }
+}
+
+async function collectLiveTeamInbox(teamId, { signal, limit } = {}) {
+  const team = state.teams.get(teamId);
+  const lifecycleByKey = await state.inboxLifecycle.snapshot().catch(() => ({}));
+  return collectTeamInbox({
+    teamId,
+    team,
+    runs: state.orchestrator.list(),
+    maxRuns: INBOX_LIMITS.maxRuns,
+    maxMessages: Math.min(
+      INBOX_LIMITS.maxMessages,
+      Math.max(1, Number(limit) || INBOX_LIMITS.maxMessages),
+    ),
+    lifecycleByKey,
+    readTail: async (runId, options) => {
+      const run = structuredClone(state.orchestrator.get(runId));
+      const tail = await state.orchestrator.bus.readTail(runId, {
+        maxBytes: MISSION_CONTROL_LIMITS.busBytes,
+        maxMessages: MISSION_CONTROL_LIMITS.busMessages,
+        signal: options?.signal || signal,
+      });
+      return {
+        ...tail,
+        diagnostics: auditBusDiagnostics(run, tail.diagnostics, tail.messages.length),
+      };
+    },
+    signal,
+  });
 }
 
 const RUNTIME_SEAT_SOURCE_ID = "control.models";
@@ -986,6 +1090,19 @@ async function api(request, response, url) {
     // Snapshot before Git/GitHub probes start so the probe processes never list themselves.
     const processes = state.childRegistry.snapshot();
     return await runEventResponses.run(`environment:${requestedRunId || "idle"}`, response, async (signal) => {
+      const runtime = {
+        pid: state.pid,
+        generation: state.generation,
+        cwd: state.repoRoot,
+        startedAt: state.startedAt,
+      };
+      const releaseTruth = await collectLiveReleaseTruth();
+      const projectBridge = await collectProjectBridge({
+        cwd: workspace.path,
+        runtime,
+        processes,
+        store: state.projectAnchors,
+      });
       const environment = await collectWorkbenchEnvironment({
         cwd: workspace.path,
         run,
@@ -993,9 +1110,119 @@ async function api(request, response, url) {
         processes,
         signal,
         workspaceSource: workspace.kind === "worktree" ? "worktree" : run ? "run" : "control-center",
+        releaseTruth,
+        releaseRecord: await collectLiveReleaseRecord({ releaseTruth }).catch((error) => ({
+          schema: "514cc.releaseRecord/v1",
+          verdict: "unknown",
+          publishable: false,
+          autoGit: { add: false, commit: false, push: false },
+          unfinished: [{ id: "release-record", status: "blocked", reason: "发布记录读取失败，不能涂绿" }],
+          nextAction: { id: "release-record", text: "发布记录读取失败，不能涂绿" },
+          error: String(error?.message || "release-record-unavailable").slice(0, 180),
+        })),
+        projectBridge,
+        readiness: await collectLiveReadiness().catch((error) => ({
+          schema: "514cc.first-run-readiness/v1",
+          ready: false,
+          degraded: true,
+          nextAction: { text: "首次就绪读取失败，不能称为已就绪" },
+          steps: [],
+          error: String(error?.message || "readiness-unavailable").slice(0, 180),
+        })),
       });
       return json(response, 200, environment);
     }, { request });
+  }
+  if (request.method === "GET" && pathname === "/api/release-truth") {
+    return json(response, 200, await collectLiveReleaseTruth());
+  }
+  if (request.method === "GET" && pathname === "/api/release-record") {
+    return json(response, 200, await collectLiveReleaseRecord());
+  }
+  if (request.method === "PUT" && pathname === "/api/release-record/commands") {
+    const payload = await body(request);
+    try {
+      const saved = await state.releaseCommandEvidence.save(payload?.commands || payload || {});
+      return json(response, 200, {
+        ...saved,
+        record: await collectLiveReleaseRecord(),
+      });
+    } catch (error) {
+      if (error?.code === "RELEASE_COMMAND_EVIDENCE_INCOMPLETE") {
+        return json(response, 400, { error: error.message, code: error.code });
+      }
+      throw error;
+    }
+  }
+  // server-observed QA runner：命令目录固定在服务端，HTTP 只能选择跑哪些，不能改命令或 provenance。
+  if (request.method === "GET" && pathname === "/api/release-record/runner") {
+    return json(response, 200, state.releaseCommandRunner.snapshot());
+  }
+  if (request.method === "POST" && pathname === "/api/release-record/runner/run") {
+    const payload = await body(request);
+    try {
+      const result = await state.releaseCommandRunner.run({
+        commandIds: payload?.commandIds ?? null,
+        // Client input is only an expectation. The runner always reads server HEAD itself.
+        expectedSourceCommit: typeof payload?.sourceCommit === "string" ? payload.sourceCommit : null,
+      });
+      return json(response, 200, {
+        ...result,
+        record: await collectLiveReleaseRecord(),
+      });
+    } catch (error) {
+      const badRequest = [
+        "RELEASE_RUNNER_INVALID_SELECTION",
+        "RELEASE_RUNNER_UNKNOWN_COMMAND",
+        "RELEASE_RUNNER_DUPLICATE_COMMAND",
+      ];
+      const conflict = [
+        "RELEASE_RUNNER_BUSY",
+        "RELEASE_RUNNER_SOURCE_COMMIT_MISMATCH",
+        "RELEASE_RUNNER_DIRTY_WORKTREE",
+      ];
+      const unavailable = [
+        "RELEASE_RUNNER_SOURCE_COMMIT_UNAVAILABLE",
+        "RELEASE_RUNNER_WORKSPACE_STATE_UNAVAILABLE",
+        "RELEASE_RUNNER_RUNTIME_IDENTITY_UNAVAILABLE",
+        "RELEASE_RUNNER_CLOSED",
+      ];
+      if (badRequest.includes(error?.code) || conflict.includes(error?.code) || unavailable.includes(error?.code)) {
+        const status = badRequest.includes(error.code) ? 400 : conflict.includes(error.code) ? 409 : 503;
+        return json(response, status, {
+          error: error.message,
+          code: error.code,
+          runId: error.runId ?? undefined,
+          sourceCommit: error.sourceCommit ?? undefined,
+          diffDigest: error.diffDigest ?? undefined,
+        });
+      }
+      throw error;
+    }
+  }
+  if (request.method === "GET" && pathname === "/api/readiness") {
+    return json(response, 200, await collectLiveReadiness({ probeHealth: true }));
+  }
+  if (request.method === "POST" && pathname === "/api/readiness/draft") {
+    return json(response, 200, await state.firstRunDraft.save(await body(request)));
+  }
+  if (request.method === "GET" && pathname === "/api/project-bridge") {
+    // cwd query is ignored on purpose: clients cannot submit an arbitrary path.
+    const requestedRunId = String(url.searchParams.get("runId") || "").trim();
+    const run = requestedRunId ? structuredClone(state.orchestrator.get(requestedRunId)) : null;
+    const workspace = run
+      ? await attestRunWorkspace(run)
+      : resolveRunWorkspace(null, { fallbackPath: state.repoRoot });
+    return json(response, 200, await collectProjectBridge({
+      cwd: workspace.path,
+      runtime: {
+        pid: state.pid,
+        generation: state.generation,
+        startedAt: state.startedAt,
+      },
+      processes: state.childRegistry.snapshot(),
+      store: state.projectAnchors,
+    }));
   }
   if (request.method === "POST" && pathname === "/api/workbench/git/plan") {
     const input = await body(request);
@@ -1069,6 +1296,14 @@ async function api(request, response, url) {
     return json(response, 200, { sources: await state.configManager.listSources() });
   }
   if (request.method === "GET" && pathname === "/api/observability/summary") return json(response, 200, await state.observability.summary());
+  if (request.method === "GET" && pathname === "/api/observability/ops") {
+    return json(response, 200, collectOpsMetrics({
+      orchestrator: state.orchestrator,
+      approvalBroker: state.approvalBroker,
+      healthService: state.healthService,
+      now: Date.now(),
+    }));
+  }
   // 能力图谱（codeg 对标 P2）：skills 只读矩阵 + MCP 本地扫描（白名单字段，密钥面不外发）
   if (request.method === "GET" && pathname === "/api/capabilities") return json(response, 200, await state.capabilities.summary());
   // agent skill 启停（LO 可配置面）：负名单落 dataRoot，成员轮提示词按此过滤（真接线非摆设）
@@ -1322,33 +1557,91 @@ async function api(request, response, url) {
   const teamInboxMatch = pathname.match(/^\/api\/teams\/([^/]+)\/inbox$/);
   if (request.method === "GET" && teamInboxMatch) {
     const teamId = decodeURIComponent(teamInboxMatch[1]);
-    const team = state.teams.get(teamId);
     return await runEventResponses.run(`team-inbox:${teamId}`, response, async (signal) => {
-      const result = await collectTeamInbox({
+      return json(response, 200, await collectLiveTeamInbox(teamId, {
+        signal,
+        limit: url.searchParams.get("limit"),
+      }));
+    }, { request });
+  }
+
+  const teamAttentionMatch = pathname.match(/^\/api\/teams\/([^/]+)\/attention$/);
+  if (request.method === "GET" && teamAttentionMatch) {
+    const teamId = decodeURIComponent(teamAttentionMatch[1]);
+    const team = state.teams.get(teamId);
+    return await runEventResponses.run(`team-attention:${teamId}`, response, async (signal) => {
+      const inbox = await collectLiveTeamInbox(teamId, {
+        signal,
+        limit: url.searchParams.get("limit"),
+      });
+      return json(response, 200, collectTeamAttention({
         teamId,
         team,
+        inbox,
         runs: state.orchestrator.list(),
-        maxRuns: INBOX_LIMITS.maxRuns,
-        maxMessages: Math.min(
-          INBOX_LIMITS.maxMessages,
-          Math.max(1, Number(url.searchParams.get("limit")) || INBOX_LIMITS.maxMessages),
-        ),
-        readTail: async (runId, options) => {
-          const run = structuredClone(state.orchestrator.get(runId));
-          const tail = await state.orchestrator.bus.readTail(runId, {
-            maxBytes: MISSION_CONTROL_LIMITS.busBytes,
-            maxMessages: MISSION_CONTROL_LIMITS.busMessages,
-            signal: options?.signal || signal,
-          });
-          return {
-            ...tail,
-            diagnostics: auditBusDiagnostics(run, tail.diagnostics, tail.messages.length),
-          };
-        },
-        signal,
-      });
-      return json(response, 200, result);
+        healthItems: state.healthService.peek(),
+        roster: await readRuntimeRoster(),
+      }));
     }, { request });
+  }
+
+  const teamInboxActionMatch = pathname.match(/^\/api\/teams\/([^/]+)\/inbox\/(answer|acknowledge|fail|expire)$/);
+  if (request.method === "POST" && teamInboxActionMatch) {
+    const teamId = decodeURIComponent(teamInboxActionMatch[1]);
+    const action = teamInboxActionMatch[2];
+    const team = state.teams.get(teamId);
+    const input = await body(request);
+    const runId = String(input?.runId ?? "").trim();
+    const messageId = String(input?.messageId ?? input?.askId ?? "").trim();
+    const run = structuredClone(state.orchestrator.get(runId));
+    if ((run.teamId || "team-514cc") !== team.id) {
+      throw Object.assign(new Error("inbox action must stay inside the selected team"), { code: "VALIDATION_FAILED" });
+    }
+    if (action === "answer") {
+      const text = String(input?.text || "").trim();
+      if (!text) {
+        throw Object.assign(new Error("inbox answer text is required"), { code: "VALIDATION_FAILED" });
+      }
+      await state.orchestrator.bus.append(runId, {
+        id: String(input?.answerId || `inbox-answer:${runId}:${messageId}`),
+        from: "lo",
+        to: String(input?.to || "team"),
+        kind: "answer",
+        text,
+        refs: { answerToAskId: messageId },
+      });
+    }
+    if (action === "acknowledge") {
+      await state.orchestrator.bus.append(runId, {
+        id: String(input?.ackId || `inbox-ack:${runId}:${messageId}`),
+        from: "lo",
+        to: "team",
+        kind: "system",
+        text: "ACK：已确认消息交付，不等于 provider 任务成功",
+        refs: { ackToAskId: messageId },
+      });
+    }
+    const record = await state.inboxLifecycle.apply({
+      runId,
+      messageId,
+      conversationId: input?.conversationId || runId,
+      action,
+      actor: String(input?.actor || "lo"),
+      text: String(input?.text || ""),
+      idempotencyKey: input?.idempotencyKey || null,
+      expectedRevision: input?.expectedRevision ?? null,
+    });
+    await state.eventStore.emit(
+      `inbox.${action}`,
+      { runId, messageId, teamId: team.id, state: record.state, ackMeansProviderSuccess: false },
+      { runId, sensitivity: "internal", agentId: "lo" },
+    ).catch(() => {});
+    return json(response, 200, {
+      schema: "514cc.inbox-lifecycle/v1",
+      teamId: team.id,
+      record,
+      createdRun: false,
+    });
   }
 
   // cc-switch 配置方式迁移：统一供应商档案 + 一键切换 live 配置（切换即备份）；list/live 永不含 apiKey 明文
@@ -1370,7 +1663,9 @@ async function api(request, response, url) {
   }
   if (request.method === "POST" && pathname === "/api/providers/switch") {
     const input = await body(request);
-    return json(response, 200, await state.providers.switchTo(String(input.app ?? ""), String(input.providerId ?? "")));
+    return json(response, 200, await withRuntimeSeatMutation(() => (
+      state.providers.switchTo(String(input.app ?? ""), String(input.providerId ?? ""))
+    )));
   }
   // 配置预览干跑：表单草稿经 applier 原逻辑跑一遍，回显「启用后完整文件」（不落盘；默认密钥掩码，reveal 显式取明文供编辑）
   if (request.method === "POST" && pathname === "/api/providers/preview") {
@@ -1380,7 +1675,9 @@ async function api(request, response, url) {
   // 团队绑定扩展：teamId → 逐 app 应用绑定供应商（部分失败如实回报，不吞）
   if (request.method === "POST" && pathname === "/api/providers/apply-team") {
     const input = await body(request);
-    return json(response, 200, await state.providers.applyTeamBindings(state.teams.get(String(input.teamId ?? "")), { apps: input.apps }));
+    return json(response, 200, await withRuntimeSeatMutation(() => (
+      state.providers.applyTeamBindings(state.teams.get(String(input.teamId ?? "")), { apps: input.apps })
+    )));
   }
   // cc-switch 完全迁移第二波——网络服务面与队列面（literal 路由必须先于 :id 匹配）：
   // 端点测速（speedtest.rs 复刻：并发 GET 热身+计时）
@@ -1577,6 +1874,15 @@ async function api(request, response, url) {
   if (request.method === "GET" && runDiffMatch) {
     const run = state.orchestrator.get(runDiffMatch[1]);
     return json(response, 200, await runDiffForRun(run));
+  }
+  const runSettlementMatch = pathname.match(/^\/api\/runs\/([0-9a-fA-F-]+)\/settlement$/);
+  if (request.method === "GET" && runSettlementMatch) {
+    const run = structuredClone(state.orchestrator.get(runSettlementMatch[1]));
+    const includeDiff = url.searchParams.get("diff") !== "0";
+    return json(response, 200, await collectRunSettlement({
+      run,
+      includeDiff,
+    }));
   }
   if (request.method === "POST" && pathname === "/api/system/clipboard-image") {
     const input = await body(request, MAX_CLIPBOARD_IMAGE_REQUEST_BYTES);
@@ -1777,6 +2083,30 @@ async function api(request, response, url) {
       return json(response, 200, { events: events.map(projectEvent) });
     }, { request });
   }
+  const replayMatch = pathname.match(/^\/api\/runs\/([^/]+)\/replay$/);
+  if (request.method === "GET" && replayMatch) {
+    const runId = decodeURIComponent(replayMatch[1]);
+    return await runEventResponses.run(`replay:${runId}`, response, async (signal) => {
+      const run = structuredClone(state.orchestrator.get(runId));
+      const relatedApprovals = structuredClone(state.approvalBroker.list().filter((item) => item.runId === runId));
+      const [busRead, events] = await Promise.all([
+        state.orchestrator.bus.readTail(runId, {
+          maxBytes: MISSION_CONTROL_LIMITS.busBytes,
+          maxMessages: MISSION_CONTROL_LIMITS.busMessages,
+          signal,
+        }),
+        state.eventStore.listByRun(runId, 500, { signal }),
+      ]);
+      return json(response, 200, projectRunReplay({
+        run,
+        events,
+        busMessages: busRead.messages,
+        approvals: relatedApprovals,
+        eventsMayBeTruncated: events.length === 500,
+        busTruncated: busRead.diagnostics?.truncated?.bytes === true || busRead.diagnostics?.truncated?.messages === true,
+      }));
+    }, { request });
+  }
   const runBusMatch = pathname.match(/^\/api\/runs\/([^/]+)\/bus$/);
   if (request.method === "GET" && runBusMatch) {
     // v3.6 社会模拟编排：拓扑只消费有界尾部；诊断与 Mission Control 使用同一审计语义。
@@ -1829,6 +2159,14 @@ async function api(request, response, url) {
         // The store deliberately reads at most 200. A full window is conservatively marked
         // truncated because proving otherwise would require an unbounded/counting scan.
         eventsMayBeTruncated: events.length === MISSION_CONTROL_LIMITS.events,
+        evidenceArtifacts: collectRunEvidenceArtifacts({
+          run,
+          handoffs: (await state.observability.handoffs({ limit: 80 }).catch(() => [])).map((file) => ({
+            ...file,
+            exists: true,
+          })),
+          deltas: (await state.observability.deltaLedger({ recent: 80 }).catch(() => ({ deltas: [] }))).deltas || [],
+        }),
       }));
     }, { request });
   }
@@ -1861,12 +2199,7 @@ async function api(request, response, url) {
     }
   }
   if (request.method === "GET" && pathname === "/api/roster") {
-    // 运行时 roster：谁在线、持有什么会话（socialLoop 逐 turn 登记；无文件时回空表）
-    try {
-      return json(response, 200, JSON.parse(await readFile(join(state.dataRoot, "roster.json"), "utf8")));
-    } catch {
-      return json(response, 200, { agents: {} });
-    }
+    return json(response, 200, await readRuntimeRoster());
   }
   if (request.method === "GET" && pathname === "/api/agents/models") {
     // 动态模型/推理档位目录：CLI 原生发现（codex debug models / grok models / claude models），

@@ -207,6 +207,15 @@ async function runBrowserQa({ bootstrapUrl, origin, token, outputDir, run, runId
     assert.match(environmentText, /main/);
     assert.match(environmentText, /1 暂存/);
     assert.match(environmentText, /1 个委派/);
+    assert.match(environmentText, /运行态 stale/);
+    assert.match(environmentText, /交付门 blocked/);
+    assert.match(environmentText, /准备交付 partial/);
+    assert.match(environmentText, /首次就绪未齐/);
+    assert.equal(
+      await page.locator('[data-environment-expand="first-run"]').getAttribute("aria-expanded"),
+      "true",
+      "首次就绪必须默认展开，不能藏在首次进入的折叠行里",
+    );
     const sourcesGroup = page.locator("#mission-environment-panel .environment-group").filter({ hasText: "来源" });
     // 默认展开态由面板决定，断言必须对折叠默认不敏感：只在收起时才点开，否则会把已展开的组关掉。
     if (!(await sourcesGroup.evaluate((node) => node.open))) await sourcesGroup.locator("summary").click();

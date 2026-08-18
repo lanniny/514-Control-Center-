@@ -239,6 +239,17 @@ test("hasVisualSource：区分图片与视频，混合附件采用更强的视�
   assert.equal(visualSourceType([{ name: "report.pdf" }]), null);
 });
 
+test("dispatch preview explains cost unknown and never creates a run", async () => {
+  const router = new ModelRouter({ profiles: models.profiles, policy, healthService: health() });
+  const route = await router.preview({ taskType: "coding", prompt: "实现配置事务", permissionMode: "plan" });
+  assert.equal(route.createdRun, false);
+  assert.equal(route.cost.status, "unknown");
+  assert.equal(route.cost.usd, null);
+  assert.equal(route.permissionMode, "plan");
+  assert.equal(route.signals.costStatus, "unknown");
+  assert.equal(typeof route.fallback.extraCalls, "number");
+});
+
 test("multimodal 判据不信客户端直提：预览端点从 sources 推导后删掉原始字段", async () => {
   const server = await readFile(resolve(appRoot, "server.mjs"), "utf8");
   const block = server.slice(server.indexOf('pathname === "/api/router/preview"'));

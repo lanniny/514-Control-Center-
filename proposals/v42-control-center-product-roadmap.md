@@ -4,6 +4,7 @@
 > 日期：2026-08-18
 > 角色：项目经理视角整理
 > 目标：把“协作台继续完善”收敛为可交付、可验证、可运营的产品路线
+> 2026-08-18 复审状态：`IMPLEMENTATION PARTIAL / DELIVERY BLOCKED / LIVE UNVERIFIED`。本状态覆写早先“R0-R3 实现任务已经做完”的笼统口径。
 
 ## 1. 结论先行
 
@@ -13,7 +14,7 @@ Control Center 当前不是缺少页面，而是缺少一条完整且可信的�
 项目识别 -> 派工 -> 执行 -> 协作 -> 干预 -> 证据 -> 恢复 -> 交付/激活
 ```
 
-现有实现已经覆盖了大量能力：多 CLI 团队、运行编排、审批与恢复、Mission Control、Bus/Inbox 只读投影、配置图谱、远程主机、自动化、渠道、Office、市场和治理 hooks。真正影响产品质量的下一步，不是继续增加入口，而是补齐以下四类根节点：
+现有实现已经覆盖了大量能力：多 CLI 团队、运行编排、审批与恢复、Mission Control、可写 Bus/Inbox 生命周期、配置图谱、远程主机、自动化、渠道、Office、市场和治理 hooks。真正影响产品质量的下一步，不是继续增加入口，而是补齐以下四类根节点：
 
 1. **真实性**：中文提示词、运行态、成本、provider 健康和交付状态必须与用户看到的结论一致。
 2. **可追责**：每个派工、回答、审批、恢复和交付都要有稳定身份、因果链和证据。
@@ -24,19 +25,32 @@ Control Center 当前不是缺少页面，而是缺少一条完整且可信的�
 
 | 面 | 当前能力 | 证据状态 | 项目判断 |
 |---|---|---|---|
-| 协作入口 | Workbench、run rail、composer、团队选择、多个 CLI 席位 | 源码、契约和隔离浏览器已有证据 | 主路径可用，但首轮引导和状态解释仍不足 |
-| 编排内核 | Orchestrator、预算、审批、recovery、taskGraph、事件与 bus | 大量单测/集成测通过 | 内核基础扎实，跨源回放和消息生命周期未完成 |
-| 消息收发局 | `514cc.collaboration-inbox/v1`、Ask/Answer 只读投影、`runId + askId` | 12/12 聚焦测试、浏览器验收 | 只能读和跳转，尚不能可靠回答/确认/重试 |
-| Mission Control | 任务、活动、证据、连接、环境信息 | 源码与 UI 契约 | 缺统一 replay/read-model 和稳定项目锚点 |
+| 协作入口 | Workbench、run rail、composer、团队选择、多个 CLI 席位 | 源码、契约、隔离浏览器和四档响应式已有证据 | 本地隔离主路径可用；正式实例未 reload |
+| 编排内核 | Orchestrator、预算、审批、recovery、taskGraph、事件与 bus | 全量 `npm test` 当前通过，精确计数见当轮 handoff | 内核基础扎实；真实 provider 与正式运行态仍未验收 |
+| 消息收发局 | `514cc.collaboration-inbox/v1`、Ask/Answer/ACK、CAS、`runId + askId` | 聚焦测试 + 1440/820/390 定向浏览器验收 | 行内答复与 `expectedRevision` 已接线；多进程写入不是本轮合同 |
+| Mission Control | 任务、活动、证据、连接、环境信息、replay/Artifact/settlement | 源码、单测和 UI 契约 | read model 已接线；正式实例未回读 |
 | 配置与供应商 | 本机/远程图谱、备份、回退、provider 投影 | 契约较完整，远端真机仍有待验项 | 供应商引用跨 Store 竞态仍需独立收口 |
 | 远程能力 | SSH 主机、探测、同步、远程 run、远程图谱 | 主要为契约/mock；真实主机闭环未完成 | 不应对外宣称“远程 agent 已上线” |
-| 治理与交付 | route/stop/mirror、validate、qa:delivery | `validate` 通过；strict 因 55 个未跟踪源码/测试失败 | 交付与治理状态未闭环 |
+| 治理与交付 | route/stop/mirror、validate、qa:delivery、releaseRecord | `validate` 13 项通过；strict 因 31 个未声明源码/测试失败 | 交付明确 `blocked`；HTTP 自述命令证据不能开启工程绿灯 |
 | 运行态 | 曾有真实 provider 隔离闭环 | 历史 handoff 有证据，当前实例未作本轮激活读回 | 必须区分历史事实、当前进程和新源码 |
 | 版本 | 仓库真源仍为 v3.5.0 | `rules.md`/`module.yaml` | v4 功能已落地但未完成正式发布决策 |
 
 ### 2.1 必须升为 P0 的历史发现
 
-2026-08-16 的真实 provider 隔离闭环记录报告：中文提示词到达 CLI 时变成 `?`，ASCII 正常。这是历史证据，不代表本轮已经重新复现，但它足以阻止“协作台中文主路径已可靠”的判断。应先做 Windows/各 CLI 的 Unicode 往返契约，再继续扩展协作功能。
+2026-08-16 的真实 provider 隔离闭环记录报告：中文提示词到达 CLI 时变成 `?`，ASCII 正常。这是历史证据，不代表本轮已经重新复现，但它足以阻止“协作台中文主路径已可靠”的判断。本轮已补 `promptTransport/v1`、本地原生子进程 fixture、`.ps1` fail-closed 与审计写入超时；尚缺真实启用 provider 的接收回读和真实 SSH echo，因此 R0-01 仍是 `partial`，不是完成。
+
+### 2.2 2026-08-18 独立复审裁决
+
+| 波次 | 源码/契约 | 本地证据 | 交付/运行态 | 裁决 |
+|---|---|---|---|---|
+| R0-01 | 已接 `promptTransport/v1`、审计 fail-closed 与超时 | 本地 argv/stdin CJK fixture 通过 | 无真实 provider 回读、无真实 SSH echo | `partial` |
+| R0-02 | ownership manifest 与 CI strict 已接线 | strict 如实报告 31 个未声明源码/测试 | 未获 Git 暂存授权 | `blocked` |
+| R0-03 | releaseTruth、workflow 终态和环境舱已接线 | workflow 已是 `superseded` | 正式实例未 reload/readback | `partial` |
+| R0-04 | provider re-check、关闭阶段日志、远端 TERM/KILL 回执等待已接线；`pkill` 失败不再被 `|| true` 抹平 | 故障注入、回执延迟/失败与关闭回归通过 | 未做真实 SSH 进程树确认；超时仍不能强制 abort 任意第三方 Promise | `partial` |
+| R1 | 项目桥、首次就绪、预演、replay、Artifact 已接线；readiness 拒绝旧 evidence 与 stale health | 单测 + 环境舱浏览器 QA 通过 | 正式实例未回读 | `source-complete / live-partial` |
+| R2 | Ask/Answer/ACK、attention、social opt-in 已接线 | 聚焦测试 + Inbox 定向浏览器 QA 通过 | 正式实例未回读 | `source-complete / live-partial` |
+| R3 | releaseRecord、settlement、ops metrics 已接线；runner 已收紧为服务端 HEAD、干净工作树摘要与生命周期所有权 | 全量测试、validate、四视口浏览器 QA 通过 | strict 红；runner 会拒绝当前脏工作树，正式实例未执行/未 reload | `partial / blocked` |
+| R4 | 按进入条件暂缓 | 无 | 无授权外部系统 | `deferred` |
 
 ## 3. 产品北极星与边界
 
@@ -95,7 +109,7 @@ Control Center 当前不是缺少页面，而是缺少一条完整且可信的�
 
 ### R0-02 交付集合与 ownership manifest
 
-**问题**：`qa:delivery --strict` 仍发现 55 个未跟踪源码/测试；物理测试能执行，不代表提交和 CI 会包含它们。
+**问题**：`qa:delivery --strict` 当前仍发现 31 个未声明源码/测试；物理测试能执行，不代表提交和 CI 会包含它们。
 
 **交付**：
 
@@ -109,7 +123,7 @@ Control Center 当前不是缺少页面，而是缺少一条完整且可信的�
 
 ### R0-03 运行态、版本和 workflow 终态对账
 
-**问题**：仓库 v3.5.0 与已落地 v4 波次不一致；正式进程、源码 generation、workflow packet 可能互相不一致。`.workflow/ultracode/collab-console-review-20260815/state.json` 仍是 `executing`，packet 还有 `in_progress/pending`，verification 为 `pending`。
+**问题**：仓库 v3.5.0 与已落地 v4 波次不一致；正式进程、源码 generation、验证和 Git 交付集合仍可能互相不一致。`.workflow/ultracode/collab-console-review-20260815/state.json` 已收为 `superseded`，但旧路线图与 handoff 一度仍引用 `executing/pending`，说明文档本身也必须进入一致性检查。
 
 **交付**：
 
@@ -228,6 +242,18 @@ ask -> delivered -> answered -> acknowledged
 - 未完成项明确 `partial/blocked`；
 - 不自动 commit/push。
 
+**证据信任边界**：`PUT /api/release-record/commands` 只接受操作者申报，必须标为 `operator-attested`，不能单独把工程门变成 `ready`。只有服务端实际观测、同时绑定当前运行实例（PID/startedAt/generation）、当前提交和干净工作树摘要，并保留退出码/耗时的 `server-observed` 证据才可作为独立证据；同提交的旧进程证据也不能复用为“当轮验证”。
+
+受控 runner 位于 `apps/control-center/src/release-command-runner.mjs`，经 `GET/POST /api/release-record/runner*` 暴露。命令目录固定、无 shell；HTTP 的 `sourceCommit` 只作为期望值，服务端始终独立读取 HEAD；重复/空/未知命令选择在执行前拒绝；起始工作树非 clean、run 期间 HEAD、diff 摘要或运行实例变化均 fail-closed；关闭会取消活动子进程，活动 runner 会阻止 runtime reload。证据只能经 `saveObserved` 写入。四类当前实例证据全部通过后，服务端才聚合为 live `validationEvidence` 并交给 `releaseTruth`；旧的无工作树锚、无 runtime 锚或不同实例 evidence 均不能开启工程门。同一 runtime identity + commit + diff digest 下允许不同 `runId` 增量补齐四类证据；任一锚变化即失效。该 runner 尚未在正式实例上对不可变提交执行过，R3-01 仍是 `partial`。
+
+**发布 runbook（当前缺口也写进流程）**：
+
+1. LO 明确授权 Git 暂存与提交范围，关闭 31 个未声明成员并形成不可变提交；
+2. 从该提交的干净 checkout 启动或 reload 正式实例，先读回 PID/cwd/generation/sourceCommit；
+3. 对同一 sourceCommit 由受控服务端 runner 运行 validate、聚焦测试、全量测试与浏览器 QA；
+4. 回读 `server-observed` 行、diff digest 与 runtime 一致性，不能用 HTTP 客户端自述替代；
+5. 只有 strict、独立命令证据、运行态对账和 formal-release 决策同时满足时，才允许 `publishable=true`。
+
 ### R3-02 Worktree / Diff / 结算中心
 
 把现有 worktree、git plan/execute、run diff、artifact 和恢复状态统一成“准备交付”流程。系统只生成 plan、差异和风险，不自动 merge；远程 run 继续显示 `remote-unsupported` 等真实边界。
@@ -296,23 +322,26 @@ R0-01 Unicode 契约
 
 原因：先修“用户输入是否被正确传输”和“我们是否真的交付/激活”，再做协作体验；否则新的 Inbox、回放和状态卡只会把错误事实呈现得更漂亮。
 
-## 14. 需要 LO 拍板的决策
+## 14. 需要 LO 拍板或授权的决策
 
-1. 是否批准把 Unicode/中文传输问题列为当前唯一产品 P0，并优先于 UI 新功能？
-2. v42 的 release scope 是否只收 R0，还是同时纳入 R1 的 anchor/Doctor？
-3. 是否接受先把 Inbox 做成只读稳定版，再单独批准 R2 的可写 ACK 生命周期？
-4. 版本真源是否从 v3.5.0 升格到新的正式版本，还是继续以“未发布波次”维护？
-5. 远程 agent 是否进入本季度目标，还是维持能力已实现、真实验收待授权的状态？
+1. **Git 交付授权**：是否批准按显式 manifest 暂存 R0-R3 的 31 个未声明源码/测试；未授权前保持 blocked。
+2. **真实 provider 验收**：是否允许对每个启用席位做一次低成本中文/ASCII 接收回读；本轮建议批准后再宣称 R0-01 完成。
+3. **真实 SSH 验收**：是否提供一台已授权主机执行非付费 UTF-8 echo 与进程树 TERM/KILL readback；未授权前远程保持 `live-unverified`。
+4. **正式实例激活**：何时允许 reload 正式 Control Center；本轮不主动执行。
+5. **版本真源**：继续维持 v3.5.0 未发布波次，还是在上述四门闭环后另开正式版本议题；本轮明确不建议现在升格。
+6. **服务端证据 runner**：已实现并加固（`src/release-command-runner.mjs` + `/api/release-record/runner*`）；必须在 Git 闭包形成不可变提交、正式实例从该提交 reload 后执行，当前脏工作树会被明确拒绝。
 
 ## 15. 证据锚点
 
 - `apps/control-center/DESIGN-NOTES.md:40-47`：协作台主路径与既有 roadmap；`DESIGN-NOTES.md:147-157`：socialLoop 与 ask/answer 等待语义仍有历史债。
-- `.ai-shared/context.md:104-116`：当前交付、运行态、版本和安全风险。
-- `.ai-shared/decisions.md:3184-3241`：交付闸、Bridge Doctor、回放中心、Inbox lifecycle 和 CCB 适配边界。
+- `.ai-shared/context.md` 的 2026-08-18 活跃波次与当前风险：当前交付、运行态、版本和安全边界。
+- `.ai-shared/decisions.md` 的 `D-2026-08-18-002` 至 `D-2026-08-18-011`：R0-R3 决策、独立复审纠错与 DELTA。
 - `.ai-shared/handoff/codex-to-claude__comprehensive-console-review__20260817-1645.md`：交付、shutdown、运行态和产品头脑风暴。
 - `.ai-shared/handoff/kimi-to-claude__shutdown-chain-deadline__20260816-1137.md:100-110`：真实 provider 闭环及中文提示词乱码历史证据。
-- `.workflow/ultracode/collab-console-review-20260815/state.json:6-36`：workflow packet 仍悬挂在 executing/pending。
+- `.workflow/ultracode/collab-console-review-20260815/state.json`：workflow 与 packet 已统一收为 `superseded`。
+- `.ai-shared/handoff/codex-to-claude__v42-pm-delivery-review-r2__20260818-2002.md`：本轮四节复审、修复证据与剩余发布阻塞。
+- `.ai-shared/handoff/codex-to-claude__v42-r301-runner-r2__20260818-2147.md`：server-observed runner 独立反例审查、加固与验证。
 
 ## 16. 当前状态
 
-`DRAFT / NEEDS LO DECISION`。本文件是项目经理整理结果，不自动改变已采纳决策，不代表任何尚未验证的能力已发布或已激活。
+`IMPLEMENTATION PARTIAL / DELIVERY BLOCKED / LIVE UNVERIFIED`。本文件是项目经理与独立复审后的当前台账，不自动改变 Git、正式实例或外部系统；任何尚未完成真实 readback 的能力都不得描述为已发布或已激活。

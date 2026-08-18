@@ -11,12 +11,24 @@ import { attestRunWorkspace } from "./run-workspace.mjs";
 import { normalizeRunSources, promptWithRunSources, visualSourceType } from "./run-sources.mjs";
 import { withManagedClipboardSourceRegistration } from "./clipboard-lifecycle.mjs";
 import { isAbnormalProviderTurnStop } from "./provider-turn-outcome.mjs";
+import { isPromptTransportError } from "./prompt-transport.mjs";
+import {
+  classifyAgentRoute,
+  projectSocialContract,
+  resolveOrchestrationMode,
+  socialContractOf,
+} from "./social-contract.mjs";
 
 export { normalizeRunSources, promptWithRunSources } from "./run-sources.mjs";
 
 const execFileAsync = promisify(execFile);
 
 const TERMINAL = new Set(["succeeded", "failed", "cancelled"]);
+
+function markPromptTransportFailure(run, error) {
+  if (!isPromptTransportError(error)) return;
+  run.failureClass = "provider_error";
+}
 const MAX_REQUESTED_AGENTS = 4;
 // social 协作：显式 @N 个成员的闭环 = N+1 步（各回一句 + 主脑汇总），另留该余量给 agent 间
 // 自主往复（追问/补强/复核），避免一次多 agent 协作被"单交互自主步骤"闸在闭环边界截断。
@@ -1066,6 +1078,7 @@ export class Orchestrator {
 
   requiresRecovery(run, error = null) {
     if (error?.code === "RECOVERY_REQUIRED") return true;
+    if (isPromptTransportError(error)) return false;
     if (error?.nativeTurnSettled === true) return false;
     return Boolean(run.resumeClaim)
       || Boolean((run.resumeQueue || []).length)
@@ -1190,6 +1203,9 @@ export class Orchestrator {
         remote,
       }));
       this.remoteAdapters.set(key, pending);
+      void pending.catch(() => {
+        if (this.remoteAdapters.get(key) === pending) this.remoteAdapters.delete(key);
+      });
     }
     return pending;
   }
@@ -1841,7 +1857,7 @@ export class Orchestrator {
         eligibilityReason: coordinatorMember.eligibilityReason || null,
       });
     }
-    const orchestrationMode = input.orchestrationMode === "pipeline" ? "pipeline" : "social";
+    const orchestrationMode = resolveOrchestrationMode(input);
     if (orchestrationMode !== "social" && requestedAgentIds.length) {
       throw Object.assign(new Error("requestedAgentIds is only supported by social orchestration"), { code: "VALIDATION_FAILED" });
     }
@@ -1957,8 +1973,7 @@ export class Orchestrator {
       await this.remoteRunner.assertRunnable(normalized.hostId, normalized.path);
       sessionRemote = normalized;
     }
-    // v3.6 社会模拟编排：social 为默认内置模式（LO 2026-07-19，无需显式开启）；
-    // pipeline 为可选旧拓扑（/pipeline 前缀或 orchestrationMode:"pipeline" 显式调用）。
+    // v42 R2-03：pipeline 为默认；socialLoop 必须显式 opt-in（orchestrationMode:"social" 或 /social）。
     // startAgentId=「从谁开始」，缺省团队 leader——主脑不再是强制入口（白名单=团队成员）
     // /model 会话级模型覆盖：优先 CLI 原生动态目录（新模型即日出可用），
     // 发现失败回退静态 modelOptions；Adapter 明确不支持时在 spawn 前拒绝。
@@ -2033,6 +2048,13 @@ export class Orchestrator {
         })))
       : [];
     const maxStepsPerInteraction = Math.max(minimumRounds, Math.min(explicitSteps || effectiveDefault, effectiveCap));
+    const maxBudgetUsdPerTurn = Math.max(0.05, Math.min(Number(input.maxBudgetUsdPerTurn) || 0.75, Number(this.policy.limits.maxBudgetUsdPerTurn) || 2));
+    const socialContract = projectSocialContract({
+      orchestrationMode,
+      maxRounds: maxStepsPerInteraction,
+      delegationDepthLimit,
+      maxBudgetUsdPerTurn,
+    });
     const run = {
       id: runId,
       status: "queued",
@@ -2084,6 +2106,7 @@ export class Orchestrator {
       teamMcp: team ? [...(team.mcp ?? [])] : null, // 团队 MCP 声明快照（隔离区过滤后注入，不假装服务器还在）
       coordinatorId,
       orchestrationMode,
+      socialContract,
       startAgentId,
       executionOwnerId,
       requestedAgentIds,
@@ -2096,7 +2119,7 @@ export class Orchestrator {
       collaborationMode: input.collaborationMode === "deep" ? "deep" : "standard",
       permissionMode: requestedPermissionMode,
       delegationDepthLimit, // v4.0：委托深度限制（codeg DelegationBroker 对标）
-      maxBudgetUsdPerTurn: Math.max(0.05, Math.min(Number(input.maxBudgetUsdPerTurn) || 0.75, Number(this.policy.limits.maxBudgetUsdPerTurn) || 2)),
+      maxBudgetUsdPerTurn,
       buildApproval: requestedPermissionMode === "build" && input.execute === true
         ? { status: "pending", policySha256: this.policySha256(), actionSha256: null, approvedAt: null }
         : null,
@@ -2202,9 +2225,10 @@ export class Orchestrator {
     } catch (error) {
       if (run.status === "cancelled" || run.status === "interrupted" || run.buildApproval?.status === "withdrawn") return;
       run.status = "failed";
+      markPromptTransportFailure(run, error);
       run.error = error.message;
       await this.save(run);
-      await this.emitEvent(run, "run.failed", { code: error.code || null, message: error.message }, { runId: run.id });
+      await this.emitEvent(run, "run.failed", { code: error.code || null, message: error.message, failureClass: run.failureClass || null }, { runId: run.id });
     }
   }
 
@@ -2751,6 +2775,7 @@ export class Orchestrator {
           },
           { runId: run.id, sessionId: run.sessions[agentId] || null, agentId },
         );
+        run.adapterFallbackCount = (Number(run.adapterFallbackCount) || 0) + 1;
         this.assertLifecycleOwner(run, controller);
         this.assertRemoteDispatchable(run);
         try {
@@ -3033,6 +3058,10 @@ export class Orchestrator {
   }
 
   async appendBus(run, message) {
+    const recipient = String(message?.to ?? "").trim();
+    if (!recipient) {
+      throw Object.assign(new Error("bus message requires a recipient"), { code: "SOCIAL_RECIPIENT_REQUIRED" });
+    }
     if (!run.busExpectedAt) {
       run.busExpectedAt = new Date().toISOString();
       await this.save(run);
@@ -3205,6 +3234,7 @@ export class Orchestrator {
         run.status = recoveryBlocked
           ? "recovery_required"
           : controller.signal.aborted || error.code === "ABORTED" ? "cancelled" : "failed";
+        markPromptTransportFailure(run, error);
         run.error = error.message;
         if (recoveryBlocked) {
           // 分级恢复文案：interrupt 已获 provider 确认时"可能有活跃工作占用会话"不再成立，
@@ -3218,6 +3248,7 @@ export class Orchestrator {
           status: run.status,
           code: error.code || null,
           message: error.message,
+          failureClass: run.failureClass || null,
         }, { runId: run.id });
       } else {
         run.auditErrors = [...(run.auditErrors || []), { type: "execute.superseded", message: error.message, at: new Date().toISOString() }].slice(-20);
@@ -3580,9 +3611,14 @@ ${rosterLine}
             hops = (pingPong.get(pairKey) ?? 0) + 1;
             pingPong.set(pairKey, hops);
             delegationContext = this.#delegationContext(run, sourceAttemptId);
-            const delegationDepthLimit = Math.max(1, Math.min(8, Number(run.delegationDepthLimit) || 4));
-            depthLimitReached = delegationContext.depth > delegationDepthLimit;
-            routeDisposition = hops > 2 || depthLimitReached ? "dropped" : "queued";
+            const decision = classifyAgentRoute({
+              to: directive.to,
+              hops,
+              depth: delegationContext.depth,
+              contract: socialContractOf(run),
+            });
+            depthLimitReached = decision.reason === "DELEGATION_DEPTH_LIMIT";
+            routeDisposition = decision.disposition === "queued" ? "queued" : "dropped";
           }
         }
         const routedMessage = await this.appendBus(run, {
@@ -3624,9 +3660,9 @@ ${rosterLine}
               text: `${next.to} → ${directive.to} 达到委派深度上限 ${Math.max(1, Math.min(8, Number(run.delegationDepthLimit) || 4))}，本条路由已拒绝`,
             });
           }
-          if (members.includes(directive.to) && hops > 2) {
+          if (members.includes(directive.to) && hops > Number(socialContractOf(run).pingPongLimit || 2)) {
           // 同对往返超限：指令丢弃 + 系统注记（不补队——否则 leader 的同类输出会自我续队）
-            await this.appendBus(run, { from: "system", to: coordinatorId, kind: "system", text: `${next.to} 与 ${directive.to} 的往返已超 2 轮，本条路由被丢弃，移交 leader 收敛` });
+            await this.appendBus(run, { from: "system", to: coordinatorId, kind: "system", text: `${next.to} 与 ${directive.to} 的往返已超 ${socialContractOf(run).pingPongLimit || 2} 轮，本条路由被丢弃，移交 leader 收敛` });
           }
           continue;
         }

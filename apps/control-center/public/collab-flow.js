@@ -13,6 +13,7 @@
  *
  * 数据源全部是既有真实端点：/api/teams /api/runs /api/health
  *   /api/observability/delta /api/observability/handoffs /api/observability/routegate
+ *   /api/teams/:id/attention（队列/在岗/Inbox 同一 read model）
  * 消息收发局复用 run bus 的有界只读投影；任何端点失败只做区块级降级，不拖垮整页。
  */
 import { API, request } from "./api.js";
@@ -30,6 +31,7 @@ const TEAM_KEY = "514cc-selected-team";
 const COLLAB_SOURCE_NAMES = Object.freeze(["teams", "runs", "health", "delta", "handoffs", "routegate"]);
 let refreshVersion = 0;
 let refreshController = null;
+const attentionSeqByTeam = new Map();
 
 export function buildCollabLoadResult(settled = [], data = null, details = {}) {
   // settled 顺序可能不是全集（如 refreshCollabFlow 的快源轨道不含 health），
@@ -114,11 +116,17 @@ export async function refreshCollabFlow({ teamId = selectedTeamId() } = {}) {
   const team = pickTeam(data.teams, teamId);
   const teamRuns = team ? runsForTeam(team, data.runs) : [];
   const inboxSettled = team
-    ? await Promise.allSettled([withTimeout(request(API.teamInbox(team.id), { signal: controller.signal }), "inbox")])
+    ? await Promise.allSettled([withTimeout(request(API.teamAttention(team.id), { signal: controller.signal }), "attention")])
     : [];
   if (version !== refreshVersion) return buildCollabLoadResult([], null, { stale: true });
   const inboxResult = inboxSettled[0];
-  data.inbox = inboxResult?.status === "fulfilled" ? inboxResult.value : null;
+  const attention = inboxResult?.status === "fulfilled" ? inboxResult.value : null;
+  const attentionSeq = Number(attention?.fetchSeq);
+  const previousSeq = attentionSeqByTeam.get(team?.id) || 0;
+  const attentionFresh = !attention || !Number.isFinite(attentionSeq) || attentionSeq >= previousSeq;
+  if (attentionFresh && Number.isFinite(attentionSeq) && team?.id) attentionSeqByTeam.set(team.id, attentionSeq);
+  data.attention = attentionFresh ? attention : null;
+  data.inbox = data.attention?.inbox || null;
   if (inboxResult?.status === "rejected") data.failed += 1;
   const buildPanel = () => team ? buildTeamPanelData({
     team,
@@ -134,7 +142,7 @@ export async function refreshCollabFlow({ teamId = selectedTeamId() } = {}) {
   renderDeltaMini(roots.delta, data.delta);
   renderHeatmap(roots.heatmap, buildPanel(), team, teamRuns);
   renderRouting(roots.routing, data);
-  renderInbox(roots.inbox, data.inbox, inboxResult?.status === "rejected" ? inboxResult.reason : null);
+  renderInbox(roots.inbox, data.attention || data.inbox, inboxResult?.status === "rejected" ? inboxResult.reason : null);
 
   // 健康补载：只在该次刷新仍是最新时才重算 panel，覆盖健康相关区块
   void healthTrack.then((health) => {
@@ -148,7 +156,7 @@ export async function refreshCollabFlow({ teamId = selectedTeamId() } = {}) {
   });
 
   const allSettled = inboxSettled.length ? [...settled, ...inboxSettled] : settled;
-  const sourceNames = inboxSettled.length ? [...FAST_SOURCES, "inbox"] : FAST_SOURCES;
+  const sourceNames = inboxSettled.length ? [...FAST_SOURCES, "attention"] : FAST_SOURCES;
   return buildCollabLoadResult(allSettled, data, { teamId: team?.id ?? null, failed: data.failed, sourceNames });
 }
 
@@ -190,6 +198,24 @@ function renderStarmap(panel) {
 
 // ─── 英雄统计 ────────────────────────────────────────────────
 
+export function buildAttentionHeroStat(attention = null) {
+  const counts = attention?.counts;
+  if (!counts || !Number.isFinite(counts.activeSeats)) {
+    return { value: "—", sub: "注意力数据未知", known: false };
+  }
+  const queueDepth = Number.isFinite(counts.queueDepth) ? counts.queueDepth : null;
+  const pendingAsks = Number.isFinite(counts.pendingAskCount) ? counts.pendingAskCount : null;
+  let sub = "队列与待答数据未知";
+  if (queueDepth != null && pendingAsks != null) {
+    sub = queueDepth > 0
+      ? `队列 ${queueDepth} · 待答 ${pendingAsks}`
+      : pendingAsks > 0
+        ? `待 LO 回答 ${pendingAsks}`
+        : "当前无执行中任务";
+  }
+  return { value: counts.activeSeats, sub, known: true };
+}
+
 function renderHero(root, data, panel, team) {
   if (!root) return;
   if (!team || !panel) {
@@ -198,8 +224,7 @@ function renderHero(root, data, panel, team) {
     return;
   }
   const agents = panel.agents || [];
-  const busy = agents.filter((a) => a.status === "busy").length;
-  const alive = agents.filter((a) => ["busy", "ready"].includes(a.status)).length;
+  const attentionStat = buildAttentionHeroStat(data.attention);
   const todayStart = new Date().setHours(0, 0, 0, 0);
   const handoffsToday = data.handoffs.filter((h) => Date.parse(h?.modifiedAt || 0) >= todayStart).length;
   const byScore = data.delta?.byScore || {};
@@ -208,7 +233,7 @@ function renderHero(root, data, panel, team) {
 
   const stats = [
     { icon: "users", value: agents.length, label: "协作席位", sub: escapeHtml(team.name || "未选择团队") },
-    { icon: "activity", value: alive, label: "活跃席位", sub: busy ? `${busy} 个执行中` : "当前无活跃任务" },
+    { icon: "activity", value: attentionStat.value, label: "执行中席位", sub: attentionStat.sub },
     { icon: "send", value: handoffsToday, label: "全局今日交接", sub: `累计 ${data.handoffs.length} 份 handoff` },
     { icon: "zap", value: avgDelta, label: "全局平均 DELTA", sub: `共 ${data.delta?.total ?? 0} 条账本` },
   ];
@@ -458,11 +483,17 @@ function renderInbox(root, payload, error = null) {
     root.innerHTML = stateCard("inbox", "暂无消息收发局数据", "团队就绪后会从关联 run 的有界消息尾部载入");
     return;
   }
-  const messages = Array.isArray(payload.messages) ? payload.messages : [];
-  const pending = Array.isArray(payload.pendingAsks) ? payload.pendingAsks : messages.filter((item) => item.needsOperator);
-  const answers = Array.isArray(payload.recentAnswers) ? payload.recentAnswers : messages.filter((item) => item.kind === "answer");
-  const blocked = Array.isArray(payload.blockedRuns) ? payload.blockedRuns : [];
-  const diagnostics = payload.diagnostics || {};
+  const inbox = payload?.inbox && payload.schema === "514cc.team-attention/v1" ? payload.inbox : payload;
+  const counts = payload?.schema === "514cc.team-attention/v1" ? payload.counts : null;
+  const messages = Array.isArray(inbox.messages) ? inbox.messages : [];
+  const pending = counts
+    ? { length: counts.pendingAskCount }
+    : (Array.isArray(inbox.pendingAsks) ? inbox.pendingAsks : messages.filter((item) => item.needsOperator));
+  const answers = Array.isArray(inbox.recentAnswers) ? inbox.recentAnswers : messages.filter((item) => item.kind === "answer");
+  const blocked = counts
+    ? { length: counts.blockedCount }
+    : (Array.isArray(inbox.blockedRuns) ? inbox.blockedRuns : []);
+  const diagnostics = inbox.diagnostics || payload.diagnostics || {};
   const partial = diagnostics.status === "partial";
   setInboxStatus(
     root,
@@ -477,7 +508,7 @@ function renderInbox(root, payload, error = null) {
     { icon: "triangle-alert", value: blocked.length, label: "需要关注的任务" },
   ];
   const kindLabel = { ask: "Ask", answer: "Answer", decide: "决策", steer: "插话", system: "系统" };
-  const rows = messages.slice(0, 8).map((message) => `
+  const rows = messages.slice(0, 8).map((message, messageIndex) => `
     <article class="team-inbox-row${message.needsOperator ? " is-actionable" : ""}">
       <div class="team-inbox-row-head">
         <span class="cf-chip ${message.needsOperator ? "is-primary" : "is-muted"}">${kindLabel[message.kind] || "消息"}</span>
@@ -487,19 +518,90 @@ function renderInbox(root, payload, error = null) {
       <p class="team-inbox-text">${escapeHtml(message.text)}</p>
       <div class="team-inbox-row-foot">
         <span class="team-inbox-run-title">${escapeHtml(truncate(message.runTitle || message.runId, 54))}</span>
+        ${message.lifecycle ? `<span class="cf-chip is-muted">${escapeHtml(message.lifecycle)}</span>` : ""}
+        ${message.kind === "ask" && message.lifecycle === "answered"
+          ? `<button type="button" class="button quiet" data-inbox-action="acknowledge" data-run-id="${escapeHtml(message.runId)}" data-message-id="${escapeHtml(message.id)}" data-revision="${escapeHtml(message.lifecycleRevision ?? "")}" title="ACK 只确认消息交付">确认收到</button>`
+          : ""}
         <button type="button" class="button quiet team-inbox-open" data-run-select="${escapeHtml(message.runId)}" title="打开对应任务">
           ${lucideIcon("arrow-up-right", "icon lucide")}打开任务
         </button>
       </div>
+      ${message.kind === "ask" && message.needsOperator
+        ? `<form class="team-inbox-answer-form" data-inbox-answer-form data-run-id="${escapeHtml(message.runId)}" data-message-id="${escapeHtml(message.id)}" data-revision="${escapeHtml(message.lifecycleRevision ?? "")}">
+            <label class="sr-only" for="team-inbox-answer-${messageIndex}">回复 ${escapeHtml(message.from)}</label>
+            <input id="team-inbox-answer-${messageIndex}" name="answer" maxlength="320" autocomplete="off" placeholder="输入答复" required />
+            <button type="submit" class="icon-button" title="写入答复，不触发 provider" aria-label="发送答复">${lucideIcon("send", "icon lucide")}</button>
+            <span class="team-inbox-answer-status" aria-live="polite"></span>
+          </form>`
+        : ""}
     </article>`).join("");
   root.innerHTML = `
-    <div class="team-inbox" data-inbox-schema="${escapeHtml(payload.schema || "")}">
+    <div class="team-inbox" data-inbox-schema="${escapeHtml(inbox.schema || payload.schema || "")}">
       <div class="team-inbox-summary">
         ${summary.map((item) => `<div class="team-inbox-stat"><span class="team-inbox-stat-icon">${lucideIcon(item.icon, "icon lucide")}</span><strong class="num">${item.value}</strong><span>${item.label}</span></div>`).join("")}
       </div>
       ${rows ? `<div class="team-inbox-list">${rows}</div>` : `<div class="cf-flow-note">当前团队还没有可展示的 Ask、答复或治理消息。</div>`}
       ${partial ? `<div class="team-inbox-diagnostic" role="status">${lucideIcon("triangle-alert", "icon lucide")}部分 run 读取失败，以上内容不是完整历史。</div>` : ""}
     </div>`;
+  root.querySelectorAll("[data-inbox-action]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const action = button.dataset.inboxAction;
+      const teamId = payload.team?.id;
+      if (!teamId) return;
+      try {
+        await request(API.teamInboxAction(teamId, action), {
+          method: "POST",
+          body: {
+            runId: button.dataset.runId,
+            messageId: button.dataset.messageId,
+            text: "",
+            idempotencyKey: `${action}:${button.dataset.runId}:${button.dataset.messageId}`,
+            expectedRevision: button.dataset.revision === "" ? null : Number(button.dataset.revision),
+          },
+        });
+        refreshCollabFlow({ teamId });
+      } catch (error) {
+        setInboxStatus(root, error.message || "Inbox 写入失败", "error");
+      }
+    });
+  });
+  root.querySelectorAll("[data-inbox-answer-form]").forEach((form) => {
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const teamId = payload.team?.id;
+      const input = form.elements.namedItem("answer");
+      const submit = form.querySelector('button[type="submit"]');
+      const status = form.querySelector(".team-inbox-answer-status");
+      const text = String(input?.value || "").trim();
+      if (!teamId || !text) {
+        input?.focus();
+        return;
+      }
+      form.setAttribute("aria-busy", "true");
+      if (submit) submit.disabled = true;
+      if (status) status.textContent = "发送中";
+      try {
+        await request(API.teamInboxAction(teamId, "answer"), {
+          method: "POST",
+          body: {
+            runId: form.dataset.runId,
+            messageId: form.dataset.messageId,
+            text,
+            idempotencyKey: `answer:${form.dataset.runId}:${form.dataset.messageId}`,
+            expectedRevision: form.dataset.revision === "" ? null : Number(form.dataset.revision),
+          },
+        });
+        if (status) status.textContent = "已写入";
+        await refreshCollabFlow({ teamId });
+      } catch (error) {
+        if (status) status.textContent = error.message || "答复写入失败";
+        form.removeAttribute("aria-busy");
+        if (submit) submit.disabled = false;
+      }
+    });
+  });
 }
 
 function setInboxStatus(root, text, tone = "neutral") {

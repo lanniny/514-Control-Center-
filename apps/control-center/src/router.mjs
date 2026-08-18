@@ -32,6 +32,48 @@ function constrainedProviders(rule) {
   return Array.isArray(ids) ? new Set(ids) : null;
 }
 
+function previewCost(profile) {
+  const usd = Number(profile?.costUsd);
+  if (Number.isFinite(usd)) return { usd, status: "known", tier: profile?.costTier ?? null };
+  return { usd: null, status: "unknown", tier: profile?.costTier ?? null };
+}
+
+function previewPermission(profile, requestedMode) {
+  const modes = Array.isArray(profile?.permissionModes) ? profile.permissionModes : [];
+  const fallback = profile?.defaultPermissionMode || "unknown";
+  const requested = String(requestedMode || "").trim();
+  return requested && (!modes.length || modes.includes(requested)) ? requested : fallback;
+}
+
+function enrichDispatchPreview(result, profiles, { permissionMode = null, risk = "normal" } = {}) {
+  const selectedProfile = profiles.find((profile) => profile.id === result.selected?.id) || null;
+  const cost = previewCost(selectedProfile);
+  const mode = previewPermission(selectedProfile, permissionMode);
+  const fallbackUsed = result.fallbackUsed === true;
+  return {
+    ...result,
+    createdRun: false,
+    permissionMode: mode,
+    permissionModes: Array.isArray(selectedProfile?.permissionModes) ? selectedProfile.permissionModes : [],
+    cost,
+    fallback: {
+      used: fallbackUsed,
+      from: result.preferredProvider,
+      to: result.selected?.id || null,
+      extraCalls: fallbackUsed ? 1 : 0,
+      extraApprovals: fallbackUsed && ["high", "critical"].includes(risk) ? 1 : 0,
+    },
+    signals: {
+      capability: selectedProfile?.role || selectedProfile?.label || null,
+      quality: selectedProfile?.quality ?? null,
+      speed: selectedProfile?.speed ?? null,
+      health: result.selected?.health || null,
+      cost: cost.status === "known" ? cost.usd : null,
+      costStatus: cost.status,
+    },
+  };
+}
+
 export class ModelRouter {
   constructor({ profiles, policy, healthService }) {
     this.profiles = profiles;
@@ -39,7 +81,7 @@ export class ModelRouter {
     this.healthService = healthService;
   }
 
-  async preview({ prompt = "", taskType, requestedProvider, risk = "normal", needsCurrentSource = false, allowedProviders = null, hasVisualAttachment = false, visualAttachmentType = null } = {}) {
+  async preview({ prompt = "", taskType, requestedProvider, risk = "normal", needsCurrentSource = false, allowedProviders = null, hasVisualAttachment = false, visualAttachmentType = null, permissionMode = null } = {}) {
     // 团队成员白名单由服务端推导。空数组必须 fail-closed，不能退化为“不设限制”。
     const allowed = Array.isArray(allowedProviders) ? new Set(allowedProviders) : null;
     const resolvedTaskType = hasVisualAttachment === true || visualAttachmentType !== null
@@ -126,7 +168,7 @@ export class ModelRouter {
     const specialRoute = specialAllowed
       ? { ruleId: rule.id, reason: rule.reason, allowedProviders: [...specialAllowed] }
       : null;
-    return {
+    return enrichDispatchPreview({
       taskType: resolvedTaskType,
       risk,
       selected,
@@ -138,6 +180,6 @@ export class ModelRouter {
       // 显式选席是用户决策，不是路由降级；即使策略首选席位已禁用也不得误标 fallback。
       fallbackUsed: !requestedProvider && Boolean(rule?.prefer?.[0] && selected.id !== rule.prefer[0]),
       preferredProvider: rule?.prefer?.[0] || null,
-    };
+    }, this.profiles, { permissionMode, risk });
   }
 }

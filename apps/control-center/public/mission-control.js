@@ -289,7 +289,12 @@ export function createMissionControlDock({
       heading.append(node("strong", "registry-item-title", artifact.label));
       heading.append(node("span", "registry-availability", statusLabel(artifact.availability)));
       item.append(heading);
-      const detail = artifact.count == null ? artifact.kind : `${artifact.count} 条已登记`;
+      const detail = [
+        artifact.count == null ? artifact.kind : `${artifact.count} 条已登记`,
+        artifact.digest ? `digest ${artifact.digest}` : "",
+        artifact.verifyCommand || "",
+        artifact.published === false && (artifact.kind === "handoff" || artifact.kind === "delta") ? "未宣称已发布" : "",
+      ].filter(Boolean).join(" · ");
       appendMeta(item, [detail]);
       if (artifact.kind === "diff" && artifact.availability === "available") {
         const action = node("button", "registry-action", "查看 Diff");

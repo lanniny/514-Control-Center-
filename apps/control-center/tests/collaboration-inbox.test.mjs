@@ -121,3 +121,24 @@ test("run 上限截断会把 inbox 标记为 partial 而不是完整 ok", async 
   assert.equal(result.diagnostics.runsTruncated, true);
   assert.equal(result.diagnostics.status, "partial");
 });
+
+test("stored answered 且 bus 无 answer 时 pendingAsks 必须留下", async () => {
+  const askKey = "run-orphan\u0000ask-orphan";
+  const result = await collectTeamInbox({
+    teamId: team.id,
+    team,
+    runs: [run("run-orphan", "2026-08-18T01:00:00.000Z", "pendingAsk")],
+    lifecycleByKey: {
+      [askKey]: { state: "answered", revision: 2 },
+    },
+    readTail: async () => ({
+      diagnostics: { status: "ok" },
+      messages: [
+        { id: "ask-orphan", ts: "2026-08-18T01:00:01.000Z", from: "codex-technical", to: "lo", kind: "ask", text: "账本写了已答，bus 上没有" },
+      ],
+    }),
+  });
+
+  assert.equal(result.messages[0].lifecycle, "answered");
+  assert.deepEqual(result.pendingAsks.map((item) => item.id), ["ask-orphan"]);
+});

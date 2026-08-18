@@ -49,5 +49,10 @@ jobs:
         run: npm ci --ignore-scripts
       - name: Validate registries and schemas
         run: npm run validate
+      - name: Delivery ownership (strict)
+        run: npm run qa:delivery -- --strict
+      - name: Git whitespace check
+        working-directory: ${{ github.workspace }}
+        run: git diff --check
       - name: Run tests
         run: npm test

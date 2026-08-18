@@ -4,10 +4,50 @@
 import { runProcess } from "./process-runner.mjs";
 import { scrub } from "./bus.mjs";
 import { attestRunWorkspace } from "./run-workspace.mjs";
+import { basename } from "node:path";
 
 const DIFF_LIMIT = 200 * 1024;
 
-export async function runDiffForRun(run, { runner = runProcess } = {}) {
+function publicPathLeaf(value) {
+  const normalized = String(value || "").replace(/[\\/]+$/, "");
+  return normalized ? basename(normalized) : null;
+}
+
+function scrubGitOutput(value, workspace) {
+  let text = scrub(String(value ?? ""));
+  for (const absolutePath of [workspace?.path, workspace?.base]) {
+    const raw = String(absolutePath || "");
+    if (!raw) continue;
+    const replacement = publicPathLeaf(raw) || "[workspace]";
+    text = text.replaceAll(raw, replacement);
+    const slashPath = raw.replaceAll("\\", "/");
+    if (slashPath !== raw) text = text.replaceAll(slashPath, replacement);
+  }
+  return text;
+}
+
+function checkedGitResult(result, operation, workspace) {
+  if (result && result.error == null && result.code === 0) return result;
+  const detail = scrubGitOutput(result?.stderr || result?.error?.message || "", workspace).trim().slice(0, 240);
+  throw Object.assign(new Error(detail ? `${operation} 失败：${detail}` : `${operation} 失败，未获得可信结果`), {
+    code: "DIFF_UNAVAILABLE",
+    operation,
+  });
+}
+
+function parseDiffStat(statText) {
+  const text = String(statText ?? "");
+  const files = text.match(/(\d+)\s+files?\s+changed/i);
+  const additions = text.match(/(\d+)\s+insertions?\(\+\)/i);
+  const deletions = text.match(/(\d+)\s+deletions?\(-\)/i);
+  return {
+    filesChanged: files ? Number(files[1]) : null,
+    additions: additions ? Number(additions[1]) : (files ? 0 : null),
+    deletions: deletions ? Number(deletions[1]) : (files ? 0 : null),
+  };
+}
+
+async function attestedWorktree(run) {
   let workspace;
   try {
     workspace = await attestRunWorkspace(run);
@@ -18,20 +58,56 @@ export async function runDiffForRun(run, { runner = runProcess } = {}) {
   if (workspace.kind !== "worktree") {
     throw Object.assign(new Error("该任务无隔离工作树（plan 模式或未提供项目地址），无产物可比对"), { code: "VALIDATION_FAILED" });
   }
+  return workspace;
+}
+
+export async function summarizeRunDiff(run, { runner = runProcess } = {}) {
+  const workspace = await attestedWorktree(run);
   const worktreePath = workspace.path;
-  const [status, stat, diff] = await Promise.all([
+  const [statusResult, statResult] = await Promise.all([
+    runner("git", ["-C", worktreePath, "status", "--porcelain"], { timeoutMs: 30_000, maxOutputBytes: 256 * 1024 }),
+    runner("git", ["-C", worktreePath, "diff", "--stat", "HEAD"], { timeoutMs: 30_000, maxOutputBytes: 256 * 1024 }),
+  ]);
+  const status = checkedGitResult(statusResult, "git status", workspace);
+  const stat = checkedGitResult(statResult, "git diff --stat", workspace);
+  const statusText = scrubGitOutput(status.stdout, workspace);
+  const statText = scrubGitOutput(stat.stdout, workspace);
+  const totals = parseDiffStat(statText);
+  return {
+    runId: run.id,
+    available: true,
+    dirty: statusText.trim().length > 0,
+    truncated: false,
+    worktree: publicPathLeaf(worktreePath),
+    base: publicPathLeaf(workspace.base),
+    status: statusText,
+    stat: statText,
+    ...totals,
+    endpoint: `/api/runs/${encodeURIComponent(run.id)}/diff`,
+  };
+}
+
+export async function runDiffForRun(run, { runner = runProcess } = {}) {
+  const workspace = await attestedWorktree(run);
+  const worktreePath = workspace.path;
+  const [statusResult, statResult, diffResult] = await Promise.all([
     runner("git", ["-C", worktreePath, "status", "--porcelain"], { timeoutMs: 30_000, maxOutputBytes: 256 * 1024 }),
     runner("git", ["-C", worktreePath, "diff", "--stat", "HEAD"], { timeoutMs: 30_000, maxOutputBytes: 256 * 1024 }),
     runner("git", ["-C", worktreePath, "diff", "HEAD"], { timeoutMs: 60_000, maxOutputBytes: 2 * 1024 * 1024 }),
   ]);
-  const diffText = scrub(diff.stdout);
+  const status = checkedGitResult(statusResult, "git status", workspace);
+  const stat = checkedGitResult(statResult, "git diff --stat", workspace);
+  const diff = checkedGitResult(diffResult, "git diff", workspace);
+  const statusText = scrubGitOutput(status.stdout, workspace);
+  const statText = scrubGitOutput(stat.stdout, workspace);
+  const diffText = scrubGitOutput(diff.stdout, workspace);
   const truncated = diffText.length > DIFF_LIMIT;
   return {
     runId: run.id,
-    worktree: worktreePath,
-    base: workspace.base,
-    status: status.stdout,
-    stat: stat.stdout,
+    worktree: publicPathLeaf(worktreePath),
+    base: publicPathLeaf(workspace.base),
+    status: statusText,
+    stat: statText,
     diff: truncated ? `${diffText.slice(0, DIFF_LIMIT)}\n\n…（diff 超 200KB 已截断，完整内容请在工作树内查看）` : diffText,
     truncated,
   };

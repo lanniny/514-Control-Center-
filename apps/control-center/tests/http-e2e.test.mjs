@@ -1,12 +1,51 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { chmod, cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { runProcess } from "../src/process-runner.mjs";
+import { RELEASE_COMMAND_EVIDENCE_SCHEMA, RELEASE_COMMAND_IDS } from "../src/release-record.mjs";
 import { spawnTestServer, stopTestServer, waitForUrl } from "./server-fixture.mjs";
 
 const appRoot = fileURLToPath(new URL("..", import.meta.url));
+const sourceRepo = resolve(appRoot, "../..");
+
+async function runGit(repoRoot, args) {
+  const result = await runProcess("git", ["-C", repoRoot, ...args], { provider: null, timeoutMs: 10_000 });
+  assert.equal(result.code, 0, result.stderr || `git ${args.join(" ")} failed`);
+  return result.stdout.trim();
+}
+
+async function createReleaseFixtureRepo(root) {
+  const repoRoot = resolve(root, "repo");
+  const configRoot = resolve(repoRoot, "config/control-center");
+  const schemaRoot = resolve(repoRoot, "schemas/control-center");
+  await mkdir(configRoot, { recursive: true });
+  await mkdir(schemaRoot, { recursive: true });
+  for (const name of ["models.json", "routing.json", "permissions.json", "claude-coordinator.md"]) {
+    await cp(resolve(sourceRepo, "config/control-center", name), resolve(configRoot, name));
+  }
+  await cp(resolve(sourceRepo, "schemas/control-center/contracts.schema.json"), resolve(schemaRoot, "contracts.schema.json"));
+  await writeFile(resolve(configRoot, "sources.json"), `${JSON.stringify({
+    version: 1,
+    explicit: [
+      { id: "control.models", path: "config/control-center/models.json", label: "Models", kind: "json", scope: "repo", critical: true },
+      { id: "control.routing", path: "config/control-center/routing.json", label: "Routing", kind: "json", scope: "repo", critical: true },
+      { id: "control.permissions", path: "config/control-center/permissions.json", label: "Permissions", kind: "json", scope: "repo", critical: true },
+      { id: "control.claude-coordinator", path: "config/control-center/claude-coordinator.md", label: "Coordinator", kind: "markdown", scope: "repo", critical: true },
+    ],
+    discover: [],
+    runtime: [],
+  }, null, 2)}\n`, "utf8");
+  await runGit(repoRoot, ["init", "-q"]);
+  await runGit(repoRoot, ["config", "user.email", "release-fixture@514cc.local"]);
+  await runGit(repoRoot, ["config", "user.name", "514cc Release Fixture"]);
+  await runGit(repoRoot, ["add", "."]);
+  await runGit(repoRoot, ["commit", "-q", "-m", "release fixture"]);
+  return repoRoot;
+}
 
 async function waitFor(predicate, { timeoutMs = 10_000, message = "condition was not met" } = {}) {
   const deadline = Date.now() + timeoutMs;
@@ -479,6 +518,62 @@ test("custom teams survive a control-plane restart through the real assembly pat
   assert.deepEqual(payload.rejectedOnLoad, [], "no records may be silently rejected on load");
 });
 
+test("release truth consumes a complete server-observed evidence set from the current runtime", { timeout: 45_000 }, async (t) => {
+  const root = await mkdtemp(resolve(appRoot, ".test-release-truth-http-"));
+  const repoRoot = await createReleaseFixtureRepo(root);
+  const dataRoot = resolve(root, "data");
+  const token = "e2e-release-truth-token-0123456789";
+  const child = spawnTestServer({ env: {
+    CONTROL_CENTER_TOKEN: token,
+    CONTROL_CENTER_DATA_DIR: dataRoot,
+    CONTROL_CENTER_TEST_REPO_ROOT: repoRoot,
+    CONTROL_CENTER_PORT: "0",
+  } });
+  t.after(async () => {
+    await stopTestServer(child, { token });
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const origin = new URL(await waitForUrl(child)).origin;
+  const owner = JSON.parse(await readFile(resolve(dataRoot, "control-center.lock"), "utf8"));
+  const sourceCommit = await runGit(repoRoot, ["rev-parse", "HEAD"]);
+  const diffDigest = createHash("sha256").update("", "utf8").digest("hex");
+  const checkedAt = "2026-08-18T22:30:00.000Z";
+  const commands = Object.fromEntries(RELEASE_COMMAND_IDS.map((id) => [id, {
+    status: "passed",
+    exitCode: 0,
+    durationMs: 10,
+    sourceCommit,
+    diffDigest,
+    workspaceClean: true,
+    checkedAt,
+    provenance: "server-observed",
+    evidenceTrust: "independent",
+    runId: "current-runtime-cohort",
+    runtimePid: owner.pid,
+    runtimeGeneration: 1,
+    runtimeStartedAt: owner.startedAt,
+  }]));
+  await writeFile(resolve(dataRoot, "release-command-evidence.json"), `${JSON.stringify({
+    schema: RELEASE_COMMAND_EVIDENCE_SCHEMA,
+    updatedAt: checkedAt,
+    commands,
+  })}\n`, "utf8");
+
+  const response = await fetch(`${origin}/api/release-truth`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  assert.equal(response.status, 200);
+  const truth = await response.json();
+  assert.equal(truth.validationEvidence.status, "passed");
+  assert.equal(truth.validationEvidence.matchesSource, true);
+  assert.equal(truth.validationEvidence.matchesWorkspace, true);
+  assert.equal(truth.validationEvidence.matchesRuntime, true);
+  assert.equal(truth.validationEvidence.evidenceTrust, "independent");
+  assert.equal(truth.consistency, "consistent");
+  assert.equal(truth.activation.claimed, true);
+});
+
 // timeout 120s：瓶颈是 CLI 健康探测冷启动（bootstrap/preview/dry-run 各 25-30s+），
 // 高系统负载下 60s 线稳定超时——实测三端点计时定位，非业务回归（2026-07-17）
 test("loopback API enforces bearer auth and supports the operator workflow", { timeout: 120_000 }, async (t) => {
@@ -538,6 +633,19 @@ test("loopback API enforces bearer auth and supports the operator workflow", { t
   const reloaded = await reload.json();
   assert.equal(reloaded.status, "reloaded");
   assert.equal(reloaded.generation, 2);
+
+  const runnerSnapshot = await fetch(`${origin}/api/release-record/runner`, { headers: auth });
+  assert.equal(runnerSnapshot.status, 200);
+  assert.equal((await runnerSnapshot.json()).commands.length, 4);
+  for (const commandIds of [[], ["validate", "validate"], ["deployProd"]]) {
+    const rejectedRunner = await fetch(`${origin}/api/release-record/runner/run`, {
+      method: "POST",
+      headers: { ...auth, "Content-Type": "application/json" },
+      body: JSON.stringify({ commandIds }),
+    });
+    assert.equal(rejectedRunner.status, 400);
+    assert.match((await rejectedRunner.json()).code, /^RELEASE_RUNNER_/);
+  }
 
   const configResponse = await fetch(`${origin}/api/config/core.readme`, { headers: auth });
   const config = await configResponse.json();

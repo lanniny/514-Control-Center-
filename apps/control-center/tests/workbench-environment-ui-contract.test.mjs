@@ -49,16 +49,42 @@ test("environment UI uses real API actions, typed Git confirmation, and honest a
 });
 
 test("environment panel keeps the reference layout affordances without inventing process argv", async () => {
-  const [panel, app, css, registry] = await Promise.all([
+  const [panel, app, css, registry, api, server] = await Promise.all([
     source("public/environment-panel.js"),
     source("public/app.js"),
     source("public/forge/codex-desktop.css"),
     source("src/child-registry.mjs"),
+    source("public/api.js"),
+    source("server.mjs"),
   ]);
   // 参考图形态：可展开的本地/分支行、变更行内联刷新态、来源 ➕ 与查看全部、运行中头像堆叠
   assert.match(panel, /data-environment-expand="\$\{escapeHtml\(key\)\}"/);
   assert.match(panel, /expandRow\("workspace"/);
   assert.match(panel, /expandRow\("branch"/);
+  assert.match(panel, /release-truth/);
+  assert.match(panel, /没有当轮 readback，不能称为已激活/);
+  assert.match(panel, /release-record/);
+  assert.match(panel, /不自动 git add\/commit\/push/);
+  assert.match(panel, /project-bridge/);
+  assert.match(panel, /四面未齐，不能称为项目已接通/);
+  assert.match(panel, /first-run/);
+  assert.match(panel, /首次就绪/);
+  assert.match(panel, /首次就绪读取失败/);
+  assert.match(panel, /new Set\(\["first-run"\]\)/);
+  assert.match(panel, /expandedRows\.clear\(\);\s*expandedRows\.add\("first-run"\)/);
+  assert.match(server, /readiness-unavailable/);
+  assert.match(server, /\/api\/release-record/);
+  assert.match(server, /\/settlement\$/);
+  assert.match(api, /releaseRecord:\s*"\/api\/release-record"/);
+  assert.match(api, /runSettlement:\s*\(runId\)\s*=>/);
+  assert.match(panel, /run-settlement/);
+  assert.match(panel, /不自动 merge/);
+  assert.match(app, /准备交付/);
+  assert.match(app, /remote-unsupported/);
+  assert.match(app, /不会自动 merge/);
+  assert.match(api, /projectBridge:\s*"\/api\/project-bridge"/);
+  assert.match(api, /readiness:\s*"\/api\/readiness"/);
+  assert.match(panel, /environment-state is-\$\{escapeHtml\(state\)\}/);
   assert.match(panel, /environment-inline-spinner/);
   assert.match(panel, /data-environment-action="sources-add"/);
   assert.match(panel, /查看全部/);

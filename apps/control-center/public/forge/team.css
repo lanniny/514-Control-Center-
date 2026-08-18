@@ -132,6 +132,36 @@
   font-size: 11px;
 }
 
+.team-inbox-answer-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 32px;
+  gap: 6px;
+  align-items: center;
+  margin-top: 8px;
+}
+
+.team-inbox-answer-form input {
+  min-width: 0;
+  height: 32px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--background);
+  color: var(--foreground);
+}
+
+.team-inbox-answer-form .icon-button {
+  width: 32px;
+  height: 32px;
+}
+
+.team-inbox-answer-status {
+  grid-column: 1 / -1;
+  min-height: 14px;
+  color: var(--muted-foreground);
+  font-size: 10px;
+}
+
 .team-inbox-diagnostic {
   display: flex;
   align-items: center;

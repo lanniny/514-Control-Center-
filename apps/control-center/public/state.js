@@ -219,6 +219,7 @@ export const state = {
   teamChipsPending: null,
   sourceGroupsExpanded: new Set(), // 配置图谱真源树：会话级折叠态（含选中源的组永远自动展开，不入此集）
   runDiffView: null,
+  runSettlementView: null,
   tabs: [],
   activeTabKey: null,
   composerTargetAgentId: null,
@@ -233,6 +234,7 @@ export const state = {
   obsDelta: null,
   obsHandoffs: [],
   obsSummary: null,
+  obsOps: null,
   obsDrift: null,
   obsLoaded: false,
   sessionsData: null,

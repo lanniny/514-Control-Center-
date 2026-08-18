@@ -64,19 +64,22 @@ export function createWorkbenchEnvironmentPanel({
   let refreshTimer = 0;
   let refreshing = false;
   // 展开态是纯视图状态：跨刷新保留，否则每次 SSE 触发的重绘都会把用户手动展开的行弹回去。
-  const expandedRows = new Set();
+  const expandedRows = new Set(["first-run"]);
   let sourcesExpanded = false;
 
   function actionButton(action, label, iconName, disabled = false, title = "") {
     return `<button class="environment-action" type="button" data-environment-action="${escapeHtml(action)}"${disabled ? " disabled" : ""}${title ? ` title="${escapeHtml(title)}"` : ""}>${icon(iconName)}<span>${escapeHtml(label)}</span></button>`;
   }
 
-  function expandRow(key, title, subtitle, iconName, details) {
+  function expandRow(key, title, subtitle, iconName, details, state = "") {
     const open = expandedRows.has(key);
     const rows = details.filter((item) => item && item[1]);
+    const stateDot = state
+      ? `<span class="environment-state is-${escapeHtml(state)}" aria-hidden="true"></span>`
+      : "";
     return `
       <button class="environment-row is-action is-expandable${open ? " is-open" : ""}" type="button" data-environment-expand="${escapeHtml(key)}" aria-expanded="${open ? "true" : "false"}">
-        <span class="environment-row-icon">${icon(iconName)}</span>
+        <span class="environment-row-icon">${icon(iconName)}${stateDot}</span>
         <span class="environment-row-main"><strong>${escapeHtml(title)}</strong><small>${escapeHtml(subtitle)}</small></span>
         <span class="environment-chevron">${icon("chevron-down")}</span>
       </button>
@@ -154,6 +157,90 @@ export function createWorkbenchEnvironmentPanel({
           ["仓库根", git.root || ""],
           ["Git", git.available ? "可用" : (git.reason || "不可用")],
         ])}
+        ${environment.projectBridge ? expandRow(
+          "project-bridge",
+          `项目桥 ${environment.projectBridge.consistency || "unknown"}`,
+          environment.projectBridge.diagnosis || "四面未齐，不能称为项目已接通",
+          "waypoints",
+          [
+            ["一致性", environment.projectBridge.consistency || "unknown"],
+            ["锚点", environment.projectBridge.anchorId || "unknown"],
+            ["项目", environment.projectBridge.projectId || "unknown"],
+            ["源码", environment.projectBridge.faces?.source?.status || "unknown"],
+            ["运行时", environment.projectBridge.faces?.runtime?.status || "unknown"],
+            ["进程", environment.projectBridge.faces?.process?.status || "unknown"],
+            ["证据", environment.projectBridge.faces?.evidence?.status || "unknown"],
+            ["分支", environment.projectBridge.faces?.source?.branch || ""],
+            ["HEAD", environment.projectBridge.faces?.source?.headDigest || ""],
+          ],
+          environment.projectBridge.consistency || "unknown",
+        ) : ""}
+        ${environment.releaseTruth ? expandRow(
+          "release-truth",
+          `运行态 ${environment.releaseTruth.consistency || "unknown"}`,
+          environment.releaseTruth.activation?.text || "没有当轮 readback，不能称为已激活",
+          "shield-check",
+          [
+            ["一致性", environment.releaseTruth.consistency || "unknown"],
+            ["源提交", environment.releaseTruth.sourceCommit || "unknown"],
+            ["差异摘要", environment.releaseTruth.diffDigest || "unknown"],
+            ["运行代际", environment.releaseTruth.runtimeGeneration == null ? "unknown" : String(environment.releaseTruth.runtimeGeneration)],
+            ["PID", environment.releaseTruth.pid == null ? "unknown" : String(environment.releaseTruth.pid)],
+            ["工作目录", environment.releaseTruth.cwd || "unknown"],
+            ["启动时间", environment.releaseTruth.startedAt || "unknown"],
+            ["验证", environment.releaseTruth.validationEvidence?.status || "unknown"],
+          ],
+          environment.releaseTruth.consistency || "unknown",
+        ) : ""}
+        ${environment.releaseRecord ? expandRow(
+          "release-record",
+          `交付门 ${environment.releaseRecord.verdict || "unknown"}${environment.releaseRecord.publishable ? " · 可发布" : ""}`,
+          environment.releaseRecord.nextAction?.text
+            || (environment.releaseRecord.autoGit?.add === false ? "不自动 git add/commit/push" : "发布记录不完整"),
+          "clipboard-list",
+          [
+            ["裁决", environment.releaseRecord.verdict || "unknown"],
+            ["可发布", environment.releaseRecord.publishable ? "yes" : "no"],
+            ["正式升格", environment.releaseRecord.formalRelease ? "yes" : "no"],
+            ["源提交", environment.releaseRecord.sourceCommit || "unknown"],
+            ["差异摘要", environment.releaseRecord.diffDigest || "unknown"],
+            ["未声明源码", String((environment.releaseRecord.delivery?.undeclaredSourceOrTests || []).length)],
+            ["缺失源码", String((environment.releaseRecord.delivery?.missingSourceOrTests || []).length)],
+            ["命令证据", (environment.releaseRecord.commands || []).map((item) => `${item.id}:${item.status}`).join(" · ") || "none"],
+            ["未完成", (environment.releaseRecord.unfinished || []).slice(0, 4).map((item) => item.id).join(" · ") || "none"],
+            ["自动 git", "add/commit/push=off"],
+            ["运行代际", environment.releaseRecord.runtime?.generation == null ? "unknown" : String(environment.releaseRecord.runtime.generation)],
+            ["已对账激活", (environment.releaseRecord.runtime?.activated ?? environment.releaseRecord.runtime?.reloaded) ? "yes" : "no"],
+            ["命令证据性质", "attested（申报，非本接口执行 QA）"],
+          ],
+          environment.releaseRecord.verdict || "unknown",
+        ) : ""}
+        ${environment.settlement ? expandRow(
+          "run-settlement",
+          `准备交付 ${environment.settlement.verdict || "unknown"}`,
+          environment.settlement.nextAction?.reason
+            || environment.settlement.nextAction?.text
+            || (environment.settlement.autoLanding?.merge === false ? "不自动 merge" : "结算记录不完整"),
+          "git-branch",
+          [
+            ["裁决", environment.settlement.verdict || "unknown"],
+            ["隔离", environment.settlement.isolation || "unknown"],
+            ["工作区", environment.settlement.workspace?.kind || "unknown"],
+            ["差异", environment.settlement.diff?.dirty ? "dirty" : environment.settlement.diff?.available ? "clean" : "unprobed"],
+            ["恢复", environment.settlement.recovery?.canContinue ? "needs-ack" : "idle"],
+            ["自动落地", "merge/rebase/commit/push=off"],
+            ["下一拍", environment.settlement.nextAction?.reason || environment.settlement.nextAction?.text || ""],
+          ],
+          environment.settlement.verdict || "unknown",
+        ) : ""}
+        ${environment.readiness ? expandRow(
+          "first-run",
+          environment.readiness.ready ? "首次就绪 ready" : environment.readiness.degraded ? "首次就绪读取失败" : "首次就绪未齐",
+          environment.readiness.nextAction?.text || "先确认项目、团队、席位和一次非付费验证",
+          "list-checks",
+          (environment.readiness.steps || []).map((item) => [item.title, item.status]),
+          environment.readiness.ready ? "ok" : environment.readiness.degraded ? "attention" : "unknown",
+        ) : ""}
         ${expandRow("branch", branch, divergence, "git-branch", [
           ["HEAD", git.head || ""],
           ["上游", git.upstream || "无"],
@@ -250,6 +337,7 @@ export function createWorkbenchEnvironmentPanel({
     if (selectedRunId === next && (environment || requestPending)) return;
     selectedRunId = next;
     expandedRows.clear();
+    expandedRows.add("first-run");
     sourcesExpanded = false;
     void fetchEnvironment();
   }

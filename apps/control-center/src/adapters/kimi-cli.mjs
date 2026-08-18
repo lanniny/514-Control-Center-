@@ -12,6 +12,7 @@
 // 拒绝或回退默认档，档位目录因此只放 managed k3 实测的 low/high/max）。
 import { randomUUID } from "node:crypto";
 import { runProcess } from "../process-runner.mjs";
+import { preparePromptTransport } from "../prompt-transport.mjs";
 import { createBoundedTaskTracker, createLfCollector } from "./stream-utils.mjs";
 
 export function buildKimiArgs({ prompt, sessionId = null, model = null, permissionMode = "plan" }) {
@@ -87,6 +88,15 @@ export class KimiCliAdapter {
     );
     if (sessionId) await onSessionStarted?.({ sessionId, protocol: "kimi-headless-resume" });
     await onTurnSubmitting?.({ sessionId: sessionId || null, protocol: "kimi-headless-resume", clientUserMessageId: randomUUID() });
+    await preparePromptTransport({
+      prompt,
+      transport: "argv",
+      adapterId: this.id,
+      command: this.command,
+      eventStore: this.eventStore,
+      runId,
+      agentId,
+    });
     let result;
     let processError = null;
     try {

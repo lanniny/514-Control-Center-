@@ -1120,13 +1120,13 @@
                     <label class="sr-only" for="router-prompt">任务</label>
                     <textarea id="router-prompt" name="router-prompt" rows="4" placeholder="例如：评审这条路由预览的安全面，并给出独立验证席" required></textarea>
                     <div class="team-router-kinds" role="radiogroup" aria-label="任务类型">
-                      <button type="button" class="team-router-kind is-active" data-router-kind="auto">自动判断</button>
-                      <button type="button" class="team-router-kind" data-router-kind="planning">规划</button>
-                      <button type="button" class="team-router-kind" data-router-kind="coding">实现</button>
-                      <button type="button" class="team-router-kind" data-router-kind="review">评审</button>
-                      <button type="button" class="team-router-kind" data-router-kind="debugging">诊断</button>
-                      <button type="button" class="team-router-kind" data-router-kind="current-research">当前资料</button>
-                      <button type="button" class="team-router-kind" data-router-kind="long-context">长上下文</button>
+                      <button type="button" role="radio" aria-checked="true" class="team-router-kind is-active" data-router-kind="auto">自动判断</button>
+                      <button type="button" role="radio" aria-checked="false" class="team-router-kind" data-router-kind="planning">规划</button>
+                      <button type="button" role="radio" aria-checked="false" class="team-router-kind" data-router-kind="coding">实现</button>
+                      <button type="button" role="radio" aria-checked="false" class="team-router-kind" data-router-kind="review">评审</button>
+                      <button type="button" role="radio" aria-checked="false" class="team-router-kind" data-router-kind="debugging">诊断</button>
+                      <button type="button" role="radio" aria-checked="false" class="team-router-kind" data-router-kind="current-research">当前资料</button>
+                      <button type="button" role="radio" aria-checked="false" class="team-router-kind" data-router-kind="long-context">长上下文</button>
                     </div>
                     <label class="sr-only" for="router-kind">任务类型</label>
                     <select id="router-kind" name="router-kind" class="sr-only" tabindex="-1">
@@ -2305,7 +2305,7 @@
             <div>
               <p class="eyebrow">治理数据面</p>
               <h1 id="observability-title">体系观测</h1>
-              <p>路由门命中、DELTA 发火账本、handoff 交接与双地落漂移——体系被看见的地方。</p>
+              <p>路由门命中、DELTA 发火账本、handoff 交接、双地落漂移，以及当前进程的低敏运营指标。缺失成本显示「未知」，不当 0。</p>
             </div>
             <button class="button secondary" id="obs-refresh-button" type="button">
               <svg class="icon lucide"><use href="#lucide-refresh-cw"></use></svg>
@@ -2335,6 +2335,44 @@
               <span class="metric-detail"><button class="text-button" id="obs-drift-button" type="button">运行漂移检查</button></span>
             </article>
           </div>
+
+          <div class="metric-grid" aria-label="运营指标">
+            <article class="metric-card">
+              <span class="metric-label"><svg class="icon lucide" aria-hidden="true"><use href="#lucide-timer"></use></svg>首个有效响应</span>
+              <strong class="metric-value" id="obs-ops-first">未知</strong>
+              <span class="metric-detail" id="obs-ops-first-detail">无样本时不填 0</span>
+            </article>
+            <article class="metric-card">
+              <span class="metric-label"><svg class="icon lucide" aria-hidden="true"><use href="#lucide-activity"></use></svg>成功 / 失败 / 恢复</span>
+              <strong class="metric-value metric-word" id="obs-ops-outcomes">未知</strong>
+              <span class="metric-detail" id="obs-ops-outcomes-detail">空窗口比率保持未知</span>
+            </article>
+            <article class="metric-card">
+              <span class="metric-label"><svg class="icon lucide" aria-hidden="true"><use href="#lucide-layers"></use></svg>成本回执可用率</span>
+              <strong class="metric-value" id="obs-ops-cost">未知</strong>
+              <span class="metric-detail" id="obs-ops-cost-detail">缺失成本不当 $0</span>
+            </article>
+            <article class="metric-card">
+              <span class="metric-label"><svg class="icon lucide" aria-hidden="true"><use href="#lucide-circle-alert"></use></svg>stale 状态</span>
+              <strong class="metric-value" id="obs-ops-stale">未知</strong>
+              <span class="metric-detail" id="obs-ops-stale-detail">健康缓存 + 在途 run</span>
+            </article>
+          </div>
+
+          <section class="content-section" aria-labelledby="obs-ops-title">
+            <div class="section-heading">
+              <div>
+                <h2 id="obs-ops-title">运营指标明细</h2>
+                <p>当前控制面内存快照，不持久化、不把缺失当 0</p>
+              </div>
+            </div>
+            <div class="table-scroll">
+              <table class="data-table">
+                <thead><tr><th>指标</th><th>值</th><th>口径</th></tr></thead>
+                <tbody id="obs-ops-body"><tr><td colspan="3" class="subtle">正在读取…</td></tr></tbody>
+              </table>
+            </div>
+          </section>
 
           <div class="overview-grid">
             <section class="content-section" aria-labelledby="obs-routegate-title">

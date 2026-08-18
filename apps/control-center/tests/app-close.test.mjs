@@ -166,3 +166,34 @@ test("app close 为未纳入 deadline 的 cleanup step 提供超时并支持恢�
   await state.close({ budgetMs: 1_000 });
   await assert.rejects(access(lockPath), { code: "ENOENT" });
 });
+
+test("release QA runner blocks runtime reload while active and participates in app close", async (t) => {
+  const root = await mkdtemp(resolve(appRoot, ".test-app-close-"));
+  const repoRoot = await createIsolatedRepo(root);
+  const dataRoot = resolve(root, "data");
+  const state = await createControlCenter({ repoRoot, dataRoot });
+  t.after(async () => {
+    await state.close().catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  });
+
+  const runner = state.releaseCommandRunner;
+  const originalSnapshot = runner.snapshot;
+  runner.snapshot = () => ({
+    schema: "514cc.release-command-runner/v1",
+    active: { runId: "qa-active", current: "fullTests" },
+  });
+  const reload = await state.reloadRuntime({ reason: "test" });
+  assert.equal(reload.status, "restart-required");
+  assert.match(reload.reason, /qa-active/);
+
+  runner.snapshot = originalSnapshot;
+  let runnerCloseCalls = 0;
+  runner.close = async () => {
+    runnerCloseCalls += 1;
+    return { closed: true, active: false };
+  };
+  const closed = await state.close();
+  assert.equal(runnerCloseCalls, 1);
+  assert.ok(closed.phases.some((phase) => phase.step === "releaseCommandRunner.close" && phase.ok));
+});

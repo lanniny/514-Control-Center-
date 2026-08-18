@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { runProcess } from "../process-runner.mjs";
+import { preparePromptTransport } from "../prompt-transport.mjs";
 import { createLfCollector, publicClaudeEvent } from "./stream-utils.mjs";
 
 export function buildClaudeArgs({
@@ -128,6 +129,15 @@ export class ClaudeCliAdapter {
     );
     await onSessionStarted?.({ sessionId: nativeSessionId, protocol: "stream-json-resume" });
     await onTurnSubmitting?.({ sessionId: nativeSessionId, protocol: "stream-json-resume", clientUserMessageId });
+    await preparePromptTransport({
+      prompt,
+      transport: "stdin",
+      adapterId: this.id,
+      command: this.command,
+      eventStore: this.eventStore,
+      runId,
+      agentId,
+    });
     const result = await this.runProcessImpl(this.command, args, {
       cwd: effectiveCwd,
       input: prompt,

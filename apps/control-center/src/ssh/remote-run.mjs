@@ -20,6 +20,7 @@
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { runProcess } from "../process-runner.mjs";
+import { detectReplacementCorruption, digestPrompt, sealPromptTransport } from "../prompt-transport.mjs";
 import { sanitizeRemotePath } from "../remote-projects.mjs";
 
 const PGID_PREFIX = "514CC_PGID=";
@@ -30,8 +31,33 @@ function remoteRunError(code, message, httpStatus = 400) {
 }
 
 /** POSIX 单引号包裹（'\'' 转义）——远端 shell 命令拼参唯一合法形态（pty/routes.mjs 先例）。 */
-function shQuote(value) {
+export function shQuote(value) {
   return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+export function shUnquote(quoted) {
+  const text = String(quoted ?? "");
+  if (text.length < 2 || !text.startsWith("'") || !text.endsWith("'")) {
+    throw Object.assign(new Error("remote argv is not a POSIX single-quoted token"), {
+      code: "PROMPT_TRANSPORT_CORRUPT",
+      failureClass: "provider_error",
+    });
+  }
+  return text.slice(1, -1).replace(/'\\''/g, "'");
+}
+
+export function assertRemoteArgvUtf8(args = []) {
+  for (const value of args) {
+    const original = String(value ?? "");
+    sealPromptTransport({ prompt: original, transport: "ssh" });
+    const echoed = shUnquote(shQuote(original));
+    if (echoed !== original || detectReplacementCorruption(original, echoed) || digestPrompt(original) !== digestPrompt(echoed)) {
+      throw Object.assign(new Error("SSH argv lost UTF-8 while quoting the remote command line"), {
+        code: "PROMPT_TRANSPORT_CORRUPT",
+        failureClass: "provider_error",
+      });
+    }
+  }
 }
 
 /**
@@ -40,6 +66,7 @@ function shQuote(value) {
  * exec 保 pid 不变，故标记行给出的就是整棵进程树的 pgid。参数走位置参数 "$@"，避免二次套引号。
  */
 export function buildRemoteCommandLine({ cwd, command, args = [] }) {
+  assertRemoteArgvUtf8([cwd, command, ...args]);
   const script = `printf "${PGID_PREFIX}%s\\n" "$$"; exec "$@"`;
   const tail = [command, ...args].map(shQuote).join(" ");
   return `cd ${shQuote(cwd)} && setsid sh -c ${shQuote(script)} 514cc-remote ${tail}`;
@@ -67,6 +94,7 @@ function createRemoteChild({ ssh, hostId, commandLine }) {
   let head = Buffer.alloc(0);
   let headDone = false; // PGID 首行已剥离（或判定无标记）
   let killCalled = false;
+  let killRequest = Promise.resolve({ ok: true, result: null });
 
   const feedStdout = (chunk) => {
     if (headDone) {
@@ -126,15 +154,48 @@ function createRemoteChild({ ssh, hostId, commandLine }) {
    * kill 契约（terminateChildProcessInternal 消费）：
    *   - 首调 TERM：只发远端 pkill（pgid 未知则通道关闭兜底），等远端自然死、通道自然关——保住 stdout 尾
    *   - 二调/KILL：升级 pkill -KILL + 立即拆通道（终止器等 close 事件，不能永远等）
+   *   - waitForTerminationRequest：让终止器等到短 exec 回执，不能把 SSH 通道先关误当远端进程树已停
    */
+  child.waitForTerminationRequest = async () => {
+    const outcome = await killRequest;
+    if (!outcome.ok) throw outcome.error;
+    return outcome.result;
+  };
   child.kill = (signal = "SIGTERM") => {
     const sig = signal === "SIGKILL" ? "SIGKILL" : "SIGTERM";
     child.signalCode ??= sig;
     if (pgid != null) {
       const op = sig === "SIGKILL" ? "KILL" : "TERM";
-      // 经公共 exec（cap/scrub 对 pkill 无害）；|| true 因目标已死时 pkill 退出 1 不算失败
-      void ssh.exec(hostId, { command: `pkill -${op} -g ${pgid} 2>/dev/null || true`, timeoutMs: 5_000 }).catch(() => {});
+      // pkill=1 既可能是目标已退出，也可能是信号未送达；用 pgrep 只把“组已不存在”归为成功。
+      const terminateCommand = [
+        `pkill -${op} -g ${pgid} 2>/dev/null`,
+        "status=$?",
+        'if [ "$status" -eq 0 ]; then exit 0; fi',
+        `pgrep -g ${pgid} >/dev/null 2>&1`,
+        "probe=$?",
+        'if [ "$probe" -eq 1 ]; then exit 0; fi',
+        'exit "$status"',
+      ].join("; ");
+      killRequest = Promise.resolve(ssh.exec(hostId, {
+        command: terminateCommand,
+        timeoutMs: 5_000,
+      })).then(
+        (result) => result?.code === 0
+          ? { ok: true, result }
+          : {
+              ok: false,
+              error: remoteRunError("REMOTE_TERMINATION_FAILED", `remote ${op} request failed for process group ${pgid}`, 502),
+            },
+        (cause) => ({
+          ok: false,
+          error: Object.assign(
+            remoteRunError("REMOTE_TERMINATION_FAILED", `remote ${op} request could not be confirmed for process group ${pgid}`, 502),
+            { cause },
+          ),
+        }),
+      );
     } else {
+      killRequest = Promise.resolve({ ok: true, result: null });
       channel?.close?.();
     }
     if (sig === "SIGKILL" || killCalled) channel?.close?.();

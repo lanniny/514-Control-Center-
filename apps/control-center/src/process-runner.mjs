@@ -36,6 +36,8 @@ const RUNTIME_ENV_KEYS = new Set([
   "PROGRAMFILES(X86)",
   "PROGRAMW6432",
   "PSMODULEPATH",
+  "PYTHONIOENCODING",
+  "PYTHONUTF8",
   "SHELL",
   "SYSTEMDRIVE",
   "SYSTEMROOT",
@@ -385,6 +387,12 @@ export function childProcessEnv(overrides = {}, base = process.env, policy = {})
     const hasSystemCa = Object.keys(env).some((key) => envName(key) === "NODE_USE_SYSTEM_CA");
     if (!hasSystemCa) env.NODE_USE_SYSTEM_CA = "1";
   }
+  // Provider CLIs on Chinese Windows inherit OEM/ANSI code pages unless we pin UTF-8.
+  // These are non-secret locale flags; they do not relax the provider allowlist.
+  if (!Object.keys(env).some((key) => envName(key) === "PYTHONIOENCODING")) env.PYTHONIOENCODING = "utf-8";
+  if (!Object.keys(env).some((key) => envName(key) === "PYTHONUTF8")) env.PYTHONUTF8 = "1";
+  if (!Object.keys(env).some((key) => envName(key) === "LANG")) env.LANG = "C.UTF-8";
+  if (!Object.keys(env).some((key) => envName(key) === "LC_ALL")) env.LC_ALL = "C.UTF-8";
   return env;
 }
 
@@ -406,6 +414,19 @@ function waitWithTimeout(promise, timeoutMs) {
     promise.then(() => true),
     new Promise((resolveTimeout) => { timer = setTimeout(() => resolveTimeout(false), timeoutMs); }),
   ]).finally(() => clearTimeout(timer));
+}
+
+async function waitForTerminationRequest(child, timeoutMs, signal) {
+  if (typeof child?.waitForTerminationRequest !== "function") return;
+  const completed = await waitWithTimeout(
+    Promise.resolve().then(() => child.waitForTerminationRequest()),
+    Math.max(250, timeoutMs),
+  );
+  if (!completed) {
+    const error = new Error(`child process ${child.pid || "unknown"} did not confirm ${signal} delivery`);
+    error.code = "PROCESS_TERMINATION_REQUEST_TIMEOUT";
+    throw error;
+  }
 }
 
 function runTaskkill(pid, timeoutMs) {
@@ -443,6 +464,7 @@ async function terminateChildProcessInternal(child, { timeoutMs = 3_000 } = {}) 
   if (hasExited(child) && streamsClosed(child)) return;
   const closed = new Promise((resolveClose) => child.once?.("close", resolveClose));
 
+  let terminationRequestError = null;
   if (!hasExited(child)) {
     if (process.platform === "win32" && child.pid) {
       const killedTree = await runTaskkill(child.pid, timeoutMs);
@@ -450,23 +472,35 @@ async function terminateChildProcessInternal(child, { timeoutMs = 3_000 } = {}) 
         try { child.kill?.(); } catch {}
       }
     } else {
-      try { child.kill?.("SIGTERM"); } catch {}
+      try {
+        child.kill?.("SIGTERM");
+        await waitForTerminationRequest(child, timeoutMs, "SIGTERM");
+      } catch (error) {
+        terminationRequestError = error;
+      }
     }
   }
 
   let completed = await waitWithTimeout(closed, Math.max(250, timeoutMs));
-  if (!completed) {
-    try { child.kill?.(process.platform === "win32" ? undefined : "SIGKILL"); } catch {}
+  if (!completed || terminationRequestError) {
+    try {
+      child.kill?.(process.platform === "win32" ? undefined : "SIGKILL");
+      await waitForTerminationRequest(child, 500, process.platform === "win32" ? "termination" : "SIGKILL");
+      terminationRequestError = null;
+    } catch (error) {
+      terminationRequestError = error;
+    }
     child.stdin?.destroy?.();
     child.stdout?.resume?.();
     child.stderr?.resume?.();
-    completed = await waitWithTimeout(closed, 500);
+    if (!completed) completed = await waitWithTimeout(closed, 500);
   }
   if (!completed) {
     const error = new Error(`child process ${child.pid || "unknown"} did not close after termination`);
     error.code = "PROCESS_TERMINATION_TIMEOUT";
     throw error;
   }
+  if (terminationRequestError) throw terminationRequestError;
   child.stdin?.destroy?.();
   child.stdout?.destroy?.();
   child.stderr?.destroy?.();

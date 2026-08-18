@@ -129,12 +129,14 @@ test("fake child kill：TERM=pgid pkill 不拆通道；二杀升级拆通道；p
   channel.emit("data", Buffer.from("514CC_PGID=777\n"));
   child.kill("SIGTERM");
   await tick();
-  assert.ok(ssh.execCalls.some((call) => call.command === "pkill -TERM -g 777 2>/dev/null || true"));
+  assert.ok(ssh.execCalls.some((call) => call.command.includes("pkill -TERM -g 777 2>/dev/null")));
+  assert.ok(ssh.execCalls.some((call) => call.command.includes("pgrep -g 777")));
+  assert.ok(ssh.execCalls.every((call) => !call.command.includes("|| true")));
   assert.equal(channel.closed, false); // 首杀等远端自然死（保 stdout 尾）
   assert.equal(child.signalCode, "SIGTERM");
   child.kill("SIGKILL");
   await tick();
-  assert.ok(ssh.execCalls.some((call) => call.command === "pkill -KILL -g 777 2>/dev/null || true"));
+  assert.ok(ssh.execCalls.some((call) => call.command.includes("pkill -KILL -g 777 2>/dev/null")));
   assert.equal(channel.closed, true); // 升级拆通道（终止器等 close，不能永远等）
 
   // pgid 未到（启动即死/协议异常）：kill 直接通道关闭兜底
@@ -188,6 +190,53 @@ test("runProcessImpl：复用 runProcess 契约——input 到 stdin、stdout �
   killChannel.emit("close");
   await assert.rejects(aborted, { code: "ABORTED" });
   assert.ok(killSsh.execCalls.some((call) => call.command.includes("pkill -TERM -g 99")));
+});
+
+test("remote termination waits for the pkill acknowledgement even if the SSH channel closes first", async () => {
+  const channel = fakeChannel();
+  let acknowledgeKill;
+  const killAcknowledged = new Promise((resolve) => { acknowledgeKill = resolve; });
+  const ssh = fakeSsh({
+    channel,
+    execImpl: async () => killAcknowledged,
+  });
+  const controller = new AbortController();
+  const aborted = createRemoteRunner({ getService: () => ssh })
+    .runProcessImpl("h1", "/srv")("kimi", [], {
+      signal: controller.signal,
+      timeoutMs: 5_000,
+    });
+  let settled = false;
+  void aborted.catch(() => { settled = true; });
+  await tick();
+  channel.emit("data", Buffer.from("514CC_PGID=101\n"));
+  controller.abort();
+  await tick();
+  channel.emit("exit", null, "SIGTERM");
+  channel.emit("close");
+  await tick();
+  assert.equal(settled, false, "channel close alone must not prove the remote process group stopped");
+  acknowledgeKill({ code: 0, stdout: "", stderr: "" });
+  await assert.rejects(aborted, { code: "ABORTED" });
+  assert.ok(ssh.execCalls.some((call) => call.command.includes("pkill -TERM -g 101")));
+});
+
+test("remote termination rejects a failed signal request while the process group still exists", async () => {
+  const channel = fakeChannel();
+  const ssh = fakeSsh({
+    channel,
+    execImpl: async () => ({ code: 1, stdout: "", stderr: "process group still exists" }),
+  });
+  const child = createRemoteRunner({ getService: () => ssh }).spawnImpl("h1", "/srv")("kimi", [], {});
+  await tick();
+  channel.emit("data", Buffer.from("514CC_PGID=102\n"));
+  child.kill("SIGTERM");
+  await assert.rejects(
+    () => child.waitForTerminationRequest(),
+    { code: "REMOTE_TERMINATION_FAILED" },
+  );
+  assert.ok(ssh.execCalls[0].command.includes("pgrep -g 102"));
+  assert.ok(!ssh.execCalls[0].command.includes("|| true"));
 });
 
 const remoteInject = {
@@ -318,6 +367,34 @@ test("orchestrator.remoteAdapterFor 缓存同一只 / dispose 调 close；审批
   assert.equal(message.params.workspace, "ssh://h1/srv/app"); // 规范化串，绝不进本机 resolve()
   assert.equal(message.params.workspaceSource, "run.remote");
   assert.equal(message.params.isolation, "remote-unsupported");
+});
+
+test("orchestrator.remoteAdapterFor evicts a rejected constructor so the same run can recover", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "514cc-remote-run-retry-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const profile = {
+    id: "remote-retry",
+    adapter: "grok-mcp-via-codex-app-server",
+    builtin: false,
+    command: "grok",
+  };
+  const orchestrator = orchestratorFixture(root, {
+    remoteRunner: fakeRunner(),
+    profiles: [profile],
+  });
+  const run = { id: "r-retry", remote: { hostId: "h1", path: "/srv/app" } };
+  await assert.rejects(
+    () => orchestrator.remoteAdapterFor(run, profile.id),
+    (error) => ["REMOTE_ADAPTER_UNSUPPORTED", "ADAPTER_MANIFEST_INVALID"].includes(error.code),
+  );
+  assert.equal(orchestrator.remoteAdapters.size, 0);
+
+  profile.adapter = "kimi-headless-resume";
+  profile.command = "kimi";
+  const recovered = await orchestrator.remoteAdapterFor(run, profile.id);
+  assert.equal(recovered.adapter.id, "kimi-headless-resume");
+  assert.equal(orchestrator.remoteAdapters.size, 1);
+  await orchestrator.disposeRemoteAdapters(run.id);
 });
 
 test("orchestrator rechecks remote authorization at every provider dispatch boundary", async () => {

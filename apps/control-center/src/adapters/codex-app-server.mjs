@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { attachLfJsonl, encodeJsonLine } from "../jsonl.mjs";
 import { childProcessEnv, spawnCommand, terminateChildProcess, terminateChildProcessAndWait } from "../process-runner.mjs";
+import { preparePromptTransport } from "../prompt-transport.mjs";
 import {
   createScrubbedLineCollector,
   DEFAULT_MAX_TURN_OUTPUT_BYTES,
@@ -1136,6 +1137,16 @@ export class CodexAppServerAdapter {
       );
       if (signal?.aborted) throw requestAbortReason(signal);
       if (activeTurn?.cancellationError) throw activeTurn.cancellationError;
+      await preparePromptTransport({
+        prompt,
+        transport: "jsonl",
+        adapterId: this.id,
+        command: this.command,
+        eventStore: this.eventStore,
+        runId,
+        agentId,
+        auditTimeoutMs: this.eventPersistenceTimeoutMs,
+      });
       // Once this request is written, a transport failure cannot prove that the
       // turn was not accepted. The caller must not replay the prompt blindly.
       turnSubmissionAttempted = true;

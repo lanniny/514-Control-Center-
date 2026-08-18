@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { runProcess } from "../process-runner.mjs";
+import { preparePromptTransport } from "../prompt-transport.mjs";
 import { createLfCollector, publicCodexEvent } from "./stream-utils.mjs";
 
 export function buildCodexArgs({ sessionId = null, cwd, model = null, effort = null }) {
@@ -66,6 +67,15 @@ export class CodexCliAdapter {
     );
     if (sessionId) await onSessionStarted?.({ sessionId, protocol: "exec-json-resume" });
     await onTurnSubmitting?.({ sessionId: sessionId || null, protocol: "exec-json-resume", clientUserMessageId: randomUUID() });
+    await preparePromptTransport({
+      prompt,
+      transport: "stdin",
+      adapterId: this.id,
+      command: this.command,
+      eventStore: this.eventStore,
+      runId,
+      agentId,
+    });
     const result = await this.runProcessImpl(this.command, args, {
       cwd: effectiveCwd,
       input: prompt,

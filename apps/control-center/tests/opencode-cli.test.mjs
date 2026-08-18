@@ -69,6 +69,7 @@ test("OpenCode adapter surfaces process failure after draining event persistence
     eventStore: {
       emit: async (type) => {
         attempts.push(type);
+        if (type === "prompt.transport") return;
         throw new Error("event store unavailable");
       },
     },

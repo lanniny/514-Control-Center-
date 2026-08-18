@@ -3239,3 +3239,383 @@ __DELTA__: 烛(Codex) | 1 | 证据：`src/app.mjs:443-448`、`public/market-pane
 - 未执行付费 provider 推理；隔离 run 使用 `execute:false` 的 route-preview。
 
 __DELTA__: 烛(Codex) | 2 | 证据：`apps/control-center/src/collaboration-inbox.mjs:107` 推翻裸 askId 可跨 run 判定已回答的原实现；`apps/control-center/public/app.js:19923` 推翻 Inbox 按钮在 run 缓存陈旧时仍能可靠打开任务的原判断。
+
+### D-2026-08-18-002 · R0 只落地可信发布基线，不扩 UI、不升正式版本
+
+- **date**: 2026-08-18
+- **decider**: LO（按项目经理路线图深度完善，范围锁定 R0-01 → R0-02 → R0-03）
+- **verdict**: 三条 R0 已接线并通过聚焦验证；正式运行态与 Git 交付仍 partial
+- **adopted**: true
+- **source_handoff**: `.ai-shared/handoff/claude-to-all__r0-trusted-baseline__20260818-0735.md`
+- **tags**: control-center, r0, prompt-transport, delivery-ownership, release-truth
+
+#### 决定
+
+1. 当前迭代只做可信闭环的四个根节点里的前三个：中文传输、交付集合、运行态/workflow 对账。Inbox 保持只读；项目锚点与 Bridge Doctor 进下一迭代；R0-04 shutdown 竞态本轮不做。
+2. Windows `.ps1` 不是可信 UTF-8 通道。argv 与 stdin 遇到非 ASCII 一律 `PROMPT_TRANSPORT_UNSAFE`。本机 echo fixture 并未复现 `?`，仍按历史真实 provider 闭环 fail-closed，不把「这台机器的 powershell.exe -File 碰巧保住了中文」写成合同。
+3. 交付所有权 cut 为 `v42-r0`，`formalRelease: false`。`qa:delivery --strict` 对未声明或 must_ship 未跟踪必须红。本轮 8 个新文件未 git add，是闸门在工作。
+4. `releaseTruth/v1` 没有当轮验证证据时只能 unknown（脏树 stale）。`passed` 但缺少对齐的 `sourceCommit` 不得变绿。任何「已激活」必须引用当轮 readback。
+5. 正式版本继续停在 v3.5.0。悬挂的 `collab-console-review-20260815` workflow 关闭为 superseded。
+
+#### 验证
+
+- 聚焦 R0 测试：24 pass / 0 fail / 1 skip。
+- `qa:delivery --strict`：tracked=348 / physical=356 / strict fail 8 个本轮 must_ship 未跟踪。
+- 烛只读评审：`.ai-shared/handoff/codex-to-claude__r0-trusted-baseline__20260818-0720.md`，DELTA=1，当场收口 stdin `.ps1` 闸、`server.mjs` 交付焦点、consistency 分类器。
+
+#### 边界
+
+- 未 git add / commit / push。
+- 未 reload 正式 Control Center，未跑全量 `npm test`，未执行真实付费 provider。
+- 不能把本机测试绿灯说成已激活或可提交交付。
+
+__DELTA__: 烛(Codex) | 1 | 证据：`apps/control-center/src/prompt-transport.mjs:87` stdin 席位补上 `.ps1` 闸；`apps/control-center/scripts/qa-delivery-manifest.mjs` 圈入 `server.mjs`；`apps/control-center/src/release-truth.mjs:35` `passed` 缺 `sourceCommit` 不再变绿。
+
+### D-2026-08-18-003 · R1-01 项目桥只做只读四面诊断，不新建仪表盘
+
+- **date**: 2026-08-18
+- **decider**: LO（R0 交付后说「继续」，进入项目经理排的下一迭代）
+- **verdict**: 锚点与 Bridge Doctor 已接到环境舱；正式进程未 reload
+- **adopted**: true
+- **source_handoff**: `.ai-shared/handoff/claude-to-all__project-bridge__20260818-0815.md`
+- **tags**: control-center, r1, project-bridge, environment
+
+#### 决定
+
+1. 项目身份拆成 `projectId`（位置）和 `anchorId`（仓库）。Git 仓库用首提交做指纹，整棵搬家保持锚点并标 stale；无 git 只跟路径，搬家即新身份。
+2. 客户端不能提交 cwd。桥接 API 只从 `runId` 或控制面 repoRoot 取目录，忽略 `cwd` query。
+3. 复用环境舱，不新开 Doctor 页。无当轮证据不得显示 consistent / 已接通。
+4. Inbox、向导、派工预演、回放、shutdown 竞态、版本升格仍不进入本波。
+
+#### 验证
+
+- 项目桥单元 + 环境舱契约：14 pass / 0 fail。
+- 烛评审 DELTA=1，已把真实 `mv` 与无 git 搬家补进测试。
+
+#### 边界
+
+- 未 git add / commit / push，未 reload 正式实例。
+- 两个克隆同一仓库会共享 `anchorId`（同一对象谱系）；位置仍由 `projectId` 区分。
+
+__DELTA__: 烛(Codex) | 1 | 证据：`apps/control-center/src/project-bridge.mjs` 指纹改为首提交后，真实 rename 保持 `anchorId`；无 git 目录搬家换身份。
+
+### D-2026-08-18-004 · v42 首批 DAG 收口：可信闭环接到 Ask/ACK，不升正式版本
+
+- **date**: 2026-08-18
+- **decider**: LO（「继续并且请你完成项目经理的方案」）
+- **verdict**: §13 首批 DAG 已接线并通过聚焦验证；烛两条致命已死、复扫 APPROVED；正式运行态与 Git 交付仍 partial
+- **adopted**: true
+- **source_handoff**: `.ai-shared/handoff/claude-to-all__v42-pm-closeout__20260818-0915.md`
+- **tags**: control-center, v42, r0, r1, r2-01, inbox, replay, artifacts, first-run
+
+#### 决定
+
+1. 「完成方案」= 完成 `proposals/v42-control-center-product-roadmap.md` §13 首批 DAG，不是做完 R2-02/R3/R4，也不是升正式版本。
+2. 本波接线：R0-04 关闭链与 provider 引用竞态；R1-02 首次就绪（DAG 外薄做）；R1-03 派工预演不建 run、成本未知不当 0；R1-04 回放只读，`submitting/submitted/ambiguous` 禁自动重放；R1-05 证据卡永不 `published`；R2-01 Inbox 可写 Ask→Answer→ACK，ACK ≠ provider 成功，高影响动作拒绝。
+3. Inbox 写序必须先 `bus.append` 再 `inboxLifecycle.apply`。`stored=answered` 单独不能摘待办，必须 bus 上真有 answer。
+4. `close()` 在 proxy / `automations.stop` 失败后必须复活调度器并丢掉 stop 缓存，重试不得跳过停调度器。二次成功 close 保持幂等。
+5. first-run `ready` 只认四步全 `ready`；`attention` 不算通过。环境舱路径不触发健康探针。
+6. 正式版本继续停在 v3.5.0。交付 cut 仍是 `v42-r0`。R2-02 注意力中心、R2-03 社会协作、R3 Delivery Gate 2.0、R4 选择性扩展按进入条件暂缓。
+7. 未获 LO 逐字确认前不 git add / commit / push；未当轮 readback 不得称正式实例已激活。
+
+#### 验证
+
+- 聚焦第一批：37 pass / 0 fail（含 router、inbox、lifecycle、first-run、replay、artifacts、provider-race）。
+- 烛致命收口后再跑：inbox + first-run 7 pass / 0 fail（含 `stored answered 且 bus 无 answer` 回归钉）。
+- 烛 R1：`.ai-shared/handoff/codex-to-claude__v42-pm-closeout__20260818-0850.md`，DELTA=1，CHANGES_REQUESTED；两条致命当场改。
+- 烛 R2：`.ai-shared/handoff/codex-to-claude__v42-pm-closeout-r2__20260818-0905.md`，DELTA=0，APPROVED。
+
+#### 边界
+
+- 未 git add / commit / push。`qa:delivery --strict` 对未跟踪 must_ship 继续红，闸门在工作。
+- 未 reload 正式 Control Center，未跑全量 `npm test`，未执行真实付费 provider。
+- Inbox UI 仍不传 `expectedRevision`（CAS 在点击路径上未接电）；close 超时不 abort 底层 Promise；证据读失败仍可能被环境舱吞掉。
+
+__DELTA__: 烛(Codex) | 1 | 证据：R1 推翻 persist-then-append 与 close 跳过 automations.stop；R2 复扫两条已死 DELTA=0。见 `codex-to-claude__v42-pm-closeout__20260818-0850.md` 与 `...-r2__20260818-0905.md`。
+
+### D-2026-08-18-005 · R2-02 注意力中心只做同源投影，不造第二状态库
+
+- **date**: 2026-08-18
+- **decider**: LO（「继续」进入项目经理下一档）
+- **verdict**: 队列/执行中/Inbox 数字已接到同一 attention 信封；烛推翻 queued 双计后复扫 APPROVED
+- **adopted**: true
+- **source_handoff**: `.ai-shared/handoff/claude-to-all__v42-r202-attention__20260818-0940.md`
+- **tags**: control-center, v42, r2-02, attention, inbox
+
+#### 决定
+
+1. `GET /api/teams/:id/attention` 嵌 Inbox，复用 `orchestrator.list()` + health `peek()` + roster。不写新 JSON。
+2. `queued` 只进队列深度，不进 `activeJobs` / 执行中席位。
+3. offline / busy / degraded / unknown 不得涂绿；`available:true` 不能盖过 degraded。
+4. Inbox 点击传 `expectedRevision`；无账本行的 ask 投影 revision=0。空答复在 append 前拒绝。
+5. 旧 attention 包按 teamId 丢弃，不得把整页钉在骨架上。
+6. R2-03 / R3 / R4 仍按进入条件暂缓。正式版本仍 v3.5.0。不 git add，不称已激活。
+
+#### 验证
+
+- 聚焦：42 pass / 0 fail。
+- 烛 R1：`codex-to-claude__v42-r202-attention__20260818-0925.md` DELTA=2，queued 双计。
+- 烛 R2：`codex-to-claude__v42-r202-attention-r2__20260818-0935.md` DELTA=0，APPROVED。
+
+#### 边界
+
+- 花名册卡片仍走 `buildTeamPanelData`，英雄数字走 attention；两把尺可能有一拍差异。
+- `peek()` 可能是过期探针；空 cache 为 unknown，不涂绿。
+- 未 reload 正式实例，未 git add。
+
+__DELTA__: 烛(Codex) | 2 | 证据：先推翻 queued 算进 activeJobs；收口后 R2 复扫 DELTA=0。见 `codex-to-claude__v42-r202-attention__20260818-0925.md` 与 `...-r2__20260818-0935.md`。
+
+### D-2026-08-18-006 · R2-03 社会协作必须显式 opt-in，默认保持 pipeline
+
+- **date**: 2026-08-18
+- **decider**: LO（「继续」进入项目经理 R2-03）
+- **verdict**: 默认不再进 socialLoop；/social 或 orchestrationMode:"social" 才互聊；自动化侧门已收
+- **adopted**: true
+- **source_handoff**: `.ai-shared/handoff/claude-to-all__v42-r203-social-optin__20260818-1335.md`
+- **tags**: control-center, v42, r2-03, social, pipeline
+
+#### 决定
+
+1. `resolveOrchestrationMode`：缺省和 `"pipeline"` 都是 pipeline；只有精确 `"social"` 才社会模拟；其它值 fail-closed。
+2. Composer：`/social` opt-in，`/pipeline` 仍可强制流水线。普通发送不再默认互聊。
+3. agent-to-agent 必须有收件人；social 合同固化轮次、每轮预算、委派深度、乒乓上限（默认 2）。无收件人不入 bus。
+4. 自动化有点名或显式 social 才传 `orchestrationMode:"social"`，否则 pipeline。create/update 落盘该字段。
+5. 不从最终文本反推团队图，不开放无限互聊。正式版本仍 v3.5.0。不 git add，不称已激活。
+
+#### 验证
+
+- social-contract + social-orchestration：81 pass / 0 fail。
+- social-contract + automations：21 pass / 0 fail。
+- 烛 R1：`codex-to-claude__v42-r203-social-optin__20260818-1315.md` DELTA=1，自动化侧门。
+- 烛 R2：`codex-to-claude__v42-r203-social-optin-r2__20260818-1325.md` DELTA=1，APPROVED。
+
+#### 边界
+
+- 既有磁盘上的 social run 仍按 `orchestrationMode==="social"` 跑，合同可从旧字段回放。
+- 未 reload 正式实例，未 git add。R3 / R4 仍暂缓。
+
+__DELTA__: 烛(Codex) | 1 | 证据：automations.mjs trigger 曾带着 requestedAgentIds 不声明 social；已收。见 `codex-to-claude__v42-r203-social-optin__20260818-1315.md`。
+
+### D-2026-08-18-007 · R3-01 Delivery Gate 2.0 只合成可审计发布记录，不执行 QA、不自动 git
+
+- **date**: 2026-08-18
+- **decider**: LO（「继续」进入项目经理 R3-01）
+- **verdict**: releaseRecord/v1 接线；engineering ready ≠ publishable；未授权不 git add
+- **adopted**: true
+- **source_handoff**: `.ai-shared/handoff/claude-to-all__v42-r301-delivery-gate__20260818-1550.md`
+- **tags**: control-center, v42, r3-01, delivery-gate, release-record
+
+#### 决定
+
+1. `514cc.releaseRecord/v1` 合成 delivery manifest、releaseTruth、四命令证据与 unfinished；`executeCommands` 硬拒。
+2. `autoGit` 恒 `{add:false,commit:false,push:false}`；未声明 must_ship → blocked。
+3. formal-release 只挡 `publishable`，不挡 engineering `ready`。
+4. 命令证据经 `PUT /api/release-record/commands` 申报落盘，标 `attested:true`，非本接口执行 QA。
+5. 环境舱展示交付门裁决与 nextAction。正式版本仍 v3.5.0；正式实例未 reload。
+
+#### 验证
+
+- `tests/release-record.test.mjs`：7 pass / 0 fail。
+- UI 契约钉 `/api/release-record`。
+- 烛：CLI 启动后挂于脏仓噪声，独立评审 **未完成**；见 `codex-to-claude__v42-r301-delivery-gate__20260818-1545.md`（partial）。
+
+#### 边界
+
+- live 闸在未跟踪 must_ship / 未激活时保持 blocked——正确。变绿需 LO 授权 git add + 当轮证据 + reload。
+- R3-03 指标、R4 仍按进入条件暂缓。
+
+__DELTA__: 主驾 | 1 | 证据：R3-01 接线；烛通道残差明示。见 `claude-to-all__v42-r301-delivery-gate__20260818-1550.md`。
+
+### D-2026-08-18-008 · R3-02 准备交付只生成 plan/差异/风险，不自动 merge
+
+- **date**: 2026-08-18
+- **decider**: LO（「继续完善」进入项目经理 R3-02）
+- **verdict**: run-settlement/v1 接线；远程 remote-unsupported；Git merge 类动作硬拒
+- **adopted**: true
+- **source_handoff**: `.ai-shared/handoff/claude-to-all__v42-r302-settlement__20260818-1740.md`
+- **tags**: control-center, v42, r3-02, settlement, worktree
+
+#### 决定
+
+1. `514cc.run-settlement/v1` 把 worktree、diff 摘要、artifact、recovery 收成准备交付记录。
+2. `autoLanding` 恒全 false；`GitActionBroker` 对 merge/rebase/reset/checkout 返回 `MERGE_UNSUPPORTED`。
+3. 远程 run 的隔离与裁决都是 `remote-unsupported`，不生成本机 diff endpoint。
+4. Mission Control 结算字段只暴露工作树 leaf，不回绝对路径。
+5. 正式版本仍 v3.5.0；正式实例未 reload；不 git add。
+
+#### 验证
+
+- 聚焦：`run-settlement` + `mission-control` + `workbench-environment` + UI 契约 **40 pass / 0 fail**。
+- 烛：Task 通道 unpaid invoice，独立评审未完成。见 `codex-to-claude__v42-r302-settlement__20260818-1735.md`。
+
+#### 边界
+
+- 系统只生成 plan、差异和风险。落地仍由 LO 复制命令或新工作树继续。
+- R3-03 指标与 R4 仍暂缓。
+
+__DELTA__: 主驾 | 1 | 证据：R3-02 接线；烛通道残差明示。见 `claude-to-all__v42-r302-settlement__20260818-1740.md`。
+
+### D-2026-08-18-009 · R3-03 运营指标只合成低敏摘要，缺失成本不当 0
+
+- **date**: 2026-08-18
+- **decider**: LO（「继续完善直到完成项目经理的任务」）
+- **verdict**: ops-metrics/v1 接线；空样本比率与未知成本保持 null；R4 仍按进入条件暂缓
+- **adopted**: true
+- **source_handoff**: `.ai-shared/handoff/claude-to-all__v42-r303-ops-metrics__20260818-1755.md`
+- **tags**: control-center, v42, r3-03, ops-metrics, observability
+
+#### 决定
+
+1. `514cc.ops-metrics/v1` 从当前进程内存合成八项低敏指标：首个有效响应、成功/失败/恢复率、审批等待、stale、route fallback、证据完整率、costUsd 可用率、中文传输失败。
+2. 空窗口的比率与均值为 `null`，UI 显示「未知」。缺失 `costUsd` 不进均值、不当 $0。
+3. 健康面走 `peekMeta()`，不为此打探针。审批等待只观测 pending 队列。
+4. `GET /api/observability/ops` + 体系观测页运营指标卡/明细表。
+5. 正式版本仍 v3.5.0；正式实例未 reload；不 git add。R4 不进入。
+
+#### 验证
+
+- `tests/ops-metrics.test.mjs` + `health.peekMeta` + lucide sprite：**20 pass / 0 fail**。
+- 烛：Task/CLI 通道本轮仍不可用，独立评审未完成，见项目经理交付审核文档残差。
+
+#### 边界
+
+- 这是当前控制面内存快照，不是历史时序库。进程重启后窗口清空。
+- 不把 `qa:delivery --strict` 因未跟踪 must_ship 变红当成指标模块失败。
+
+__DELTA__: 主驾 | 1 | 证据：R3-03 接线；未知成本不当 0。见 `claude-to-all__v42-r303-ops-metrics__20260818-1755.md`。
+
+### D-2026-08-18-010 · v42 PM 独立复审采用五层状态与命令证据信任分级，推翻 R0-R3 已完成口径
+
+- **date**: 2026-08-18
+- **decider**: LO（要求审核 Cursor 的 PM 交付文档并进一步加强完善）+ 烛(Codex)独立复审
+- **verdict**: IMPLEMENTATION PARTIAL / DELIVERY BLOCKED / LIVE UNVERIFIED
+- **adopted**: true
+- **source_handoff**: `.ai-shared/handoff/codex-to-claude__v42-pm-delivery-review-r2__20260818-2002.md`
+- **tags**: control-center, v42, pm-review, release-record, evidence-trust, delivery, runtime-readback
+
+#### 决定
+
+1. 不再用单一“完成/未完成”描述 R0-R3。所有后续审核按五层记录：源码/契约、聚焦验证、全量与浏览器证据、Git 交付、正式运行态。源码接线或本地测试通过不能越级替代 Git 与 live readback。
+2. R1/R2 当前可记 `source-complete / live-partial`；R0-01、R0-04、R3-01 仍为 `partial`；R0-02 因 strict delivery 为 `blocked`；R4 继续 `deferred`。整体状态固定为 `IMPLEMENTATION PARTIAL / DELIVERY BLOCKED / LIVE UNVERIFIED`，直到相应证据改变。
+3. Release command evidence 分为 `operator-attested` 和 `server-observed`。`PUT /api/release-record/commands` 只能写入操作者申报；只有 `passed + matchesSource + server-observed + independent` 且运行态 `consistent`，才可能打开工程 ready。生产态尚无四类 server-observed runner，因此 R3-01 不得记完成。
+4. 本轮加固：prompt 审计默认 1000ms 超时并 fail-closed；releaseRecord 加证据信任与 consistency 硬门；run diff 非零退出 fail-closed 且路径脱敏；首次就绪拒绝旧提交证据；首个有效响应取最早合法时间；远程 adapter reject 清 stale cache；replay 优先原生稳定 ID；远程 TERM/KILL 等 SSH 回执；Inbox 行内 CAS 与 attention unknown 态收口。
+5. 发布 runbook 固定为：LO 授权显式 Git 闭包 -> 确定提交/干净 checkout 上运行验证 -> 受控 runner 生成 server-observed 证据 -> LO 授权 reload -> PID/cwd/generation/sourceCommit readback -> 再议 formal release。禁止用 HTTP 自述、历史 handoff 或隔离 QA 替代其中任一步。
+
+#### 验证
+
+- 聚焦复审：67 tests / 66 pass / 0 fail / 1 skipped / exit 0。
+- 远程关闭专项：12 tests / 12 pass / 0 fail / exit 0。
+- 全量：1491 tests / 1489 pass / 0 fail / 2 skipped / exit 0；日志 `C:/Users/16643/.fastctx/jobs/j-qggw57/output.log`。
+- `npm run validate`：13 项全部 valid，CC-Switch commandCount=288，exit 0。
+- 定向 Inbox 浏览器 QA：attention 500 显示未知；无同步 dialog；Answer 带 `expectedRevision:0`；1440/820/390 无横向溢出。证据 `apps/control-center/.qa-v42/targeted/result.json`。
+- 环境舱浏览器 QA：1440/1280/820/390 全通过，`diagnostics:[]`，`gracefulShutdown:true`，`tempRootRemoved:true`。证据 `apps/control-center/.qa-v42/environment-final/result.json`。
+- `qa:delivery --strict`：tracked=348 / physical=377 / undeclared source/test=29 / strict fail / exit 1；该红灯是正确交付阻断。
+
+#### 边界
+
+- 未执行 `git add/commit/push`，HEAD 仍为 `a8cb49d9b9def40ad3f41a5232f9132dc57ea644`。
+- 未 reload 或终止正式 Control Center，未做当轮运行态 readback。
+- 未执行真实启用 provider 的中文/ASCII 接收回读，未执行真实 SSH UTF-8 echo 或远端进程树 TERM/KILL readback。
+- 忽略的 `.qa-v42/` 是隔离验收产物，不算 delivery drift，也不进入发布集合。
+- 正式版本真源继续是 v3.5.0；此决策不构成版本升格或 GitHub Release。
+
+__DELTA__: 烛(Codex) | 2 | 证据：`.ai-shared/handoff/codex-to-claude__v42-pm-delivery-review-r2__20260818-2002.md` 推翻“R0-R3 已完成/工程门 ready 材料已齐”；`apps/control-center/src/release-record.mjs:61` 与 strict delivery 的 29 项漂移共同证明发布链尚未闭环。
+
+#### 最终对抗复核 follow-up
+
+全新只读探子在初版 R2 handoff 后又补出三条证据口径缺口，并已收口：
+
+1. 远程终止命令移除 `|| true`；`pkill` 非零后用 `pgrep` 判定进程组是否已不存在，仍存在或探针异常必须返回 `REMOTE_TERMINATION_FAILED`。回归覆盖 SSH 通道先关、回执延迟和信号请求失败。
+2. 首次就绪不再把裸 health 数组当当轮验证；必须由 HealthService 提供 `available:true / stale:false / capturedAt` 元数据，旧缓存保持 `attention`。
+3. 运营 evidence rate 不再把 `worktreePath` 字段存在当成完整证据；路径残留而无完成 turn/result 的终态 run 记为 incomplete。
+
+新增验证：聚焦 22/22 pass；最终全量 1493 tests / 1491 pass / 0 fail / 2 skipped / exit 0，日志 `C:/Users/16643/.fastctx/jobs/j-jrba0u/output.log`。
+
+__DELTA__: Codex独立探子 | 1 | 证据：`apps/control-center/src/ssh/remote-run.mjs:169` 推翻“SSH 命令 exit 0 即已确认终止请求”的实现；`apps/control-center/src/first-run-readiness.mjs:33` 与 `apps/control-center/src/ops-metrics.mjs:106` 同步收紧证据 freshness/completeness。
+
+### D-2026-08-18-011 · R3-01 server-observed QA runner 接线（不改变交付裁决）
+
+**日期**：2026-08-18 晚
+**决策**：把 R2 复审“下一步必须按顺序推进”中唯一不需要新授权的一项落地——新增受控的 server-observed QA runner，让四类 QA（validate / focusedTests / fullTests / browserQa）可以在服务端进程内执行并产出 `provenance:"server-observed" / evidenceTrust:"independent"` 的独立证据。这是生产入口的接线，不是对正式实例的验收。
+
+**实现边界**：
+
+1. 命令目录固化在服务端（`RELEASE_COMMAND_DEFS`）：`npm run validate`、聚焦 release 测试、全量测试、`qa:environment`；无 shell、无 HTTP 参数拼接。HTTP 侧（`POST /api/release-record/runner/run`）只能选择跑哪些 id 或提供期望 `sourceCommit`，不能注入命令、不能覆写 provenance——证据只能经 evidence store 的 `saveObserved` 写入。
+2. run 开始前解析 `git rev-parse HEAD^{commit}`；拿不到提交即拒绝（`RELEASE_RUNNER_SOURCE_COMMIT_UNAVAILABLE`），不做无锚证据。每条命令结束后复核 HEAD，移动过就把当轮证据记为 `blocked` 并附 `HEAD moved` 说明，不冒充通过。
+3. 并发互斥：同一进程内同时只允许一个 run（`RELEASE_RUNNER_BUSY` 409）。命令退出码非零记 `failed` 不抛异常；执行异常记 `blocked`。每条证据含 `status/exitCode/durationMs/sourceCommit/checkedAt`。
+4. `GET /api/release-record/runner` 只读暴露目录与占用状态；UI 未接线（本轮不扩功能面）。
+
+**验证**：新增 `tests/release-command-runner.test.mjs` 7/7（目录固化、server-observed 落库、failed 不抛、未知 id/无提交拒绝、HEAD 移动记 blocked、并发 409、缺接线即抛）；全量 1500 tests / 1498 pass / 0 fail / 2 skipped / exit 0；`npm run validate` 13 valid / 0 invalid / exit 0；`qa:delivery --strict` tracked=348 / physical=379 / undeclared=31 / exit 1（29 旧项 + 本轮源码/测试 2 项，闸门继续正确红灯）。
+
+**边界与未做**：
+
+- 未在正式 Control Center 实例对确定提交执行过任何 run；runner 在正式实例的真实产出仍为空，R3-01 维持 `partial`，发布链（Git 暂存 31 项、reload/readback、真实 provider/SSH 验收）全部维持待 LO 授权。
+- 未执行 `git add/commit/push`，HEAD 仍为 `a8cb49d9b9def40ad3f41a5232f9132dc57ea644`；未升格版本，真源仍 v3.5.0。
+- runner 的 `browserQa` 定义复用 `qa:environment`（环境舱）；如后续需要把浏览器 QA 换成更强入口，属于新的 LO 决策。
+
+__DELTA__: Claude(主驾) | 1 | 证据：`apps/control-center/src/release-command-runner.mjs:1` 新增 server-observed 执行器并经 `apps/control-center/server.mjs:1161` 暴露，补上 R2 复审指出的“无 server-observed 命令证据生产入口”缺口；`apps/control-center/src/release-record.mjs:61` 的信任分级因此首次有了服务端生产者，但正式实例未执行，R3-01 仍为 `partial`。
+
+#### Codex 独立复审 follow-up（2026-08-18 21:47）
+
+原交付关于“绑定确定提交”和“关闭链无新增静默失败”的判断被反例推翻并已修复：
+
+1. HTTP `sourceCommit` 原先会直接替代起始 HEAD 读取；现仅作为 expected value，服务端始终独立解析 HEAD，不匹配在执行 QA 前以 `RELEASE_RUNNER_SOURCE_COMMIT_MISMATCH` 拒绝。
+2. 原 runner 可在脏工作树上写入 `server-observed passed`；现起始工作树必须 clean，并把 `diffDigest/workspaceClean/runId` 写入 evidence。release record 还要求 evidence digest 与当前 truth 匹配，旧的无工作树锚记录自动降级。
+3. 空数组会退化成“执行全部”，重复 id 可重复运行重命令；现空、超量、重复、未知选择均在执行前固定错误码拒绝，不反射任意输入。
+4. 原 runner 不属于 app shutdown graph；现持有 `AbortController`，`app.close()` 会取消并等待活动 QA 子进程，活动 runner 会阻止 runtime reload，异常和持久化失败后 busy 锁均释放。
+5. 原建议“reload -> runner -> Git 闭包”不再成立。runner 会拒绝当前脏工作树；正式顺序必须是“31 项显式 Git 闭包形成不可变提交 -> 从该提交 reload/readback -> 执行 runner -> 回读 release record”。
+
+**验证**：runner 反例 10/10；release/runner/app-close 聚焦 23/23；HTTP e2e 7/7；全量 1505 tests / 1503 pass / 0 fail / 2 skipped / exit 0；validate 13 valid；`qa:environment` 四视口通过且隔离服务 graceful shutdown；strict delivery 仍为 tracked=348 / physical=379 / undeclared=31 / exit 1；目标 diff check exit 0。
+
+**裁决**：`IMPLEMENTATION PARTIAL / DELIVERY BLOCKED / LIVE UNVERIFIED` 不变。当前源码边界更可信，但没有 Git 授权、正式实例 reload/readback 或正式 runner 证据。
+
+__DELTA__: 烛(Codex) | 2 | 证据：`apps/control-center/src/release-command-runner.mjs` 推翻客户端值可充当起始提交锚与脏工作树可产独立证据的原判断；`apps/control-center/src/app.mjs` 把 runner 纳入 close/reload 生命周期；`apps/control-center/src/release-record.mjs` 增加工作树摘要匹配门。
+
+#### Live gate 可达性 follow-up（2026-08-18 22:31）
+
+第二轮数据流反例又推翻了“runner 已成为 releaseTruth 的有效生产者”：原实现只把四条命令写入 `release-command-evidence.json`，而 live `collectReleaseTruth()` 从未接收 `validationEvidence`，所以即使四条全部通过，`consistency` 仍永久为 `unknown`，工程门不可达。
+
+修复同时封住了不能接受的简化方案：不能只按 commit 复用持久化证据，否则同提交重启后，旧进程证据会冒充新实例的“当轮验证”。现在每条 observed evidence 绑定 `runtimePid/runtimeStartedAt/runtimeGeneration`；runner 在命令后和持久化前复核实例身份，Release Record 要求命令证据匹配当前实例，live truth 只聚合当前实例、同提交、同 diff digest、四类全通过的完整证据。旧实例或旧 generation 的行保持 `unknown/partial`，不能激活。产品策略明确允许同一不可变输入与同一 runtime identity 下跨 `runId` 增量补齐四类证据，不要求一次长请求全跑；任何锚变化都会让旧行失效。
+
+**新增验证**：release/runner/truth/app-close 聚焦 33/33；HTTP 真实装配 8/8，其中隔离干净 Git 仓库 + 子进程 instance lock 证明确认当前实例证据可让 `/api/release-truth` 达到 `consistent`，旧实例证据单测保持拒绝。
+
+**裁决**：源码状态链从“生产者存在但绿门不可达”修为可达且跨实例 fail-closed；正式实例仍未执行，整体裁决继续是 `IMPLEMENTATION PARTIAL / DELIVERY BLOCKED / LIVE UNVERIFIED`。
+
+__DELTA__: 烛(Codex) | 2 | 证据：`apps/control-center/server.mjs` 原 live releaseTruth 未消费 command evidence，四条 passed 仍必然 unknown；现由 `apps/control-center/src/release-record.mjs` 聚合当前实例证据，并由 `apps/control-center/src/release-truth.mjs` 强制 runtime identity 匹配。
+
+#### 最终验证收口（2026-08-18 23:00）
+
+- runner 固定目录的五文件聚焦回归：43 tests / 43 pass / 0 fail / exit 0；日志 `C:/Users/16643/.fastctx/jobs/j-ziq479/output.log`。
+- 全量回归：1512 tests / 1510 pass / 0 fail / 2 skipped / exit 0；日志 `C:/Users/16643/.fastctx/jobs/j-thbzou/output.log`。
+- `npm run validate`：13 项全部 valid，CC-Switch commandCount=288，exit 0。
+- `npm run qa:environment`：1440/1280/820/390 四视口无横向溢出，`diagnostics:[]`，随机端口隔离实例 `gracefulShutdown:true`、`tempRootRemoved:true`，exit 0；日志 `C:/Users/16643/.fastctx/jobs/j-vq6ggv/output.log`。
+- `npm run qa:delivery -- --strict`：tracked=348 / physical=379 / undeclared source/test=31 / strict fail / exit 1；31 项与既有交付阻断清单一致，闸门继续 fail-closed。
+- HEAD 读回仍为 `a8cb49d9b9def40ad3f41a5232f9132dc57ea644`。上述均为本地源码/隔离实例证据，不构成正式实例 runner 执行、Git 交付或版本升格。
+
+### D-2026-08-18-012 · Console UI 锁定为墨稿席位场 + 协作台席位轨
+
+- **date**: 2026-08-18
+- **decider**: LO（方案选择题）+ 主驾仲裁
+- **verdict**: SPEC LOCKED / NOT IMPLEMENTED
+- **adopted**: true
+- **source_handoff**: `.ai-shared/handoff/claude-to-all__console-awwwards-ui-lock__20260818-2210.md`
+- **tags**: control-center, ui, forge, awwwards, seat-field, lucide
+
+#### 决定
+
+1. 抛弃现行 Forge「暖米白 + Claude 铜橙仪表盘」世界观。新视觉真源：墨井 `#14181F` / 宣蓝 `#E4E7EE` / 胆矾 `#5E8B86`（`--primary`）/ 胭脂 `#A84D68`（只表示在场）/ 蓝铅笔 `#6A849C` / 灯芯 `#D9C5A8`。
+2. 暗夜玫瑰不填主按钮，降职为胭脂生命信号；ccline 状态栏仍可保持玫瑰脸，Console chrome 不再复刻 Claude 铜橙。
+3. 协作台外壳收成 48px 席位轨；页面跳转以 Ctrl+K 为一等公民。团队页席位场全出血。不恢复独立 `#/hero`。
+4. 策规格的双寄存器、RAF 互斥、零 Lucide-only/零 emoji、仪器面冲突时赢、CSP/CSSOM —— 继续有效。
+5. 本决策只锁方案。未改 `apps/control-center` 产品代码。实现另波，需 LO 再说开工。
+
+#### 验证
+
+- 方案阶段：策手稿 + 设计面 + LO 两道选择题锁定。产品代码零 diff。
+
+#### 边界
+
+- 不构成版本升格、不构成 Git 交付、不宣称已达 Awwwards 完成度。
+- 实现波若发现席位轨让 composer 变钝，按策 T14 裁决回退画布强度，不私自改回铜橙暖纸。
+
+__DELTA__: 主驾 | 2 | 证据：LO 锁定 ink-field + seat-rail；`.ai-shared/handoff/claude-to-all__console-awwwards-ui-lock__20260818-2210.md` 推翻策 ADR-UI-01 与保留标签侧栏。
