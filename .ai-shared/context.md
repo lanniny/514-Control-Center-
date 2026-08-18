@@ -1,7 +1,7 @@
 # 当前任务上下文（活跃状态）
 
 > 协作体系的"短期记忆"。每个 Agent 接入时**先读这里**。
-> 由 Claude 主驾维护。最后更新：2026-08-18（R3-01 runner 独立复审已收紧提交、工作树与生命周期证据；交付、真实 provider/SSH、正式实例仍未闭环）。
+> 由 Claude 主驾维护。最后更新：2026-08-18（v42 Git 产品闭包已推送；正式实例 runner、真实 provider/SSH 与版本升格仍未闭环）。
 > 本文件只存稳定事实和当前风险；逐轮实现史、测试计数与运行时快照分别进入 `decisions.md`、handoff 和当轮验证输出。
 
 ## 主人信息
@@ -108,18 +108,19 @@ Console 另有 Grok Build、Kimi 前端和 Pi resident 等执行 profile；它�
 - **v42 首批 DAG 收口**（R0-04 → R1-03 → R1-04 → R1-05 → R2-01，外加薄做 R1-02）：关闭链/provider 引用竞态、派工预演不建 run、回放只读且 submitting/ambiguous 禁自动重放、证据卡永不宣称已发布、Inbox 可写 Ask/Answer/ACK（ACK ≠ provider 成功；高影响动作拒绝）、环境舱首次就绪四步。烛 R1 抓到 Inbox persist-then-append 与 close 跳过 automations.stop，已当场改；R2 复扫 DELTA=0。证据见 `claude-to-all__v42-pm-closeout__20260818-0915.md`、`D-2026-08-18-004`。**Inbox 不再只读。**
 - **R2-02 注意力中心**：`GET /api/teams/:id/attention` 把队列深度、执行中席位、待答、需关注收进同一投影（Inbox 嵌在信封里，不新持久化）。`queued` 不算执行中。英雄区吃这组数字；offline/busy/degraded/unknown 不涂绿。Inbox 点击带 CAS（首答 revision=0）；空答复进不了 bus。health 走 `peek()` 不打探针。烛先推翻 queued 双计，复扫 DELTA=0。证据见 `claude-to-all__v42-r202-attention__20260818-0940.md`、`D-2026-08-18-005`。
 - **R2-03 受控社会协作**：默认 `pipeline`，不再自动进 socialLoop。只有 `orchestrationMode:"social"` 或 composer `/social` 才社会模拟。agent-to-agent 必须有收件人，且带轮次/预算/深度/乒乓上限。自动化有点名才显式 social。烛先抓住自动化侧门，已收。证据见 `claude-to-all__v42-r203-social-optin__20260818-1335.md`、`D-2026-08-18-006`。
-- **R3-01 Delivery Gate 2.0**：`GET /api/release-record` 合成可审计发布记录；不自动 git；formal-release 只挡 publishable。`operator-attested` 不能开启工程绿灯，`server-observed` 还必须匹配当前提交和干净工作树摘要。环境舱可见「交付门」，live 因未跟踪 must_ship 仍会 blocked（闸门在工作）。证据见 `claude-to-all__v42-r301-delivery-gate__20260818-1550.md`、`codex-to-claude__v42-r301-runner-r2__20260818-2147.md`、`D-2026-08-18-007/011`。
+- **R3-01 Delivery Gate 2.0**：`GET /api/release-record` 合成可审计发布记录；不自动 git；formal-release 只挡 publishable。`operator-attested` 不能开启工程绿灯，`server-observed` 还必须匹配当前提交和干净工作树摘要。环境舱可见「交付门」；Git must-ship 闭包已完成，但正式实例尚未从确定提交执行 runner，live 仍不能涂绿。证据见 `claude-to-all__v42-r301-delivery-gate__20260818-1550.md`、`codex-to-claude__v42-r301-runner-r2__20260818-2147.md`、`D-2026-08-18-007/011/013`。
 - **R3-02 准备交付 / 结算中心**：`GET /api/runs/:id/settlement` 把 worktree、diff 摘要、artifact、恢复收成一条记录。不自动 merge；远程是 `remote-unsupported`。终态卡与环境舱可见「准备交付」。烛通道仍不可用。证据见 `claude-to-all__v42-r302-settlement__20260818-1740.md`、`D-2026-08-18-008`。
 - **R3-03 指标与运营观测**：`GET /api/observability/ops` 合成当前进程低敏摘要。缺失成本/空样本显示「未知」，不当 0。体系观测页可见运营指标卡。证据见 `claude-to-all__v42-r303-ops-metrics__20260818-1755.md`、`D-2026-08-18-009`。R4 仍按进入条件暂缓。项目经理审核包：`claude-to-all__v42-pm-delivery-review__20260818-1805.md`。
 - **v42 PM 独立复审与加固**（烛）：推翻“R0-R3 已完成”的笼统口径，改为源码/契约、聚焦证据、全量证据、Git 交付、正式运行态五层。已补 prompt 审计超时、release command evidence 信任分级与 consistency 硬门、Diff 失败闭锁/路径脱敏、首次就绪旧 evidence/旧 health 拒绝、指标乱序与 path-only evidence 拒绝、远端 adapter 失败缓存、replay 原生稳定 ID、远端 TERM/KILL 回执等待且不再用 `|| true` 抹平失败；Inbox 行内 CAS 与环境舱四档浏览器均通过。证据见 `codex-to-claude__v42-pm-delivery-review-r2__20260818-2002.md`、`D-2026-08-18-010`。
 - **R3-01 server-observed QA runner 加固**：`src/release-command-runner.mjs` 与 `GET/POST /api/release-record/runner(/run)` 保持固定命令目录、无 shell。两轮独立复审先推翻客户端 `sourceCommit` 替代服务端 HEAD、脏工作树可产 passed、选择放大和 runner 脱离关闭图，又推翻“四条 evidence 已能驱动 live releaseTruth”的错误可达性判断。现在每条证据同时绑定当前 `pid + startedAt + generation + HEAD + diffDigest`；live truth 只聚合同一当前实例、同提交/工作树且四类全通过的证据，旧实例/旧 generation 自动失效。空/重复/未知命令、工作树/HEAD/实例变化均 fail-closed；runner 纳入 app close，活动时阻止 reload。源码、聚焦、HTTP 装配、全量、validate 与四视口环境舱已有本地证据，但**未在正式实例对不可变提交真实执行**，R3-01 仍为 `partial`。证据见 `claude-to-all__v42-r301-server-observed-runner__20260818-2115.md`、`codex-to-claude__v42-r301-runner-r2__20260818-2147.md`、`D-2026-08-18-011`。
+- **v42 Git 产品快照闭包**：LO 明确授权后，以显式 pathspec 暂存 Control Center 产品、严格交付 CI、治理真源与 2026-08-18 handoff 链；`.scratch`、运行 token、真实 provider 回包、锁/事件日志、QA 输出、缓存与历史原始材料均未进入提交。产品快照 `2b1892c73a7d38da9ab735cf20bae763a5e4c359` 已推送 `origin/main` 并经 `ls-remote` 回读；`qa:delivery --strict` 为 tracked=379 / physical=379 / pass。此处只完成 Git 层，不构成正式版本发布或运行态激活。证据见 `codex-to-claude__v42-git-delivery-closure__20260818-2351.md`、`D-2026-08-18-013`。
 
 ## 当前风险
 
 - 正式 framework release 仍以真源记录为准；工作记录里的 v3.6/v3.7/v4.0 仅是**未发布功能波次**，不得作为已发布版本传播。`rules.md` 仍为 v3.5.0，但 v4.0 功能（Forge 设计系统、CC-Switch 迁移、团队工作区融合、配置图谱、工具标签栏、终端修复等）已深度落地到 Console。版本升格/正式发布待 LO 决策。
 - 仓库源、用户运行时和正在运行的进程是三个状态面；未做当轮 readback/端到端调用时，不得声称已部署或已激活。
-- 2026-08-18 上午 GitHub 快照曾让 `qa:delivery --strict` 达到 `tracked=345 / physical=345 / pass`。v42 R0-R3 当前扩展后为 `tracked=348 / physical=379 / undeclared=31 / strict fail`（31 = 复审 29 项 + runner 源码/测试 2 项）；这是所有权闸在工作，不是模块测试回归。未获 LO 授权前不 git add，也不等于正式版本升格。
-- `PUT /api/release-record/commands` 是 `operator-attested` 审计申报，不是独立命令执行证据。runner 现在拒绝当前脏工作树，因此发布顺序必须是“31 项显式 Git 闭包形成不可变提交 -> 从该提交 reload 正式实例并读回 -> 执行 runner -> 再读 release record”；不能先 reload 脏实例再把结果归给旧 HEAD。上述危险操作均未获本轮授权，R3-01 保持 `partial`。
+- v42 R0-R3 的 31 项 must-ship 漂移已在产品快照 `2b1892c73a7d38da9ab735cf20bae763a5e4c359` 中闭包并推送；`qa:delivery --strict` 当前为 `tracked=379 / physical=379 / undeclared=0 / pass`。Git 层已交付，但 `formalRelease=false`，不等于版本升格、GitHub Release 或正式实例激活。
+- `PUT /api/release-record/commands` 是 `operator-attested` 审计申报，不是独立命令执行证据。剩余发布顺序是“从已交付提交 reload 正式实例并读回 PID/cwd/generation/sourceCommit -> 执行 runner -> 回读 release record”；正式实例操作、真实 provider/SSH 验收仍需独立授权，R3-01 保持 `partial`。
 - R0-01 只完成已知不安全路径封堵与本地子进程 fixture；真实启用 provider 中文/ASCII 接收回读、真实 SSH UTF-8 echo 均未执行，不得称 Unicode 主路径端到端完成。
 - Console 与治理面持续演进，固定测试总数会迅速腐烂；只记录验证命令和当轮输出，不在本文件固化“全绿 N/N”。
 - Python 校验依赖由 `requirements-validation.txt` 声明；缺少 PyYAML/jsonschema 时必须显式失败，禁止静默退化成仅语法检查。

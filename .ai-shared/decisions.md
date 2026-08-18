@@ -3619,3 +3619,35 @@ __DELTA__: 烛(Codex) | 2 | 证据：`apps/control-center/server.mjs` 原 live r
 - 实现波若发现席位轨让 composer 变钝，按策 T14 裁决回退画布强度，不私自改回铜橙暖纸。
 
 __DELTA__: 主驾 | 2 | 证据：LO 锁定 ink-field + seat-rail；`.ai-shared/handoff/claude-to-all__console-awwwards-ui-lock__20260818-2210.md` 推翻策 ADR-UI-01 与保留标签侧栏。
+
+### D-2026-08-18-013 · v42 Git 产品快照闭包并推送 GitHub
+
+- **date**: 2026-08-18
+- **decider**: LO（明确要求“将现在版本先上传 github”）+ 烛(Codex)交付审计
+- **verdict**: GIT SNAPSHOT DELIVERED / LIVE UNVERIFIED / FORMAL RELEASE NOT PROMOTED
+- **adopted**: true
+- **source_handoff**: `.ai-shared/handoff/codex-to-claude__v42-git-delivery-closure__20260818-2351.md`
+- **tags**: control-center, v42, git-delivery, github, delivery-closure, remote-readback
+
+#### 决定
+
+1. 使用显式 pathspec 构建 v42 产品闭包：Control Center 产品源码/测试/脚本/前端/服务端、`delivery-ownership.json`、严格交付 CI、当前 context/decisions/roadmap 和 2026-08-18 handoff 链。禁止无差别 `git add -A`。
+2. `.scratch`、运行 token、真实 provider 回包、`control-center.lock`、`events.jsonl`、QA 截图/结果、Python 缓存、历史原始重试材料和无内容 diff 的 Cursor 同步漂移全部排除。
+3. 产品快照提交为 `2b1892c73a7d38da9ab735cf20bae763a5e4c359`（`feat(control-center): publish v42 product work snapshot`），已推送到 `origin/main`；`git ls-remote origin refs/heads/main`、本地 HEAD 与 `origin/main` 均读回该 SHA，ahead/behind=`0/0`。
+4. Git 层完成不改变运行态裁决：正式实例尚未从确定提交 reload/readback，server-observed runner 未在正式实例执行，真实 provider 中文/ASCII 与真实 SSH UTF-8/进程树验收未做，正式版本继续是 v3.5.0。
+
+#### 验证
+
+- 提交范围：115 files changed / 9313 insertions / 179 deletions；缓存 diff 无二进制，禁入路径断言通过。
+- `git diff --cached --check` 在提交前通过；高置信密钥扫描仅命中两处明确用于脱敏拒绝的合成测试夹具。
+- `npm run validate`：13/13 valid，CC-Switch commandCount=288；全量测试沿用同一源码树的 1512 tests / 1510 pass / 0 fail / 2 skipped / exit 0。
+- 提交前后 `npm run qa:delivery -- --strict` 均为 tracked=379 / physical=379 / undeclared=0 / strict pass。
+- 推送通道为已配置 `ssh://git@ssh.github.com:443/lanniny/514-Control-Center-.git`；仓库路径与 LO 指定的 `git@github.com:lanniny/514-Control-Center-.git` 相同，直接 22 端口在当前网络被关闭，未静默伪称该地址连通。
+
+#### 边界
+
+- 这是可复现 Git 工作快照，不是 tag、GitHub Release、正式版本升格或生产部署。
+- 工作区仍保留未提交的 `.scratch`、缓存、历史原始材料与 Cursor 同步漂移；它们被有意排除，未删除、未回滚。
+- 下一高影响步骤仍需单独授权：正式实例 reload/readback、正式 runner 执行、真实 provider 与 SSH 验收。
+
+__DELTA__: 烛(Codex) | 1 | 证据：独立敏感残留审计定位 `.scratch/cc-appearance-audit/ccswitch-proxy.json:4` 的运行 token 与多份真实 provider 回包，促使交付使用显式闭包并加入禁入路径断言；`git ls-remote origin refs/heads/main` 完成远端 SHA 回读。

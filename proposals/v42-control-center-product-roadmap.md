@@ -335,7 +335,7 @@ R0-01 Unicode 契约
 
 - `apps/control-center/DESIGN-NOTES.md:40-47`：协作台主路径与既有 roadmap；`DESIGN-NOTES.md:147-157`：socialLoop 与 ask/answer 等待语义仍有历史债。
 - `.ai-shared/context.md` 的 2026-08-18 活跃波次与当前风险：当前交付、运行态、版本和安全边界。
-- `.ai-shared/decisions.md` 的 `D-2026-08-18-002` 至 `D-2026-08-18-011`：R0-R3 决策、独立复审纠错与 DELTA。
+- `.ai-shared/decisions.md` 的 `D-2026-08-18-002` 至 `D-2026-08-18-013`：R0-R3 决策、独立复审纠错、Git 产品闭包与 DELTA。
 - `.ai-shared/handoff/codex-to-claude__comprehensive-console-review__20260817-1645.md`：交付、shutdown、运行态和产品头脑风暴。
 - `.ai-shared/handoff/kimi-to-claude__shutdown-chain-deadline__20260816-1137.md:100-110`：真实 provider 闭环及中文提示词乱码历史证据。
 - `.workflow/ultracode/collab-console-review-20260815/state.json`：workflow 与 packet 已统一收为 `superseded`。
@@ -344,4 +344,4 @@ R0-01 Unicode 契约
 
 ## 16. 当前状态
 
-`IMPLEMENTATION PARTIAL / DELIVERY BLOCKED / LIVE UNVERIFIED`。本文件是项目经理与独立复审后的当前台账，不自动改变 Git、正式实例或外部系统；任何尚未完成真实 readback 的能力都不得描述为已发布或已激活。
+`IMPLEMENTATION PARTIAL / GIT SNAPSHOT DELIVERED / LIVE UNVERIFIED`。产品快照已推送 GitHub，但 `formalRelease=false`；本文件不自动改变正式实例或外部系统，任何尚未完成真实 readback 的能力都不得描述为已发布或已激活。
